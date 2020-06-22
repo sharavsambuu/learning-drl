@@ -28,9 +28,7 @@ for i in range(episodes):
 	state        = env.reset()
 	total_reward = 0
 	done         = False
-	j            = 0
-	while j<99:
-		j = j+1
+	while True:
 		# action буюу үйлдлийг сонгох, гэхдээ тодорхой хэмжээний noise-тойгоор
 		action = np.argmax(Q[state, :]+np.random.randn(1, env.action_space.n)*(1.0/(i+1)))
 		# үйлдэл хийж шинэ төлөв болон reward оноог авах
@@ -41,7 +39,7 @@ for i in range(episodes):
 		total_reward     = total_reward + new_reward
 		state            = new_state
 
-		system("clear")
+		#system("clear")
 		env.render()
 
 		if done == True:
