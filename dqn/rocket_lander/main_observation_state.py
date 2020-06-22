@@ -38,21 +38,20 @@ print(gray_state.shape)
 img = plt.imshow(gray_state, cmap='gray', vmin=0, vmax=255)
 plt.colorbar(img, orientation='horizontal')
 plt.show(block=False)
-#plt.pause(3)
-#plt.close()
 
 for _ in range(1000):
 	action        = env.action_space.sample()
 	new_state, reward, done, _ = env.step(action)
 	state         = env.render(mode='rgb_array')
 	gray_state, _ = process_frame(state, shape=(state.shape[1], state.shape[0]))
+
+	# https://www.scivision.dev/fast-update-matplotlib-plots/
 	img.set_data(gray_state)
-	
-	plt.colorbar(img, orientation='horizontal')
-	plt.show(block=False)
-	#plt.pause(3)
+	plt.draw()
+	plt.pause(1e-3)
+
+	if done==True:
+		break
+
 plt.close("all")
-
-
-
 env.close()
