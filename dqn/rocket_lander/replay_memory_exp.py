@@ -10,16 +10,17 @@ matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 
 
-debug_render  = True
+debug_render    = True
 
-num_episodes  = 1
-global_steps  = 0
+num_episodes    = 100
+global_steps    = 0
 
 desired_shape   = (140, 180)
-temporal_frames = deque(maxlen=4+1)
+temporal_length = 4
+temporal_frames = deque(maxlen=temporal_length+1)
 
-memory_length = 2000
-replay_memory  = deque(maxlen=memory_length)
+memory_length   = 200
+replay_memory   = deque(maxlen=memory_length)
 
 def preprocess_frame(frame, shape=(84, 84)):
 	frame = frame.astype(np.uint8)
@@ -53,10 +54,19 @@ for episode in range(num_episodes):
 
 		new_state    = env.render(mode='rgb_array')
 		new_state, _ = preprocess_frame(new_state, shape=desired_shape)
-		#print(new_state.shape)
+
 		img.set_data(new_state)
 		plt.draw()
-		plt.pause(1e-5)
+		#plt.pause(1e-5)
+
+		temporal_frames.append(new_state)
+		if len(temporal_frames)==5:
+			prev_state = list(temporal_frames)[:temporal_length]
+			next_state = list(temporal_frames)[1:]
+			replay_memory.append((prev_state, action, reward, next_state, done))
+			pass
+
+		print("replay memory length", len(replay_memory))
 
 		if done==True:
 			plt.clf()
