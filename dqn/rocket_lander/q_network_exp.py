@@ -8,6 +8,7 @@ import tkinter
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
+import tensorflow as tf
 
 
 debug_render    = True
@@ -28,6 +29,15 @@ def preprocess_frame(frame, shape=(84, 84)):
 	frame = cv2.resize(frame, shape, interpolation=cv2.INTER_NEAREST)
 	frame_reshaped = frame.reshape((*shape, 1))
 	return frame, frame_reshaped
+
+
+class DeepQNetwork(tf.keras.Model):
+
+	def __init__(self):
+		super(DeepQNetwork, self).__init__()
+
+	def call(self, inputs):
+		return None
 
 
 env = gym.make('RocketLander-v0')
