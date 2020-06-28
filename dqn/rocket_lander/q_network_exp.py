@@ -21,7 +21,7 @@ training_happened = False
 sync_per_step     = 600        # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
 train_count       = 20         # хэдэн удаа сургах вэ
 batch_size        = 32
-desired_shape     = (160, 260) # фрэймыг багасгаж ашиглах хэмжээ
+desired_shape     = (320, 420) # фрэймыг багасгаж ашиглах хэмжээ
 gamma             = 0.99       # discount factor
 
 # exploration vs exploitation
@@ -30,7 +30,7 @@ epsilon_decay     = 0.999
 epsilon_min       = 0.2 #0.01
 
 # replay memory
-temporal_length   = 12          # хичнээн фрэймүүд цуглуулж нэг state болгох вэ
+temporal_length   = 6          # хичнээн фрэймүүд цуглуулж нэг state болгох вэ
 temporal_frames   = deque(maxlen=temporal_length+1)
 memory_length     = 2000 
 replay_memory     = deque(maxlen=memory_length)
@@ -82,7 +82,6 @@ for episode in range(num_episodes):
   state, _ = preprocess_frame(state, shape=desired_shape)
 
   img = plt.imshow(state, cmap='gray', vmin=0, vmax=255)
-  plt.colorbar(img, orientation='horizontal')
   plt.show(block=False)
 
   episode_rewards = [] 
