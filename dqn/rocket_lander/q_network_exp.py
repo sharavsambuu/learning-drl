@@ -83,6 +83,8 @@ for episode in range(num_episodes):
 	plt.colorbar(img, orientation='horizontal')
 	plt.show(block=False)
 
+	episode_rewards = [] 
+
 	while not done:
 		global_steps = global_steps+1
 
@@ -102,12 +104,15 @@ for episode in range(num_episodes):
 					)
 				)
 				q_value = q_network(np.array([state], dtype=np.float32))
+				#print(q_value[0])
 				action  = np.argmax(q_value[0])
-				print("q неорон сүлжээ", action, "үйлдлийг сонголоо")
+				#print("q неорон сүлжээ", action, "үйлдлийг сонголоо")
 		else:
 			action =  env.action_space.sample()
 
 		_, reward, done, _ = env.step(action)
+
+		episode_rewards.append(reward)
 
 		new_state                     = env.render(mode='rgb_array')
 		new_state, new_state_reshaped = preprocess_frame(new_state, shape=desired_shape)
@@ -195,8 +200,11 @@ for episode in range(num_episodes):
 		if done==True:
 			plt.clf()
 			print(episode, "р улирал ажиллаж дууслаа")
+			print("нийт reward   :", sum(episode_rewards))
+			print("дундаж reward :", sum(episode_rewards)/len(episode_rewards))
 			target_q_network.set_weights(q_network.get_weights())
 			print("шинэ сурсан мэдлэгээрээ target q неорон сүлжээг шинэчиллээ")
+
 
 plt.close("all")
 env.close()
