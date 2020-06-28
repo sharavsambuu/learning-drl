@@ -12,11 +12,11 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 
 
-debug_render      = True
+debug_render      = False
 global_steps      = 0
 num_episodes      = 400
 train_start_count = 500        # хичнээн sample цуглуулсны дараа сургаж болох вэ
-train_per_step    = 1500       # хэдэн алхам тутамд сургах вэ
+train_per_step    = 800        # хэдэн алхам тутамд сургах вэ
 training_happened = False
 sync_per_step     = 600        # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
 train_count       = 20         # хэдэн удаа сургах вэ
@@ -81,8 +81,9 @@ for episode in range(num_episodes):
   state    = env.render(mode='rgb_array')
   state, _ = preprocess_frame(state, shape=desired_shape)
 
-  img = plt.imshow(state, cmap='gray', vmin=0, vmax=255)
-  plt.show(block=False)
+  if debug_render:
+    img = plt.imshow(state, cmap='gray', vmin=0, vmax=255)
+    plt.show(block=False)
 
   episode_rewards = [] 
 
@@ -119,9 +120,10 @@ for episode in range(num_episodes):
     new_state                     = env.render(mode='rgb_array')
     new_state, new_state_reshaped = preprocess_frame(new_state, shape=desired_shape)
 
-    img.set_data(new_state)
-    plt.draw()
-    plt.pause(1e-5)
+    if debug_render:
+      img.set_data(new_state)
+      plt.draw()
+      plt.pause(1e-5)
 
     # sample цуглуулах
     temporal_frames.append(new_state_reshaped)
@@ -204,7 +206,8 @@ for episode in range(num_episodes):
     #  print("шинэ сурсан мэдлэгээрээ target q неорон сүлжээг шинэчиллээ")
 
     if done==True:
-      plt.clf()
+      if debug_render:
+        plt.clf()
       print(episode, "р улирал ажиллаж дууслаа")
       print("нийт reward   :", sum(episode_rewards))
       print("дундаж reward :", sum(episode_rewards)/len(episode_rewards))
@@ -212,6 +215,6 @@ for episode in range(num_episodes):
         target_q_network.set_weights(q_network.get_weights())
         print("шинэ сурсан мэдлэгээрээ target q неорон сүлжээг шинэчиллээ")
 
-
-plt.close("all")
+if debug_render:
+  plt.close("all")
 env.close()
