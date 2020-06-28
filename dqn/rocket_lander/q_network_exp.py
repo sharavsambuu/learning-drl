@@ -14,7 +14,7 @@ import tensorflow as tf
 
 debug_render      = True
 global_steps      = 0
-num_episodes      = 2
+num_episodes      = 400
 train_start_count = 100        # хичнээн sample цуглуулсны дараа сургаж болох вэ
 train_per_step    = 100        # хэдэн алхам тутамд сургах вэ
 sync_per_step     = 250        # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
