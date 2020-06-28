@@ -1,3 +1,4 @@
+import random
 from time import sleep
 from collections import deque
 import numpy as np
@@ -11,17 +12,16 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 
 
-debug_render    = True
-
-num_episodes    = 2
-global_steps    = 0
-
-desired_shape   = (140, 220)
-temporal_length = 4
-temporal_frames = deque(maxlen=temporal_length+1)
-
-memory_length   = 200
-replay_memory   = deque(maxlen=memory_length)
+debug_render      = True
+global_steps      = 0
+num_episodes      = 2
+train_start_count = 100       # хичнээн sample цуглуулсны дараа сургаж болох вэ
+batch_size        = 64
+desired_shape     = (140, 220) # фрэймыг багасгаж ашиглах хэмжээ
+temporal_length   = 4
+temporal_frames   = deque(maxlen=temporal_length+1)
+memory_length     = 200
+replay_memory     = deque(maxlen=memory_length)
 
 def preprocess_frame(frame, shape=(84, 84)):
 	frame = frame.astype(np.uint8)
@@ -48,13 +48,16 @@ class DeepQNetwork(tf.keras.Model):
 		maxpool_out2 = self.maxpool_layer2(conv_out2)
 		conv_out3    = self.conv_layer3(maxpool_out2)
 		flatten_out  = self.flatten_layer(conv_out3)
-		return output_layer(flatten_out)
-
+		return self.output_layer(flatten_out)
 
 
 env = gym.make('RocketLander-v0')
 env.reset()
 n_actions = env.action_space.n
+
+
+q_network        = DeepQNetwork(n_actions)
+target_q_network = DeepQNetwork(n_actions)
 
 
 
@@ -83,6 +86,7 @@ for episode in range(num_episodes):
 		plt.draw()
 		plt.pause(1e-5)
 
+		# sample цуглуулах
 		temporal_frames.append(new_state_reshaped)
 		if len(temporal_frames)==5:
 			prev_state = list(temporal_frames)[:temporal_length]
@@ -109,12 +113,15 @@ for episode in range(num_episodes):
 						next_state.shape[-1]
 					)
 				)
-			#print(prev_state.shape, next_state.shape)
-			
 			replay_memory.append((prev_state, action, reward, next_state, done))
 			pass
 
-		#print("replay memory length", len(replay_memory))
+		if (len(replay_memory)>train_start_count):
+			sampled_batch = random.sample(replay_memory, batch_size)
+			q_out = q_network(np.array([sampled_batch[0][0]], dtype=np.float32))
+			print(q_out.shape)
+			#print(sampled_batch[0][0].shape)
+			pass
 
 		if done==True:
 			plt.clf()
