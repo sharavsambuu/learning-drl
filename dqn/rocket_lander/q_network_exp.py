@@ -19,20 +19,20 @@ train_start_count = 500        # хичнээн sample цуглуулсны да
 train_per_step    = 1500       # хэдэн алхам тутамд сургах вэ
 training_happened = False
 sync_per_step     = 600        # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
-train_count       = 10         # хэдэн удаа сургах вэ
-batch_size        = 256
+train_count       = 20         # хэдэн удаа сургах вэ
+batch_size        = 32
 desired_shape     = (160, 260) # фрэймыг багасгаж ашиглах хэмжээ
 gamma             = 0.99       # discount factor
 
 # exploration vs exploitation
 epsilon           = 1.0        
 epsilon_decay     = 0.999
-epsilon_min       = 0.01
+epsilon_min       = 0.2 #0.01
 
 # replay memory
 temporal_length   = 4          # хичнээн фрэймүүд цуглуулж нэг state болгох вэ
 temporal_frames   = deque(maxlen=temporal_length+1)
-memory_length     = 4000      # ойролцоогоор 10GB зай эзлэнэ
+memory_length     = 4000 
 replay_memory     = deque(maxlen=memory_length)
 
 
