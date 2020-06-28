@@ -30,7 +30,7 @@ epsilon_min       = 0.01
 # replay memory
 temporal_length   = 4          # хичнээн фрэймүүд цуглуулж нэг state болгох вэ
 temporal_frames   = deque(maxlen=temporal_length+1)
-memory_length     = 20000
+memory_length     = 6000      # ойролцоогоор 6GB зай эзлэнэ
 replay_memory     = deque(maxlen=memory_length)
 
 
