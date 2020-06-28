@@ -30,9 +30,9 @@ epsilon_decay     = 0.999
 epsilon_min       = 0.2 #0.01
 
 # replay memory
-temporal_length   = 4          # хичнээн фрэймүүд цуглуулж нэг state болгох вэ
+temporal_length   = 12          # хичнээн фрэймүүд цуглуулж нэг state болгох вэ
 temporal_frames   = deque(maxlen=temporal_length+1)
-memory_length     = 4000 
+memory_length     = 2000 
 replay_memory     = deque(maxlen=memory_length)
 
 
@@ -92,7 +92,7 @@ for episode in range(num_episodes):
     #print(global_steps)
 
     # exploration vs exploitation
-    if (len(temporal_frames)==5):
+    if (len(temporal_frames)==temporal_length+1):
       if np.random.rand() <= epsilon:
         action  = env.action_space.sample()
       else:
@@ -125,7 +125,7 @@ for episode in range(num_episodes):
 
     # sample цуглуулах
     temporal_frames.append(new_state_reshaped)
-    if len(temporal_frames)==5:
+    if len(temporal_frames)==temporal_length+1:
       curr_state = list(temporal_frames)[:temporal_length]
       next_state = list(temporal_frames)[1:]
 
