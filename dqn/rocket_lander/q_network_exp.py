@@ -32,16 +32,30 @@ def preprocess_frame(frame, shape=(84, 84)):
 
 
 class DeepQNetwork(tf.keras.Model):
-
-	def __init__(self):
+	def __init__(self, n_actions):
 		super(DeepQNetwork, self).__init__()
-
+		self.conv_layer1    = tf.keras.layers.Conv2D(32,   (8,8), strides=4, activation='relu')
+		self.maxpool_layer1 = tf.keras.layers.MaxPooling2D((2,2), strides=2)
+		self.conv_layer2    = tf.keras.layers.Conv2D(64,   (4,4), strides=1, activation='relu')
+		self.maxpool_layer2 = tf.keras.layers.MaxPooling2D((2,2), strides=2)
+		self.conv_layer3    = tf.keras.layers.Conv2D(1024, (7,7), strides=1, activation='relu')
+		self.flatten_layer  = tf.keras.layers.Flatten()
+		self.output_layer   = tf.keras.layers.Dense(n_actions, activation='softmax')
 	def call(self, inputs):
-		return None
+		conv_out1    = self.conv_layer1(inputs)
+		maxpool_out1 = self.maxpool_layer1(conv_out1)
+		conv_out2    = self.conv_layer2(maxpool_out1)
+		maxpool_out2 = self.maxpool_layer2(conv_out2)
+		conv_out3    = self.conv_layer3(maxpool_out2)
+		flatten_out  = self.flatten_layer(conv_out3)
+		return output_layer(flatten_out)
+
 
 
 env = gym.make('RocketLander-v0')
 env.reset()
+n_actions = env.action_space.n
+
 
 
 for episode in range(num_episodes):
@@ -95,12 +109,12 @@ for episode in range(num_episodes):
 						next_state.shape[-1]
 					)
 				)
-			print(prev_state.shape, next_state.shape)
+			#print(prev_state.shape, next_state.shape)
 			
 			replay_memory.append((prev_state, action, reward, next_state, done))
 			pass
 
-		print("replay memory length", len(replay_memory))
+		#print("replay memory length", len(replay_memory))
 
 		if done==True:
 			plt.clf()

@@ -9,6 +9,7 @@ d2    = np.random.rand(shape[0], shape[1], shape[2])
 print(d1.shape)
 print(d2.shape)
 
+# (2, 140, 220, 4)
 batch = np.array([d1, d2])
 print(batch.shape)
 

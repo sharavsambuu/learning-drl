@@ -6,4 +6,7 @@
 
 # Additional Rocket Lander Gym extension
   git clone https://github.com/Jeetu95/Rocket_Lander_Gym.git
+
+  change CONTINUOUS variable in Rocket_Lander_Gym/rocket_lander_gym/envs/rocket_lander.py to False
+
   cd Rocket_Lander_Gym && pip install .
