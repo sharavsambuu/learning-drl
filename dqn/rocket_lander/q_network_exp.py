@@ -16,6 +16,8 @@ debug_render      = True
 global_steps      = 0
 num_episodes      = 2
 train_start_count = 100        # хичнээн sample цуглуулсны дараа сургаж болох вэ
+train_per_step    = 100        # хэдэн алхам тутамд сургах вэ
+sync_per_step     = 1000       # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
 batch_size        = 64
 desired_shape     = (140, 220) # фрэймыг багасгаж ашиглах хэмжээ
 temporal_length   = 4
@@ -57,6 +59,7 @@ env = gym.make('RocketLander-v0')
 env.reset()
 n_actions = env.action_space.n
 
+optimizer        = tf.keras.optimizers.Adam()
 
 q_network        = DeepQNetwork(n_actions)
 target_q_network = DeepQNetwork(n_actions)
@@ -74,8 +77,10 @@ for episode in range(num_episodes):
 	plt.show(block=False)
 
 	while not done:
-		state    = env.render(mode='rgb_array')
-		state, _ = preprocess_frame(state, shape=desired_shape)
+		global_steps = global_steps+1
+
+		state              = env.render(mode='rgb_array')
+		state, _           = preprocess_frame(state, shape=desired_shape)
 
 		action             = env.action_space.sample()
 		_, reward, done, _ = env.step(action)
@@ -117,7 +122,7 @@ for episode in range(num_episodes):
 			pass
 
 		# хангалттай sample цугларсан тул Q неорон сүлжээнүүдээс сургах
-		if (len(replay_memory)>train_start_count):
+		if (len(replay_memory)>train_start_count) and (global_steps%train_per_step==0):
 			# цугларсан жишээнүүдээсээ эхлээд batch sample-дэж үүсгэх
 			sampled_batch = random.sample(replay_memory, batch_size)
 			state_shape   = sampled_batch[0][0].shape
@@ -138,13 +143,20 @@ for episode in range(num_episodes):
 			q_out        = q_network(q_input).numpy()
 			target_q_out = target_q_network(target_q_input).numpy()
 
+			# bellman q утгыг дөхүүлэхийн тулд сургах batch шинэчлэн тохируулах
 			for i in range(batch_size):
 				if dones[i]:
 					q_out[i][actions[i]] = rewards[i]
 				else:
 					q_out[i][actions[i]] = rewards[i] + gamma*np.amax(target_q_out[i])
 
-			print(target_q_out.shape)
+			# Q неорон сүлжээг сургах
+			with tf.GradientTape() as tape:
+				prediction_q_out = q_network(q_input)
+				loss             = tf.keras.losses.MeanSquaredError()(q_out, prediction_q_out)
+			gradients = tape.gradient(loss, q_network.trainable_variables)
+			optimizer.apply_gradients(zip(gradients, q_network.trainable_variables))
+			print("trained one batch")
 
 
 		if done==True:
