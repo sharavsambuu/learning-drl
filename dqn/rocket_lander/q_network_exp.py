@@ -86,9 +86,6 @@ for episode in range(num_episodes):
 	while not done:
 		global_steps = global_steps+1
 
-		state              = env.render(mode='rgb_array')
-		state, _           = preprocess_frame(state, shape=desired_shape)
-
 		# exploration vs exploitation
 		if (len(temporal_frames)==5):
 			if np.random.rand() <= epsilon:
@@ -105,7 +102,7 @@ for episode in range(num_episodes):
 					)
 				)
 				q_value = q_network(np.array([state], dtype=np.float32))
-				action  =  np.argmax(q_value[0])
+				action  = np.argmax(q_value[0])
 				print("q неорон сүлжээ", action, "үйлдлийг сонголоо")
 		else:
 			action =  env.action_space.sample()
@@ -122,18 +119,18 @@ for episode in range(num_episodes):
 		# sample цуглуулах
 		temporal_frames.append(new_state_reshaped)
 		if len(temporal_frames)==5:
-			prev_state = list(temporal_frames)[:temporal_length]
+			curr_state = list(temporal_frames)[:temporal_length]
 			next_state = list(temporal_frames)[1:]
 
 			# дараалсан фрэймүүдийг нэгтгээд нэг тензор болгох
 			# неорон модельрүү чихэхэд амар, тензорын дүрс нь (өндөр, өргөн, фрэймийн тоо)
-			prev_state = np.stack(prev_state, axis=-1)
-			prev_state = np.reshape(
-					prev_state, 
+			curr_state = np.stack(curr_state, axis=-1)
+			curr_state = np.reshape(
+					curr_state, 
 					(
-						prev_state.shape[ 0], 
-						prev_state.shape[ 1], 
-						prev_state.shape[-1]
+						curr_state.shape[ 0], 
+						curr_state.shape[ 1], 
+						curr_state.shape[-1]
 					)
 				)
 			next_state = np.stack(next_state, axis=-1)
@@ -145,7 +142,7 @@ for episode in range(num_episodes):
 						next_state.shape[-1]
 					)
 				)
-			replay_memory.append((prev_state, action, reward, next_state, done))
+			replay_memory.append((curr_state, action, reward, next_state, done))
 
 			# explore хийх epsilon утга шинэчлэх
 			if epsilon>epsilon_min:
@@ -166,7 +163,7 @@ for episode in range(num_episodes):
 			dones          = []
 
 			for i in range(batch_size):
-				q_input       [i] = sampled_batch[i][0] # prev_state
+				q_input       [i] = sampled_batch[i][0] # curr_state
 				target_q_input[i] = sampled_batch[i][3] # next_state
 				actions.append(sampled_batch[i][1])     # action
 				rewards.append(sampled_batch[i][2])     # reward
