@@ -16,9 +16,9 @@ debug_render      = True
 global_steps      = 0
 num_episodes      = 400
 train_start_count = 100        # хичнээн sample цуглуулсны дараа сургаж болох вэ
-train_per_step    = 100        # хэдэн алхам тутамд сургах вэ
+train_per_step    = 50         # хэдэн алхам тутамд сургах вэ
 sync_per_step     = 250        # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
-batch_size        = 64
+batch_size        = 16
 desired_shape     = (140, 220) # фрэймыг багасгаж ашиглах хэмжээ
 gamma             = 0.99       # discount factor
 
@@ -30,7 +30,7 @@ epsilon_min       = 0.01
 # replay memory
 temporal_length   = 4          # хичнээн фрэймүүд цуглуулж нэг state болгох вэ
 temporal_frames   = deque(maxlen=temporal_length+1)
-memory_length     = 200
+memory_length     = 20000
 replay_memory     = deque(maxlen=memory_length)
 
 
@@ -191,13 +191,15 @@ for episode in range(num_episodes):
 			print("нэг batch сургалаа")
 
 		# target q неорон сүлжээг шинэчлэх цаг боллоо
-		if global_steps%sync_per_step==0:
-			target_q_network.set_weights(q_network.get_weights())
-			print("шинэ сурсан мэдлэгээрээ target q неорон сүлжээг шинэчиллээ")
+		#if global_steps%sync_per_step==0:
+		#	target_q_network.set_weights(q_network.get_weights())
+		#	print("шинэ сурсан мэдлэгээрээ target q неорон сүлжээг шинэчиллээ")
 
 		if done==True:
 			plt.clf()
 			print(episode, "р улирал ажиллаж дууслаа")
+			target_q_network.set_weights(q_network.get_weights())
+			print("шинэ сурсан мэдлэгээрээ target q неорон сүлжээг шинэчиллээ")
 
 plt.close("all")
 env.close()
