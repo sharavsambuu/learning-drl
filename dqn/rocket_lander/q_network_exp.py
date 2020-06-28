@@ -27,10 +27,10 @@ gamma             = 0.99       # discount factor
 # exploration vs exploitation
 epsilon           = 1.0        
 epsilon_decay     = 0.999
-epsilon_min       = 0.2 #0.01
+epsilon_min       = 0.13
 
 # replay memory
-temporal_length   = 6          # хичнээн фрэймүүд цуглуулж нэг state болгох вэ
+temporal_length   = 4          # хичнээн фрэймүүд цуглуулж нэг state болгох вэ
 temporal_frames   = deque(maxlen=temporal_length+1)
 memory_length     = 2000 
 replay_memory     = deque(maxlen=memory_length)
@@ -66,7 +66,7 @@ class DeepQNetwork(tf.keras.Model):
 
 env = gym.make('RocketLander-v0')
 env.reset()
-n_actions = env.action_space.n
+n_actions        = env.action_space.n
 
 optimizer        = tf.keras.optimizers.Adam()
 
@@ -106,8 +106,9 @@ for episode in range(num_episodes):
           )
         )
         q_value = q_network(np.array([state], dtype=np.float32))
+        print(q_value)
         action  = np.argmax(q_value[0])
-        #print("q неорон сүлжээ", action, "үйлдлийг сонголоо")
+        print("q неорон сүлжээ", action, "үйлдлийг сонголоо")
     else:
       action =  env.action_space.sample()
 
@@ -198,15 +199,18 @@ for episode in range(num_episodes):
       print("Q сүлжээг сургаж дууслаа")
 
     # target q неорон сүлжээг шинэчлэх цаг боллоо
-    if global_steps%sync_per_step==0 and training_happened==True:
-      target_q_network.set_weights(q_network.get_weights())
-      print("шинэ сурсан мэдлэгээрээ target q неорон сүлжээг шинэчиллээ")
+    #if global_steps%sync_per_step==0 and training_happened==True:
+    #  target_q_network.set_weights(q_network.get_weights())
+    #  print("шинэ сурсан мэдлэгээрээ target q неорон сүлжээг шинэчиллээ")
 
     if done==True:
       plt.clf()
       print(episode, "р улирал ажиллаж дууслаа")
       print("нийт reward   :", sum(episode_rewards))
       print("дундаж reward :", sum(episode_rewards)/len(episode_rewards))
+      if training_happened==True:
+        target_q_network.set_weights(q_network.get_weights())
+        print("шинэ сурсан мэдлэгээрээ target q неорон сүлжээг шинэчиллээ")
 
 
 plt.close("all")
