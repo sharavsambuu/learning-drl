@@ -15,12 +15,13 @@ import tensorflow as tf
 debug_render      = True
 global_steps      = 0
 num_episodes      = 400
-train_start_count = 100        # хичнээн sample цуглуулсны дараа сургаж болох вэ
-train_per_step    = 500        # хэдэн алхам тутамд сургах вэ
+train_start_count = 500        # хичнээн sample цуглуулсны дараа сургаж болох вэ
+train_per_step    = 1500       # хэдэн алхам тутамд сургах вэ
+training_happened = False
 sync_per_step     = 600        # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
 train_count       = 10         # хэдэн удаа сургах вэ
-batch_size        = 64
-desired_shape     = (140, 220) # фрэймыг багасгаж ашиглах хэмжээ
+batch_size        = 256
+desired_shape     = (160, 260) # фрэймыг багасгаж ашиглах хэмжээ
 gamma             = 0.99       # discount factor
 
 # exploration vs exploitation
@@ -31,7 +32,7 @@ epsilon_min       = 0.01
 # replay memory
 temporal_length   = 4          # хичнээн фрэймүүд цуглуулж нэг state болгох вэ
 temporal_frames   = deque(maxlen=temporal_length+1)
-memory_length     = 6000       # ойролцоогоор 6GB зай эзлэнэ
+memory_length     = 4000      # ойролцоогоор 10GB зай эзлэнэ
 replay_memory     = deque(maxlen=memory_length)
 
 
@@ -80,7 +81,7 @@ for episode in range(num_episodes):
 	state    = env.render(mode='rgb_array')
 	state, _ = preprocess_frame(state, shape=desired_shape)
 
-	img               = plt.imshow(state, cmap='gray', vmin=0, vmax=255)
+	img = plt.imshow(state, cmap='gray', vmin=0, vmax=255)
 	plt.colorbar(img, orientation='horizontal')
 	plt.show(block=False)
 
@@ -95,7 +96,7 @@ for episode in range(num_episodes):
 			if np.random.rand() <= epsilon:
 				action  = env.action_space.sample()
 			else:
-				state = list(temporal_frames)[:temporal_length]
+				state = list(temporal_frames)[1:]
 				state = np.stack(state, axis=-1)
 				state = np.reshape(
 					state, 
@@ -194,10 +195,11 @@ for episode in range(num_episodes):
 					loss             = tf.keras.losses.MeanSquaredError()(q_out, prediction_q_out)/2
 				gradients = tape.gradient(loss, q_network.trainable_variables)
 				optimizer.apply_gradients(zip(gradients, q_network.trainable_variables))
+			training_happened = True
 			print("Q сүлжээг сургаж дууслаа")
 
 		# target q неорон сүлжээг шинэчлэх цаг боллоо
-		if global_steps%sync_per_step==0:
+		if global_steps%sync_per_step==0 and training_happened==True:
 			target_q_network.set_weights(q_network.get_weights())
 			print("шинэ сурсан мэдлэгээрээ target q неорон сүлжээг шинэчиллээ")
 
@@ -206,9 +208,6 @@ for episode in range(num_episodes):
 			print(episode, "р улирал ажиллаж дууслаа")
 			print("нийт reward   :", sum(episode_rewards))
 			print("дундаж reward :", sum(episode_rewards)/len(episode_rewards))
-			#if global_steps>train_per_step:
-			#	target_q_network.set_weights(q_network.get_weights())
-			#	print("шинэ сурсан мэдлэгээрээ target q неорон сүлжээг шинэчиллээ")
 
 
 plt.close("all")
