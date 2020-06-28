@@ -23,6 +23,8 @@ temporal_frames   = deque(maxlen=temporal_length+1)
 memory_length     = 200
 replay_memory     = deque(maxlen=memory_length)
 
+gamma             = 0.99       # discount factor
+
 def preprocess_frame(frame, shape=(84, 84)):
 	frame = frame.astype(np.uint8)
 	frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
@@ -127,17 +129,23 @@ for episode in range(num_episodes):
 			dones          = []
 
 			for i in range(batch_size):
-				q_input       [i] = sampled_batch[i][0]
-				target_q_input[i] = sampled_batch[i][3]
-				actions.append(sampled_batch[i][1])
-				rewards.append(sampled_batch[i][2])
-				dones  .append(sampled_batch[i][4])
+				q_input       [i] = sampled_batch[i][0] # prev_state
+				target_q_input[i] = sampled_batch[i][3] # next_state
+				actions.append(sampled_batch[i][1])     # action
+				rewards.append(sampled_batch[i][2])     # reward
+				dones  .append(sampled_batch[i][4])     # is done
 			
-			q_out        = q_network(q_input)
-			target_q_out = target_q_network(target_q_input)
-			print(q_out.shape)
+			q_out        = q_network(q_input).numpy()
+			target_q_out = target_q_network(target_q_input).numpy()
+
+			for i in range(batch_size):
+				if dones[i]:
+					q_out[i][actions[i]] = rewards[i]
+				else:
+					q_out[i][actions[i]] = rewards[i] + gamma*np.amax(target_q_out[i])
+
 			print(target_q_out.shape)
-			pass
+
 
 		if done==True:
 			plt.clf()
