@@ -17,15 +17,22 @@ global_steps      = 0
 num_episodes      = 2
 train_start_count = 100        # хичнээн sample цуглуулсны дараа сургаж болох вэ
 train_per_step    = 100        # хэдэн алхам тутамд сургах вэ
-sync_per_step     = 200        # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
+sync_per_step     = 250        # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
 batch_size        = 64
 desired_shape     = (140, 220) # фрэймыг багасгаж ашиглах хэмжээ
-temporal_length   = 4
+gamma             = 0.99       # discount factor
+
+# exploration vs exploitation
+epsilon           = 1.0        
+epsilon_decay     = 0.999
+epsilon_min       = 0.01
+
+# replay memory
+temporal_length   = 4          # хичнээн фрэймүүд цуглуулж нэг state болгох вэ
 temporal_frames   = deque(maxlen=temporal_length+1)
 memory_length     = 200
 replay_memory     = deque(maxlen=memory_length)
 
-gamma             = 0.99       # discount factor
 
 def preprocess_frame(frame, shape=(84, 84)):
 	frame = frame.astype(np.uint8)
@@ -67,7 +74,7 @@ target_q_network = DeepQNetwork(n_actions)
 
 for episode in range(num_episodes):
 	env.reset()
-	print(episode, "is running...")
+	print(episode, "р улирал эхэллээ...")
 	done     = False
 	state    = env.render(mode='rgb_array')
 	state, _ = preprocess_frame(state, shape=desired_shape)
@@ -82,7 +89,27 @@ for episode in range(num_episodes):
 		state              = env.render(mode='rgb_array')
 		state, _           = preprocess_frame(state, shape=desired_shape)
 
-		action             = env.action_space.sample()
+		# exploration vs exploitation
+		if (len(temporal_frames)==5):
+			if np.random.rand() <= epsilon:
+				action  = env.action_space.sample()
+			else:
+				state = list(temporal_frames)[:temporal_length]
+				state = np.stack(state, axis=-1)
+				state = np.reshape(
+					state, 
+					(
+						state.shape[ 0], 
+						state.shape[ 1], 
+						state.shape[-1]
+					)
+				)
+				q_value = q_network(np.array([state], dtype=np.float32))
+				action  =  np.argmax(q_value[0])
+				print("q неорон сүлжээ", action, "үйлдлийг сонголоо")
+		else:
+			action =  env.action_space.sample()
+
 		_, reward, done, _ = env.step(action)
 
 		new_state                     = env.render(mode='rgb_array')
@@ -119,6 +146,11 @@ for episode in range(num_episodes):
 					)
 				)
 			replay_memory.append((prev_state, action, reward, next_state, done))
+
+			# explore хийх epsilon утга шинэчлэх
+			if epsilon>epsilon_min:
+				epsilon = epsilon*epsilon_decay
+
 			pass
 
 		# хангалттай sample цугларсан тул Q неорон сүлжээнүүдээ сургах
@@ -153,19 +185,19 @@ for episode in range(num_episodes):
 			# Q неорон сүлжээг сургах
 			with tf.GradientTape() as tape:
 				prediction_q_out = q_network(q_input)
-				loss             = tf.keras.losses.MeanSquaredError()(q_out, prediction_q_out)
+				loss             = tf.keras.losses.MeanSquaredError()(q_out, prediction_q_out)/2
 			gradients = tape.gradient(loss, q_network.trainable_variables)
 			optimizer.apply_gradients(zip(gradients, q_network.trainable_variables))
-			print("trained one batch")
+			print("нэг batch сургалаа")
 
 		# target q неорон сүлжээг шинэчлэх цаг боллоо
 		if global_steps%sync_per_step==0:
 			target_q_network.set_weights(q_network.get_weights())
-			print("synced target q network with training q network")
+			print("шинэ сурсан мэдлэгээрээ target q неорон сүлжээг шинэчиллээ")
 
 		if done==True:
 			plt.clf()
-			print(episode, "is done.")
+			print(episode, "р улирал ажиллаж дууслаа")
 
 plt.close("all")
 env.close()
