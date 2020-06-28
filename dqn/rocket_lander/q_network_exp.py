@@ -15,7 +15,7 @@ import tensorflow as tf
 debug_render      = True
 global_steps      = 0
 num_episodes      = 2
-train_start_count = 100       # хичнээн sample цуглуулсны дараа сургаж болох вэ
+train_start_count = 100        # хичнээн sample цуглуулсны дараа сургаж болох вэ
 batch_size        = 64
 desired_shape     = (140, 220) # фрэймыг багасгаж ашиглах хэмжээ
 temporal_length   = 4
@@ -60,7 +60,6 @@ q_network        = DeepQNetwork(n_actions)
 target_q_network = DeepQNetwork(n_actions)
 
 
-
 for episode in range(num_episodes):
 	env.reset()
 	print(episode, "is running...")
@@ -92,9 +91,8 @@ for episode in range(num_episodes):
 			prev_state = list(temporal_frames)[:temporal_length]
 			next_state = list(temporal_frames)[1:]
 
-			# Дараалсан фрэймүүдийг нэгтгээд нэг тензор болгох. 
-			# Неорон модельрүү чихэхэд амар 
-			# Тензорын дүрс нь (өндөр, өргөн, фрэймийн тоо)
+			# дараалсан фрэймүүдийг нэгтгээд нэг тензор болгох
+			# неорон модельрүү чихэхэд амар, тензорын дүрс нь (өндөр, өргөн, фрэймийн тоо)
 			prev_state = np.stack(prev_state, axis=-1)
 			prev_state = np.reshape(
 					prev_state, 
@@ -116,11 +114,29 @@ for episode in range(num_episodes):
 			replay_memory.append((prev_state, action, reward, next_state, done))
 			pass
 
+		# хангалттай sample цугларсан тул Q неорон сүлжээнүүдээс сургах
 		if (len(replay_memory)>train_start_count):
+			# цугларсан жишээнүүдээсээ эхлээд batch sample-дэж үүсгэх
 			sampled_batch = random.sample(replay_memory, batch_size)
-			q_out = q_network(np.array([sampled_batch[0][0]], dtype=np.float32))
+			state_shape   = sampled_batch[0][0].shape
+
+			q_input        = np.zeros((batch_size, state_shape[0], state_shape[1], state_shape[2]), dtype=np.float32)
+			target_q_input = np.zeros((batch_size, state_shape[0], state_shape[1], state_shape[2]), dtype=np.float32)
+			actions        = []
+			rewards        = []
+			dones          = []
+
+			for i in range(batch_size):
+				q_input       [i] = sampled_batch[i][0]
+				target_q_input[i] = sampled_batch[i][3]
+				actions.append(sampled_batch[i][1])
+				rewards.append(sampled_batch[i][2])
+				dones  .append(sampled_batch[i][4])
+			
+			q_out        = q_network(q_input)
+			target_q_out = target_q_network(target_q_input)
 			print(q_out.shape)
-			#print(sampled_batch[0][0].shape)
+			print(target_q_out.shape)
 			pass
 
 		if done==True:
