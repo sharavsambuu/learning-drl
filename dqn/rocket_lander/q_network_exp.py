@@ -17,7 +17,7 @@ global_steps      = 0
 num_episodes      = 2
 train_start_count = 100        # хичнээн sample цуглуулсны дараа сургаж болох вэ
 train_per_step    = 100        # хэдэн алхам тутамд сургах вэ
-sync_per_step     = 1000       # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
+sync_per_step     = 200        # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
 batch_size        = 64
 desired_shape     = (140, 220) # фрэймыг багасгаж ашиглах хэмжээ
 temporal_length   = 4
@@ -121,7 +121,7 @@ for episode in range(num_episodes):
 			replay_memory.append((prev_state, action, reward, next_state, done))
 			pass
 
-		# хангалттай sample цугларсан тул Q неорон сүлжээнүүдээс сургах
+		# хангалттай sample цугларсан тул Q неорон сүлжээнүүдээ сургах
 		if (len(replay_memory)>train_start_count) and (global_steps%train_per_step==0):
 			# цугларсан жишээнүүдээсээ эхлээд batch sample-дэж үүсгэх
 			sampled_batch = random.sample(replay_memory, batch_size)
@@ -158,6 +158,10 @@ for episode in range(num_episodes):
 			optimizer.apply_gradients(zip(gradients, q_network.trainable_variables))
 			print("trained one batch")
 
+		# target q неорон сүлжээг шинэчлэх цаг боллоо
+		if global_steps%sync_per_step==0:
+			target_q_network.set_weights(q_network.get_weights())
+			print("synced target q network with training q network")
 
 		if done==True:
 			plt.clf()
