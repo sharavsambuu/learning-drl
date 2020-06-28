@@ -53,7 +53,7 @@ class DeepQNetwork(tf.keras.Model):
     self.maxpool_layer2 = tf.keras.layers.MaxPooling2D((2,2), strides=2)
     self.conv_layer3    = tf.keras.layers.Conv2D(1024, (7,7), strides=1, activation='relu')
     self.flatten_layer  = tf.keras.layers.Flatten()
-    self.output_layer   = tf.keras.layers.Dense(n_actions, activation='softmax')
+    self.output_layer   = tf.keras.layers.Dense(n_actions)
   def call(self, inputs):
     conv_out1    = self.conv_layer1(inputs)
     maxpool_out1 = self.maxpool_layer1(conv_out1)
