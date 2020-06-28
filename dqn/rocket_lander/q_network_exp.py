@@ -1,3 +1,4 @@
+import os
 import random
 from time import sleep
 from collections import deque
@@ -16,13 +17,14 @@ debug_render      = False
 global_steps      = 0
 num_episodes      = 400
 train_start_count = 500        # хичнээн sample цуглуулсны дараа сургаж болох вэ
-train_per_step    = 800        # хэдэн алхам тутамд сургах вэ
+train_per_step    = 100        # хэдэн алхам тутамд сургах вэ
+save_per_step     = 1000       # хэдэн алхам тутамд сургасан моделийг хадгалах вэ
 training_happened = False
 sync_per_step     = 600        # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
-train_count       = 20         # хэдэн удаа сургах вэ
-batch_size        = 32
+train_count       = 1          # хэдэн удаа сургах вэ
+batch_size        = 64
 desired_shape     = (320, 420) # фрэймыг багасгаж ашиглах хэмжээ
-gamma             = 0.99       # discount factor
+gamma             = 0.85       # discount factor
 
 # exploration vs exploitation
 epsilon           = 1.0        
@@ -32,7 +34,7 @@ epsilon_min       = 0.13
 # replay memory
 temporal_length   = 4          # хичнээн фрэймүүд цуглуулж нэг state болгох вэ
 temporal_frames   = deque(maxlen=temporal_length+1)
-memory_length     = 2000 
+memory_length     = 4000 
 replay_memory     = deque(maxlen=memory_length)
 
 
@@ -73,10 +75,16 @@ optimizer        = tf.keras.optimizers.Adam()
 q_network        = DeepQNetwork(n_actions)
 target_q_network = DeepQNetwork(n_actions)
 
+if not os.path.exists("model_weights"):
+  os.makedirs("model_weights")
+if os.path.exists('model_weights/dqn'):
+  q_network = tf.keras.models.load_model("model_weights/dqn")
+  print("өмнөх сургасан dqn моделийг ачааллаа")
+
 
 for episode in range(num_episodes):
   env.reset()
-  print(episode, "р улирал эхэллээ...")
+  print(episode, "р ажиллагаа эхэллээ")
   done     = False
   state    = env.render(mode='rgb_array')
   state, _ = preprocess_frame(state, shape=desired_shape)
@@ -107,9 +115,9 @@ for episode in range(num_episodes):
           )
         )
         q_value = q_network(np.array([state], dtype=np.float32))
-        print(q_value)
+        #print(q_value)
         action  = np.argmax(q_value[0])
-        print("q неорон сүлжээ", action, "үйлдлийг сонголоо")
+        #print("Q неорон сүлжээ", action, "үйлдлийг сонголоо")
     else:
       action =  env.action_space.sample()
 
@@ -163,7 +171,7 @@ for episode in range(num_episodes):
     if (len(replay_memory)>train_start_count) and (global_steps%train_per_step==0):
       print("Q сүлжээг сургаж байна түр хүлээгээрэй")
       for train_step in range(train_count):
-        print(train_step, "р batch")
+        #print(train_step, "р batch")
         # цугларсан жишээнүүдээсээ эхлээд batch sample-дэж үүсгэх
         sampled_batch = random.sample(replay_memory, batch_size)
         state_shape   = sampled_batch[0][0].shape
@@ -204,11 +212,14 @@ for episode in range(num_episodes):
     #if global_steps%sync_per_step==0 and training_happened==True:
     #  target_q_network.set_weights(q_network.get_weights())
     #  print("шинэ сурсан мэдлэгээрээ target q неорон сүлжээг шинэчиллээ")
+    if global_steps%save_per_step==0 and training_happened==True:
+      q_network.save("model_weights/dqn")
+      print("моделийг model_weights/dqn фолдерт хадгаллаа")
 
     if done==True:
       if debug_render:
         plt.clf()
-      print(episode, "р улирал ажиллаж дууслаа")
+      print(episode, "р ажиллагаа дууслаа")
       print("нийт reward   :", sum(episode_rewards))
       print("дундаж reward :", sum(episode_rewards)/len(episode_rewards))
       if training_happened==True:

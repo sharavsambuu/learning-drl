@@ -139,3 +139,4 @@ cython_debug/
 
 
 Rocket_Lander_Gym/
+dqn/rocket_lander/model_weights/
