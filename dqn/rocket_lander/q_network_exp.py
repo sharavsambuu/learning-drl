@@ -16,9 +16,10 @@ debug_render      = True
 global_steps      = 0
 num_episodes      = 400
 train_start_count = 100        # хичнээн sample цуглуулсны дараа сургаж болох вэ
-train_per_step    = 50         # хэдэн алхам тутамд сургах вэ
-sync_per_step     = 250        # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
-batch_size        = 16
+train_per_step    = 500        # хэдэн алхам тутамд сургах вэ
+sync_per_step     = 600        # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
+train_count       = 10         # хэдэн удаа сургах вэ
+batch_size        = 64
 desired_shape     = (140, 220) # фрэймыг багасгаж ашиглах хэмжээ
 gamma             = 0.99       # discount factor
 
@@ -30,7 +31,7 @@ epsilon_min       = 0.01
 # replay memory
 temporal_length   = 4          # хичнээн фрэймүүд цуглуулж нэг state болгох вэ
 temporal_frames   = deque(maxlen=temporal_length+1)
-memory_length     = 6000      # ойролцоогоор 6GB зай эзлэнэ
+memory_length     = 6000       # ойролцоогоор 6GB зай эзлэнэ
 replay_memory     = deque(maxlen=memory_length)
 
 
@@ -87,6 +88,7 @@ for episode in range(num_episodes):
 
 	while not done:
 		global_steps = global_steps+1
+		#print(global_steps)
 
 		# exploration vs exploitation
 		if (len(temporal_frames)==5):
@@ -104,7 +106,6 @@ for episode in range(num_episodes):
 					)
 				)
 				q_value = q_network(np.array([state], dtype=np.float32))
-				#print(q_value[0])
 				action  = np.argmax(q_value[0])
 				#print("q неорон сүлжээ", action, "үйлдлийг сонголоо")
 		else:
@@ -157,53 +158,57 @@ for episode in range(num_episodes):
 
 		# хангалттай sample цугларсан тул Q неорон сүлжээнүүдээ сургах
 		if (len(replay_memory)>train_start_count) and (global_steps%train_per_step==0):
-			# цугларсан жишээнүүдээсээ эхлээд batch sample-дэж үүсгэх
-			sampled_batch = random.sample(replay_memory, batch_size)
-			state_shape   = sampled_batch[0][0].shape
+			print("Q сүлжээг сургаж байна түр хүлээгээрэй")
+			for train_step in range(train_count):
+				print(train_step, "р batch")
+				# цугларсан жишээнүүдээсээ эхлээд batch sample-дэж үүсгэх
+				sampled_batch = random.sample(replay_memory, batch_size)
+				state_shape   = sampled_batch[0][0].shape
 
-			q_input        = np.zeros((batch_size, state_shape[0], state_shape[1], state_shape[2]), dtype=np.float32)
-			target_q_input = np.zeros((batch_size, state_shape[0], state_shape[1], state_shape[2]), dtype=np.float32)
-			actions        = []
-			rewards        = []
-			dones          = []
+				q_input        = np.zeros((batch_size, state_shape[0], state_shape[1], state_shape[2]), dtype=np.float32)
+				target_q_input = np.zeros((batch_size, state_shape[0], state_shape[1], state_shape[2]), dtype=np.float32)
+				actions        = []
+				rewards        = []
+				dones          = []
 
-			for i in range(batch_size):
-				q_input       [i] = sampled_batch[i][0] # curr_state
-				target_q_input[i] = sampled_batch[i][3] # next_state
-				actions.append(sampled_batch[i][1])     # action
-				rewards.append(sampled_batch[i][2])     # reward
-				dones  .append(sampled_batch[i][4])     # is done
+				for i in range(batch_size):
+					q_input       [i] = sampled_batch[i][0] # curr_state
+					target_q_input[i] = sampled_batch[i][3] # next_state
+					actions.append(sampled_batch[i][1])     # action
+					rewards.append(sampled_batch[i][2])     # reward
+					dones  .append(sampled_batch[i][4])     # is done
 			
-			q_out        = q_network(q_input).numpy()
-			target_q_out = target_q_network(target_q_input).numpy()
+				q_out        = q_network(q_input).numpy()
+				target_q_out = target_q_network(target_q_input).numpy()
 
-			# bellman q утгыг дөхүүлэхийн тулд сургах batch шинэчлэн тохируулах
-			for i in range(batch_size):
-				if dones[i]:
-					q_out[i][actions[i]] = rewards[i]
-				else:
-					q_out[i][actions[i]] = rewards[i] + gamma*np.amax(target_q_out[i])
+				# bellman q утгыг дөхүүлэхийн тулд сургах batch шинэчлэн тохируулах
+				for i in range(batch_size):
+					if dones[i]:
+						q_out[i][actions[i]] = rewards[i]
+					else:
+						q_out[i][actions[i]] = rewards[i] + gamma*np.amax(target_q_out[i])
 
-			# Q неорон сүлжээг сургах
-			with tf.GradientTape() as tape:
-				prediction_q_out = q_network(q_input)
-				loss             = tf.keras.losses.MeanSquaredError()(q_out, prediction_q_out)/2
-			gradients = tape.gradient(loss, q_network.trainable_variables)
-			optimizer.apply_gradients(zip(gradients, q_network.trainable_variables))
-			print("нэг batch сургалаа")
+				# Q неорон сүлжээг сургах
+				with tf.GradientTape() as tape:
+					prediction_q_out = q_network(q_input)
+					loss             = tf.keras.losses.MeanSquaredError()(q_out, prediction_q_out)/2
+				gradients = tape.gradient(loss, q_network.trainable_variables)
+				optimizer.apply_gradients(zip(gradients, q_network.trainable_variables))
+			print("Q сүлжээг сургаж дууслаа")
 
 		# target q неорон сүлжээг шинэчлэх цаг боллоо
-		#if global_steps%sync_per_step==0:
-		#	target_q_network.set_weights(q_network.get_weights())
-		#	print("шинэ сурсан мэдлэгээрээ target q неорон сүлжээг шинэчиллээ")
+		if global_steps%sync_per_step==0:
+			target_q_network.set_weights(q_network.get_weights())
+			print("шинэ сурсан мэдлэгээрээ target q неорон сүлжээг шинэчиллээ")
 
 		if done==True:
 			plt.clf()
 			print(episode, "р улирал ажиллаж дууслаа")
 			print("нийт reward   :", sum(episode_rewards))
 			print("дундаж reward :", sum(episode_rewards)/len(episode_rewards))
-			target_q_network.set_weights(q_network.get_weights())
-			print("шинэ сурсан мэдлэгээрээ target q неорон сүлжээг шинэчиллээ")
+			#if global_steps>train_per_step:
+			#	target_q_network.set_weights(q_network.get_weights())
+			#	print("шинэ сурсан мэдлэгээрээ target q неорон сүлжээг шинэчиллээ")
 
 
 plt.close("all")
