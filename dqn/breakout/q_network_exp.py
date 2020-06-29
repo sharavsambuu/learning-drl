@@ -15,7 +15,7 @@ import tensorflow as tf
 
 debug_render      = False
 global_steps      = 0
-num_episodes      = 2000
+num_episodes      = 20000
 train_start_count = 500        # хичнээн sample цуглуулсны дараа сургаж болох вэ
 train_per_step    = 100        # хэдэн алхам тутамд сургах вэ
 save_per_step     = 1000       # хэдэн алхам тутамд сургасан моделийг хадгалах вэ
@@ -23,7 +23,7 @@ training_happened = False
 sync_per_step     = 600        # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
 train_count       = 1          # хэдэн удаа сургах вэ
 batch_size        = 64
-desired_shape     = (320, 420) # фрэймыг багасгаж ашиглах хэмжээ
+desired_shape     = (84, 84)    # фрэймыг багасгаж ашиглах хэмжээ
 gamma             = 0.85       # discount factor
 
 # exploration vs exploitation
@@ -34,7 +34,7 @@ epsilon_min       = 0.13
 # replay memory
 temporal_length   = 4          # хичнээн фрэймүүд цуглуулж нэг state болгох вэ
 temporal_frames   = deque(maxlen=temporal_length+1)
-memory_length     = 4000 
+memory_length     = 1000
 replay_memory     = deque(maxlen=memory_length)
 
 
@@ -49,24 +49,22 @@ def preprocess_frame(frame, shape=(84, 84)):
 class DeepQNetwork(tf.keras.Model):
   def __init__(self, n_actions):
     super(DeepQNetwork, self).__init__()
-    self.conv_layer1    = tf.keras.layers.Conv2D(32,   (8,8), strides=4, activation='relu')
-    self.maxpool_layer1 = tf.keras.layers.MaxPooling2D((2,2), strides=2)
-    self.conv_layer2    = tf.keras.layers.Conv2D(64,   (4,4), strides=1, activation='relu')
-    self.maxpool_layer2 = tf.keras.layers.MaxPooling2D((2,2), strides=2)
-    self.conv_layer3    = tf.keras.layers.Conv2D(1024, (7,7), strides=1, activation='relu')
+    self.conv_layer1    = tf.keras.layers.Conv2D(32, 8, strides=4, activation='relu')
+    self.conv_layer2    = tf.keras.layers.Conv2D(64, 4, strides=2, activation='relu')
+    self.conv_layer3    = tf.keras.layers.Conv2D(64, 3, strides=1, activation='relu')
     self.flatten_layer  = tf.keras.layers.Flatten()
-    self.output_layer   = tf.keras.layers.Dense(n_actions)
+    self.dense_layer    = tf.keras.layers.Dense(512, activation='relu')
+    self.output_layer   = tf.keras.layers.Dense(n_actions, activation='linear')
   def call(self, inputs):
     conv_out1    = self.conv_layer1(inputs)
-    maxpool_out1 = self.maxpool_layer1(conv_out1)
-    conv_out2    = self.conv_layer2(maxpool_out1)
-    maxpool_out2 = self.maxpool_layer2(conv_out2)
-    conv_out3    = self.conv_layer3(maxpool_out2)
+    conv_out2    = self.conv_layer2(conv_out1)
+    conv_out3    = self.conv_layer3(conv_out2)
     flatten_out  = self.flatten_layer(conv_out3)
-    return self.output_layer(flatten_out)
+    dense_out    = self.dense_layer(flatten_out)
+    return self.output_layer(dense_out)
 
 
-env = gym.make('RocketLander-v0')
+env = gym.make('Breakout-v0')
 env.reset()
 n_actions        = env.action_space.n
 
