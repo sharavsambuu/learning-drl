@@ -214,6 +214,8 @@ for episode in range(num_episodes):
       q_network.save("model_weights/dqn")
       print("моделийг model_weights/dqn фолдерт хадгаллаа")
 
+    env.render()
+
     if done==True:
       if debug_render:
         plt.clf()
