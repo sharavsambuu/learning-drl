@@ -14,7 +14,7 @@ import tensorflow as tf
 
 
 debug_render      = False
-num_episodes      = 20000
+num_episodes      = 2000
 train_start_count = 1000       # хичнээн sample цуглуулсны дараа сургаж болох вэ
 train_per_step    = 500        # хэдэн алхам тутамд сургах вэ
 save_per_step     = 2500       # хэдэн алхам тутамд сургасан моделийг хадгалах вэ
@@ -22,7 +22,7 @@ training_happened = False
 sync_per_step     = 1000       # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
 train_count       = 2          # хэдэн удаа сургах вэ
 batch_size        = 32
-desired_shape     = (84, 84)   # фрэймыг багасгаж ашиглах хэмжээ
+desired_shape     = (84, 84) # фрэймыг багасгаж ашиглах хэмжээ
 gamma             = 0.99       # discount factor
 
 # exploration vs exploitation
@@ -108,37 +108,56 @@ class PERMemory:
     self.tree.update(idx, p)
 
 
-class DeepQNetwork(tf.keras.Model):
+class DuelingDQN(tf.keras.Model):
   def __init__(self, n_actions):
-    super(DeepQNetwork, self).__init__()
-    self.conv_layer1    = tf.keras.layers.Conv2D(32, 8, strides=4, activation='relu')
-    self.conv_layer2    = tf.keras.layers.Conv2D(64, 4, strides=2, activation='relu')
-    self.conv_layer3    = tf.keras.layers.Conv2D(64, 3, strides=1, activation='relu')
-    self.flatten_layer  = tf.keras.layers.Flatten()
-    self.dense_layer    = tf.keras.layers.Dense(512, activation='relu')
-    self.output_layer   = tf.keras.layers.Dense(n_actions, activation='linear')
+    super(DuelingDQN, self).__init__()
+    self.conv_layer1                = tf.keras.layers.Conv2D(32, 8, strides=4, activation='relu')
+    self.conv_layer2                = tf.keras.layers.Conv2D(64, 4, strides=2, activation='relu')
+    self.conv_layer3                = tf.keras.layers.Conv2D(64, 3, strides=1, activation='relu')
+    self.splitting_layer            = tf.keras.layers.Lambda(lambda w: tf.split(w, 2, 3))
+    self.value_stream_flattened     = tf.keras.layers.Flatten()
+    self.value_stream_dense         = tf.keras.layers.Dense(1)
+    self.advantage_stream_flattened = tf.keras.layers.Flatten()
+    self.advantage_stream_dense     = tf.keras.layers.Dense(n_actions)
   def call(self, inputs):
-    conv_out1    = self.conv_layer1(inputs)
-    conv_out2    = self.conv_layer2(conv_out1)
-    conv_out3    = self.conv_layer3(conv_out2)
-    flatten_out  = self.flatten_layer(conv_out3)
-    dense_out    = self.dense_layer(flatten_out)
-    return self.output_layer(dense_out)
+    conv_out1        = self.conv_layer1(inputs)
+    conv_out2        = self.conv_layer2(conv_out1)
+    conv_out3        = self.conv_layer3(conv_out2)
+    
+    value_stream, advantage_stream = self.splitting_layer(conv_out3)
+    
+    value_stream     = self.value_stream_flattened(value_stream)
+    value            = self.value_stream_dense(value_stream)
+    advantage_stream = self.advantage_stream_flattened(advantage_stream)
+    advantage        = self.advantage_stream_dense(advantage_stream)
+
+    # value болон advantage хоёр stream-г нэгтгээд гаралтын Q утгууд болгох
+    q_values         = tf.keras.layers.Add()([
+        value, 
+        tf.keras.layers.Subtract()([
+          advantage,
+          tf.keras.layers.Lambda(
+            lambda w: tf.reduce_mean(w, axis=1, keepdims=True)
+          )(advantage)
+        ])
+      ])
+
+    return q_values
 
 
-env = gym.make('Breakout-v0')
+env = gym.make('RocketLander-v0')
 env.reset()
 n_actions        = env.action_space.n
 
 optimizer        = tf.keras.optimizers.Adam()
 
-q_network        = DeepQNetwork(n_actions)
-target_q_network = DeepQNetwork(n_actions)
+q_network        = DuelingDQN(n_actions)
+target_q_network = DuelingDQN(n_actions)
 
 if not os.path.exists("model_weights"):
   os.makedirs("model_weights")
-if os.path.exists('model_weights/dqn'):
-  q_network = tf.keras.models.load_model("model_weights/dqn")
+if os.path.exists('model_weights/DuelingDQN'):
+  q_network = tf.keras.models.load_model("model_weights/DuelingDQN")
   print("өмнөх сургасан dqn моделийг ачааллаа")
 
 
@@ -276,8 +295,8 @@ for episode in range(num_episodes):
       print("target неорон сүлжээнийг жингүүдийг шинэчиллээ")
 
     if global_steps%save_per_step==0 and training_happened==True:
-      q_network.save("model_weights/dqn")
-      print("моделийг model_weights/dqn фолдерт хадгаллаа")
+      q_network.save("model_weights/DuelingDQN")
+      print("моделийг model_weights/DuelingDQN фолдерт хадгаллаа")
 
     if done==True:
       if debug_render:
