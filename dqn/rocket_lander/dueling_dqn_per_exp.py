@@ -14,7 +14,7 @@ import tensorflow as tf
 
 
 debug_render      = False
-num_episodes      = 20000
+num_episodes      = 2000
 train_start_count = 1000       # хичнээн sample цуглуулсны дараа сургаж болох вэ
 train_per_step    = 500        # хэдэн алхам тутамд сургах вэ
 save_per_step     = 2500       # хэдэн алхам тутамд сургасан моделийг хадгалах вэ
@@ -22,7 +22,7 @@ training_happened = False
 sync_per_step     = 1000       # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
 train_count       = 2          # хэдэн удаа сургах вэ
 batch_size        = 32
-desired_shape     = (84, 84)   # фрэймыг багасгаж ашиглах хэмжээ
+desired_shape     = (320, 420) # фрэймыг багасгаж ашиглах хэмжээ
 gamma             = 0.99       # discount factor
 
 # exploration vs exploitation
@@ -126,7 +126,7 @@ class DeepQNetwork(tf.keras.Model):
     return self.output_layer(dense_out)
 
 
-env = gym.make('Breakout-v0')
+env = gym.make('RocketLander-v0')
 env.reset()
 n_actions        = env.action_space.n
 
