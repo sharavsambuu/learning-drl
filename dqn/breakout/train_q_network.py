@@ -14,26 +14,26 @@ import tensorflow as tf
 
 
 debug_render      = False
-num_episodes      = 2000
+num_episodes      = 20000
 train_start_count = 1000       # хичнээн sample цуглуулсны дараа сургаж болох вэ
 train_per_step    = 500        # хэдэн алхам тутамд сургах вэ
 save_per_step     = 2500       # хэдэн алхам тутамд сургасан моделийг хадгалах вэ
 training_happened = False
-sync_per_step     = 1000       # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
+sync_per_step     = 10000      # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
 train_count       = 2          # хэдэн удаа сургах вэ
 batch_size        = 32
-desired_shape     = (84, 84) # фрэймыг багасгаж ашиглах хэмжээ
+desired_shape     = (84, 84)   # фрэймыг багасгаж ашиглах хэмжээ
 gamma             = 0.99       # discount factor
 
 # exploration vs exploitation
 epsilon           = 1.0        
 epsilon_decay     = 0.999
-epsilon_min       = 0.13
+epsilon_min       = 0.1
 
 # replay memory
 temporal_length   = 4          # хичнээн фрэймүүд цуглуулж нэг state болгох вэ
 temporal_frames   = deque(maxlen=temporal_length+1)
-memory_length     = 3000 
+memory_length     = 100000 
 
 
 def preprocess_frame(frame, shape=(84, 84)):
@@ -149,7 +149,7 @@ env = gym.make('Breakout-v0')
 env.reset()
 n_actions        = env.action_space.n
 
-optimizer        = tf.keras.optimizers.Adam()
+optimizer        = tf.keras.optimizers.RMSprop(learning_rate=0.00025)
 
 q_network        = DuelingDQN(n_actions)
 target_q_network = DuelingDQN(n_actions)
@@ -220,8 +220,8 @@ for episode in range(num_episodes):
 
       # TD error-г тооцоолох, энэ алдааны утгаар sample-д priority утга өгнө
       # алдааны утга нь их байх тусмаа сургах batch дээр гарч ирэх магадлал нь ихэснэ
-      if epsilon == 1:
-        done = True
+      #if epsilon == 1:
+      #  done = True
       q_out        = q_network(np.array([curr_state], dtype=np.float32)).numpy()
       old_value    = q_out[0][action]
       target_q_out = target_q_network(np.array([next_state], dtype=np.float32)).numpy()
