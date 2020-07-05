@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 
 
-debug_render      = False
+debug_render      = True
 num_episodes      = 20000
 train_start_count = 1000       # хичнээн sample цуглуулсны дараа сургаж болох вэ
 train_per_step    = 500        # хэдэн алхам тутамд сургах вэ
@@ -198,9 +198,9 @@ for episode in range(num_episodes):
       action =  env.action_space.sample()
 
     # Breakout-г гацахаас сэргийлж "fire" үйлдэл тохируулах
-    if game_lost:
-      if game_lost['ale.lives']==0:
-        action = 1
+    #if game_lost:
+    #  if game_lost['ale.lives']==0:
+    #    action = 1
 
     _, reward, done, game_lost = env.step(action)
 
@@ -228,8 +228,6 @@ for episode in range(num_episodes):
 
       # TD error-г тооцоолох, энэ алдааны утгаар sample-д priority утга өгнө
       # алдааны утга нь их байх тусмаа сургах batch дээр гарч ирэх магадлал нь ихэснэ
-      #if epsilon == 1:
-      #  done = True
       q_out        = q_network(np.array([curr_state], dtype=np.float32)).numpy()
       old_value    = q_out[0][action]
       target_q_out = target_q_network(np.array([next_state], dtype=np.float32)).numpy()
@@ -243,7 +241,9 @@ for episode in range(num_episodes):
       
       # explore хийх epsilon утга шинэчлэх
       if epsilon>epsilon_min:
-        epsilon = epsilon*epsilon_decay
+        #epsilon = epsilon*epsilon_decay
+        epsilon = epsilon - 0.00001
+        print("epsilon", epsilon)
 
     # хангалттай sample цугларсан тул Q неорон сүлжээг сургах
     if (global_steps%train_per_step==0):

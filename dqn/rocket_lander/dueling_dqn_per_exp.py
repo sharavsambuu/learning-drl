@@ -33,7 +33,7 @@ epsilon_min       = 0.13
 # replay memory
 temporal_length   = 4          # хичнээн фрэймүүд цуглуулж нэг state болгох вэ
 temporal_frames   = deque(maxlen=temporal_length+1)
-memory_length     = 3000 
+memory_length     = 4000 
 
 
 def preprocess_frame(frame, shape=(84, 84)):
@@ -220,8 +220,6 @@ for episode in range(num_episodes):
 
       # TD error-г тооцоолох, энэ алдааны утгаар sample-д priority утга өгнө
       # алдааны утга нь их байх тусмаа сургах batch дээр гарч ирэх магадлал нь ихэснэ
-      if epsilon == 1:
-        done = True
       q_out        = q_network(np.array([curr_state], dtype=np.float32)).numpy()
       old_value    = q_out[0][action]
       target_q_out = target_q_network(np.array([next_state], dtype=np.float32)).numpy()
@@ -235,7 +233,9 @@ for episode in range(num_episodes):
       
       # explore хийх epsilon утга шинэчлэх
       if epsilon>epsilon_min:
-        epsilon = epsilon*epsilon_decay
+        epsilon = epsilon - 0.00001
+        print(epsilon)
+        #epsilon = epsilon*epsilon_decay
 
     # хангалттай sample цугларсан тул Q неорон сүлжээг сургах
     if (global_steps%train_per_step==0):
