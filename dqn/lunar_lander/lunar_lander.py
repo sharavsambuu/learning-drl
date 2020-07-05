@@ -14,26 +14,26 @@ import tensorflow as tf
 
 
 debug_render      = False
-num_episodes      = 20000
+num_episodes      = 2000
 train_start_count = 1000       # хичнээн sample цуглуулсны дараа сургаж болох вэ
 train_per_step    = 500        # хэдэн алхам тутамд сургах вэ
 save_per_step     = 2500       # хэдэн алхам тутамд сургасан моделийг хадгалах вэ
 training_happened = False
-sync_per_step     = 10000      # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
+sync_per_step     = 1000       # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
 train_count       = 2          # хэдэн удаа сургах вэ
 batch_size        = 32
-desired_shape     = (84, 84)   # фрэймыг багасгаж ашиглах хэмжээ
+desired_shape     = (260, 120) # фрэймыг багасгаж ашиглах хэмжээ
 gamma             = 0.99       # discount factor
 
 # exploration vs exploitation
 epsilon           = 1.0        
 epsilon_decay     = 0.999
-epsilon_min       = 0.1
+epsilon_min       = 0.05
 
 # replay memory
 temporal_length   = 4          # хичнээн фрэймүүд цуглуулж нэг state болгох вэ
 temporal_frames   = deque(maxlen=temporal_length+1)
-memory_length     = 100000 
+memory_length     = 4000 
 
 
 def preprocess_frame(frame, shape=(84, 84)):
@@ -145,11 +145,11 @@ class DuelingDQN(tf.keras.Model):
     return q_values
 
 
-env = gym.make('Breakout-v0')
+env = gym.make('LunarLander-v2')
 env.reset()
 n_actions        = env.action_space.n
 
-optimizer        = tf.keras.optimizers.RMSprop(learning_rate=0.00025)
+optimizer        = tf.keras.optimizers.Adam()
 
 q_network        = DuelingDQN(n_actions)
 target_q_network = DuelingDQN(n_actions)
@@ -168,12 +168,9 @@ global_steps = 0
 for episode in range(num_episodes):
   env.reset()
   print(episode, "р ажиллагаа эхэллээ")
-
-  done      = False
-  game_lost = None
-
-  state     = env.render(mode='rgb_array')
-  state, _  = preprocess_frame(state, shape=desired_shape)
+  done     = False
+  state    = env.render(mode='rgb_array')
+  state, _ = preprocess_frame(state, shape=desired_shape)
 
   if debug_render:
     img = plt.imshow(state, cmap='gray', vmin=0, vmax=255)
@@ -189,17 +186,16 @@ for episode in range(num_episodes):
       if np.random.rand() <= epsilon:
         action  = env.action_space.sample()
       else:
-        state   = list(temporal_frames)[2:]
+        state   = list(temporal_frames)[1:]
         state   = np.stack(state, axis=-1)
         state   = np.reshape(state, (state.shape[ 0], state.shape[ 1], state.shape[-1]))
         q_value = q_network(np.array([state], dtype=np.float32))
+        print(q_value)
         action  = np.argmax(q_value[0])
     else:
       action =  env.action_space.sample()
 
-
-    _, reward, done, game_lost = env.step(action)
-    #print(reward, done, game_lost)
+    _, reward, done, _ = env.step(action)
 
     episode_rewards.append(reward)
 
@@ -214,8 +210,8 @@ for episode in range(num_episodes):
     # sample цуглуулах
     temporal_frames.append(new_state_reshaped)
     if len(temporal_frames)==temporal_length+1:
-      curr_state = list(temporal_frames)[:temporal_length-1]
-      next_state = list(temporal_frames)[2:]
+      curr_state = list(temporal_frames)[:temporal_length]
+      next_state = list(temporal_frames)[1:]
       # дараалсан фрэймүүдийг нэгтгээд нэг тензор болгох
       # неорон модельрүү чихэхэд амар, тензорын дүрс нь (өндөр, өргөн, фрэймийн тоо)
       curr_state = np.stack(curr_state, axis=-1)
@@ -238,9 +234,9 @@ for episode in range(num_episodes):
       
       # explore хийх epsilon утга шинэчлэх
       if epsilon>epsilon_min:
+        epsilon = epsilon - 0.0001
+        #print(epsilon)
         #epsilon = epsilon*epsilon_decay
-        epsilon = epsilon - 0.00001
-        print("epsilon", epsilon)
 
     # хангалттай sample цугларсан тул Q неорон сүлжээг сургах
     if (global_steps%train_per_step==0):
@@ -309,7 +305,6 @@ for episode in range(num_episodes):
       print(episode, "р ажиллагаа дууслаа")
       print("нийт reward   :", sum(episode_rewards))
       print("дундаж reward :", sum(episode_rewards)/len(episode_rewards))
-      
 
 
 if debug_render:

@@ -28,7 +28,7 @@ gamma             = 0.99       # discount factor
 # exploration vs exploitation
 epsilon           = 1.0        
 epsilon_decay     = 0.999
-epsilon_min       = 0.13
+epsilon_min       = 0.05
 
 # replay memory
 temporal_length   = 4          # хичнээн фрэймүүд цуглуулж нэг state болгох вэ
@@ -233,7 +233,7 @@ for episode in range(num_episodes):
       
       # explore хийх epsilon утга шинэчлэх
       if epsilon>epsilon_min:
-        epsilon = epsilon - 0.00001
+        epsilon = epsilon - 0.0001
         print(epsilon)
         #epsilon = epsilon*epsilon_decay
 
