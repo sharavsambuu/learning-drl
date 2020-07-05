@@ -41,14 +41,20 @@ class SumTree:
         return (idx, self.tree[idx], self.data[dataIdx])
 
 
-tree = SumTree(1000)
+tree = SumTree(4)
 
 tree.add(10.0, ( 1, 2, 3))
+print("tree size", int(tree.write))
 tree.add(1.0 , ( 2, 3, 4))
+print("tree size", int(tree.write))
 tree.add(11.0, ( 5, 6, 7))
+print("tree size", int(tree.write))
 tree.add(0.0 , ( 8, 9,10))
+print("tree size", int(tree.write))
 tree.add(2.0 , (11,12,13))
+print("tree size", int(tree.write))
 tree.add(12.0, (14,15,16))
+print("tree size", int(tree.write))
 
 
 
