@@ -20,10 +20,10 @@ train_per_step    = 500        # хэдэн алхам тутамд сургах
 save_per_step     = 2500       # хэдэн алхам тутамд сургасан моделийг хадгалах вэ
 training_happened = False
 sync_per_step     = 1000       # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
-train_count       = 1          # хэдэн удаа сургах вэ
+train_count       = 2          # хэдэн удаа сургах вэ
 batch_size        = 32
 desired_shape     = (320, 420) # фрэймыг багасгаж ашиглах хэмжээ
-gamma             = 0.85       # discount factor
+gamma             = 0.99       # discount factor
 
 # exploration vs exploitation
 epsilon           = 1.0        
@@ -33,7 +33,7 @@ epsilon_min       = 0.13
 # replay memory
 temporal_length   = 4          # хичнээн фрэймүүд цуглуулж нэг state болгох вэ
 temporal_frames   = deque(maxlen=temporal_length+1)
-memory_length     = 4000 
+memory_length     = 3000 
 
 
 def preprocess_frame(frame, shape=(84, 84)):
@@ -218,7 +218,7 @@ for episode in range(num_episodes):
       if epsilon>epsilon_min:
         epsilon = epsilon*epsilon_decay
 
-    # хангалттай sample цугларсан тул Q неорон сүлжээнүүдээ сургах
+    # хангалттай sample цугларсан тул Q неорон сүлжээг сургах
     if (global_steps%train_per_step==0):
       print("Q сүлжээг сургаж байна түр хүлээгээрэй")
       for train_step in range(train_count):
@@ -263,7 +263,7 @@ for episode in range(num_episodes):
         # Q неорон сүлжээг сургах
         with tf.GradientTape() as tape:
           prediction_q_out = q_network(q_input)
-          loss             = tf.keras.losses.MeanSquaredError()(q_out, prediction_q_out)/2
+          loss             = tf.keras.losses.Huber()(q_out, prediction_q_out)
         gradients = tape.gradient(loss, q_network.trainable_variables)
         optimizer.apply_gradients(zip(gradients, q_network.trainable_variables))
 
@@ -273,6 +273,7 @@ for episode in range(num_episodes):
     # target q неорон сүлжээг шинэчлэх цаг боллоо
     if global_steps%sync_per_step==0 and training_happened==True:
       target_q_network.set_weights(q_network.get_weights())
+      print("target неорон сүлжээнийг жингүүдийг шинэчиллээ")
 
     if global_steps%save_per_step==0 and training_happened==True:
       q_network.save("model_weights/dqn")

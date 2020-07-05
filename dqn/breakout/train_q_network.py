@@ -23,8 +23,8 @@ training_happened = False
 sync_per_step     = 600        # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
 train_count       = 1          # хэдэн удаа сургах вэ
 batch_size        = 64
-desired_shape     = (84, 84)    # фрэймыг багасгаж ашиглах хэмжээ
-gamma             = 0.85       # discount factor
+desired_shape     = (84, 84)   # фрэймыг багасгаж ашиглах хэмжээ
+gamma             = 0.98       # discount factor
 
 # exploration vs exploitation
 epsilon           = 1.0        
