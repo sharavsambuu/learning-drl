@@ -145,7 +145,7 @@ class DuelingDQN(tf.keras.Model):
     return q_values
 
 
-env = gym.make('Breakout-v0')
+env = gym.make('BreakoutDeterministic-v4')
 env.reset()
 n_actions        = env.action_space.n
 
@@ -168,9 +168,12 @@ global_steps = 0
 for episode in range(num_episodes):
   env.reset()
   print(episode, "р ажиллагаа эхэллээ")
-  done     = False
-  state    = env.render(mode='rgb_array')
-  state, _ = preprocess_frame(state, shape=desired_shape)
+
+  done      = False
+  game_lost = None
+
+  state     = env.render(mode='rgb_array')
+  state, _  = preprocess_frame(state, shape=desired_shape)
 
   if debug_render:
     img = plt.imshow(state, cmap='gray', vmin=0, vmax=255)
@@ -194,7 +197,12 @@ for episode in range(num_episodes):
     else:
       action =  env.action_space.sample()
 
-    _, reward, done, _ = env.step(action)
+    # Breakout-г гацахаас сэргийлж "fire" үйлдэл тохируулах
+    if game_lost:
+      if game_lost['ale.lives']==0:
+        action = 1
+
+    _, reward, done, game_lost = env.step(action)
 
     episode_rewards.append(reward)
 
@@ -304,6 +312,7 @@ for episode in range(num_episodes):
       print(episode, "р ажиллагаа дууслаа")
       print("нийт reward   :", sum(episode_rewards))
       print("дундаж reward :", sum(episode_rewards)/len(episode_rewards))
+      
 
 
 if debug_render:
