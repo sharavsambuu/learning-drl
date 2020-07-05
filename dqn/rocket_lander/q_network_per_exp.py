@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 
 
-debug_render      = True
+debug_render      = False
 num_episodes      = 200
 train_start_count = 1000       # хичнээн sample цуглуулсны дараа сургаж болох вэ
 train_per_step    = 500        # хэдэн алхам тутамд сургах вэ
@@ -49,8 +49,8 @@ class SumTree:
   write = 0
   def __init__(self, capacity):
     self.capacity = capacity
-    self.tree     = numpy.zeros( 2*capacity - 1 )
-    self.data     = numpy.zeros( capacity, dtype=object )
+    self.tree     = np.zeros( 2*capacity - 1 )
+    self.data     = np.zeros( capacity, dtype=object )
   def _propagate(self, idx, change):
     parent             = (idx - 1) // 2
     self.tree[parent] += change
@@ -84,28 +84,28 @@ class SumTree:
     return (idx, self.tree[idx], self.data[dataIdx])
 
 
-class Memory:
+class PERMemory:
   e = 0.01
   a = 0.6
   def __init__(self, capacity):
     self.tree = SumTree(capacity)
-  def _getPriority(self, error):
-    return (error + self.e) ** self.a
+  def _get_priority(self, error):
+    return (error+self.e)**self.a
   def add(self, error, sample):
-    p = self._getPriority(error)
+    p = self._get_priority(error)
     self.tree.add(p, sample) 
   def sample(self, n):
-    batch = []
-    segment = self.tree.total() / n
+    batch   = []
+    segment = self.tree.total()/n
     for i in range(n):
-      a = segment * i
-      b = segment * (i + 1)
+      a = segment*i
+      b = segment*(i+1)
       s = random.uniform(a, b)
       (idx, p, data) = self.tree.get(s)
       batch.append((idx, data))
     return batch
   def update(self, idx, error):
-    p = self._getPriority(error)
+    p = self._get_priority(error)
     self.tree.update(idx, p)
 
 
@@ -142,6 +142,10 @@ if os.path.exists('model_weights/dqn'):
   q_network = tf.keras.models.load_model("model_weights/dqn")
   print("өмнөх сургасан dqn моделийг ачааллаа")
 
+
+per_memory = PERMemory(memory_length)
+
+
 global_steps = 0
 for episode in range(num_episodes):
   env.reset()
@@ -158,7 +162,6 @@ for episode in range(num_episodes):
 
   while not done:
     global_steps = global_steps+1
-    #print(global_steps)
 
     # exploration vs exploitation
     if (len(temporal_frames)==temporal_length+1):
@@ -199,34 +202,33 @@ for episode in range(num_episodes):
     if len(temporal_frames)==temporal_length+1:
       curr_state = list(temporal_frames)[:temporal_length]
       next_state = list(temporal_frames)[1:]
-
       # дараалсан фрэймүүдийг нэгтгээд нэг тензор болгох
       # неорон модельрүү чихэхэд амар, тензорын дүрс нь (өндөр, өргөн, фрэймийн тоо)
       curr_state = np.stack(curr_state, axis=-1)
-      curr_state = np.reshape(
-          curr_state, 
-          (
-            curr_state.shape[ 0], 
-            curr_state.shape[ 1], 
-            curr_state.shape[-1]
-          )
-        )
+      curr_state = np.reshape(curr_state, (curr_state.shape[ 0], curr_state.shape[ 1], curr_state.shape[-1]))
       next_state = np.stack(next_state, axis=-1)
-      next_state = np.reshape(
-          next_state,
-          (
-            next_state.shape[ 0],
-            next_state.shape[ 1],
-            next_state.shape[-1]
-          )
-        )
-      replay_memory.append((curr_state, action, reward, next_state, done))
+      next_state = np.reshape(next_state, (next_state.shape[ 0], next_state.shape[ 1], next_state.shape[-1]))
+      #replay_memory.append((curr_state, action, reward, next_state, done))
+
+      # TD error-г тооцоолох, энэ алдааны утгаар sample-д priority утга өгнө
+      # алдааны утга нь их байх тусмаа сургах batch дээр гарч ирэх магадлал нь ихэснэ
+      if epsilon == 1:
+        done = True
+      q_out        = q_network(np.array([curr_state], dtype=np.float32)).numpy()
+      old_value    = q_out[0][action]
+      target_q_out = target_q_network(np.array([next_state], dtype=np.float32)).numpy()
+      if done:
+        q_out[0][action] = reward
+      else:
+        q_out[0][action] = reward + gamma*np.amax(target_q_out[0])
+      td_error = abs(old_value-q_out[0][action])
+      #print("successfully append PER memory...")
+      per_memory.add(td_error, (curr_state, action, reward, next_state, done))
+
 
       # explore хийх epsilon утга шинэчлэх
       if epsilon>epsilon_min:
         epsilon = epsilon*epsilon_decay
-
-      pass
 
     # хангалттай sample цугларсан тул Q неорон сүлжээнүүдээ сургах
     if (len(replay_memory)>train_start_count) and (global_steps%train_per_step==0):
@@ -266,6 +268,7 @@ for episode in range(num_episodes):
           loss             = tf.keras.losses.MeanSquaredError()(q_out, prediction_q_out)/2
         gradients = tape.gradient(loss, q_network.trainable_variables)
         optimizer.apply_gradients(zip(gradients, q_network.trainable_variables))
+
       training_happened = True
       print("Q сүлжээг сургаж дууслаа")
 
