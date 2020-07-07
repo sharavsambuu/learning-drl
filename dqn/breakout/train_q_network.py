@@ -145,11 +145,11 @@ class DuelingDQN(tf.keras.Model):
     return q_values
 
 
-env = gym.make('Breakout-v0')
+env = gym.make('BreakoutNoFrameskip-v4')
 env.reset()
 n_actions        = env.action_space.n
 
-optimizer        = tf.keras.optimizers.RMSprop(learning_rate=0.00025)
+optimizer        = tf.keras.optimizers.Adam(learning_rate=0.00025, clipnorm=1.0)
 
 q_network        = DuelingDQN(n_actions)
 target_q_network = DuelingDQN(n_actions)
@@ -239,8 +239,8 @@ for episode in range(num_episodes):
       # explore хийх epsilon утга шинэчлэх
       if epsilon>epsilon_min:
         #epsilon = epsilon*epsilon_decay
-        epsilon = epsilon - 0.00001
-        print("epsilon", epsilon)
+        epsilon = epsilon - 0.0001
+        #print("epsilon", epsilon)
 
     # хангалттай sample цугларсан тул Q неорон сүлжээг сургах
     if (global_steps%train_per_step==0):
