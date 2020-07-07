@@ -13,12 +13,11 @@ import tensorflow as tf
 
 
 debug_render      = False
-num_episodes      = 50
+num_episodes      = 5
 train_start_count = 1000       # хичнээн sample цуглуулсны дараа сургаж болох вэ
 save_per_step     = 2500       # хэдэн алхам тутамд сургасан моделийг хадгалах вэ
 training_happened = False
 train_count       = 1          # хэдэн удаа сургах вэ
-batch_size        = 32
 desired_shape     = (260, 120) # фрэймыг багасгаж ашиглах хэмжээ
 gamma             = 0.99       # discount factor
 
@@ -96,33 +95,29 @@ for episode in range(num_episodes):
       state  = np.reshape(state, (state.shape[ 0], state.shape[ 1], state.shape[-1]))
       logits = policy_gradient(np.array([state], dtype=np.float32))[0].numpy()
       logits /= logits.sum()
-      print("logits")
-      print(logits)
+      #print("logits")
+      #print(logits)
       action = np.random.choice(n_actions, 1, p=logits)[0]
-      print(action)
+      #print(action)
     else:
       action =  env.action_space.sample()
 
     _, reward, done, _ = env.step(action)
 
-    states.append(state)
-    actions.append(action)
-    rewards.append(reward)
+    # sample цуглуулах
+    if len(temporal_frames)==temporal_length:
+      states.append(state)
+      actions.append(action)
+      rewards.append(reward)  
 
     new_state                     = env.render(mode='rgb_array')
     new_state, new_state_reshaped = preprocess_frame(new_state, shape=desired_shape)
-    temporal_frames.append(new_state_reshaped)
+    temporal_frames.append(new_state_reshaped)    
 
     if debug_render:
       img.set_data(new_state)
       plt.draw()
       plt.pause(1e-5)
-
-    # sample цуглуулах
-    
-    if len(temporal_frames)==temporal_length+1:
-      pass
-
 
     if global_steps%save_per_step==0 and training_happened==True:
       q_network.save("model_weights/PolicyGradient")
@@ -135,18 +130,29 @@ for episode in range(num_episodes):
       episode_length     = len(states)
 
       # discount factor-г reward жагсаалтруу оруулж ирэх
-      """
-      discounted_rewards = np.zeros(rewards)
+      discounted_rewards = np.zeros_like(rewards)
       running_add = 0
       for t in reversed(range(0, episode_length)):
         running_add = running_add*gamma + rewards[t]
         discounted_rewards[t] = running_add
       discounted_rewards -= np.mean(discounted_rewards)
       discounted_rewards /= np.std(discounted_rewards)
-      """
+
+      print("episode_length", episode_length)
+      
+      inputs     = np.zeros((episode_length, desired_shape[0], desired_shape[1], temporal_length), dtype=np.float32)
+      advantages = np.zeros((episode_length, n_actions), dtype=np.float32)
+      for i in range(episode_length):
+        print("state shape")
+        print(states[i].shape)
+        print("inputs shape")
+        print(inputs[i].shape)
+        #print(inputs[i].shape)
+        #print(states[i].shape)
+        inputs[i] = states[i]
+        #advantages[i][actions[i]] = discounted_rewards[i]
+            
       training_happened = True
-
-
       states, rewards, actions  = [], [], []
       print(episode, "р ажиллагаа дууслаа")
 
