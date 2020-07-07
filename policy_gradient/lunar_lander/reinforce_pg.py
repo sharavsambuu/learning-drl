@@ -13,7 +13,7 @@ import tensorflow as tf
 
 
 debug_render      = False
-num_episodes      = 5
+num_episodes      = 5000
 train_start_count = 1000       # хичнээн sample цуглуулсны дараа сургаж болох вэ
 save_per_step     = 2500       # хэдэн алхам тутамд сургасан моделийг хадгалах вэ
 training_happened = False
@@ -42,8 +42,8 @@ class PolicyGradient(tf.keras.Model):
     self.conv_layer2    = tf.keras.layers.Conv2D(64, 4, strides=2, activation='relu')
     self.conv_layer3    = tf.keras.layers.Conv2D(64, 3, strides=1, activation='relu')
     self.flatten_layer  = tf.keras.layers.Flatten()
-    self.dense_layer    = tf.keras.layers.Dense(512, activation='relu')
-    self.output_layer   = tf.keras.layers.Dense(n_actions, activation='softmax')
+    self.dense_layer    = tf.keras.layers.Dense(512, activation='relu', kernel_initializer='glorot_uniform')
+    self.output_layer   = tf.keras.layers.Dense(n_actions, activation='softmax', kernel_initializer='glorot_uniform')
   def call(self, inputs):
     conv_out1    = self.conv_layer1(inputs)
     conv_out2    = self.conv_layer2(conv_out1)
@@ -58,7 +58,7 @@ env.reset()
 
 n_actions        = env.action_space.n
 
-optimizer        = tf.keras.optimizers.Adam()
+optimizer        = tf.keras.optimizers.Adam(learning_rate=0.001)
 
 policy_gradient  = PolicyGradient(n_actions)
 
@@ -66,14 +66,13 @@ policy_gradient  = PolicyGradient(n_actions)
 if not os.path.exists("model_weights"):
   os.makedirs("model_weights")
 if os.path.exists('model_weights/PolicyGradient'):
-  q_network = tf.keras.models.load_model("model_weights/PolicyGradient")
+  policy_gradient = tf.keras.models.load_model("model_weights/PolicyGradient")
   print("өмнөх сургасан PolicyGradient моделийг ачааллаа")
 
 
 global_steps = 0
 for episode in range(num_episodes):
   env.reset()
-  print(episode, "р ажиллагаа эхэллээ")
   done     = False
   state    = env.render(mode='rgb_array')
   state, _ = preprocess_frame(state, shape=desired_shape)
@@ -83,6 +82,7 @@ for episode in range(num_episodes):
     plt.show(block=False)
 
 
+  score = 0
   states, rewards, actions  = [], [], []
   
   while not done:
@@ -90,34 +90,46 @@ for episode in range(num_episodes):
 
     # stochastic action sampling
     if (len(temporal_frames)==temporal_length):
-      state  = list(temporal_frames)[0:]
-      state  = np.stack(state, axis=-1)
-      state  = np.reshape(state, (state.shape[ 0], state.shape[ 1], state.shape[-1]))
-      logits = policy_gradient(np.array([state], dtype=np.float32))[0].numpy()
-      logits /= logits.sum()
-      action = np.random.choice(n_actions, 1, p=logits)[0]
+      inp_state  = list(temporal_frames)[0:]
+      inp_state  = np.stack(inp_state, axis=-1)
+      inp_state  = np.reshape(inp_state, (inp_state.shape[ 0], inp_state.shape[ 1], inp_state.shape[-1]))
+      logits     = policy_gradient(np.array([inp_state], dtype=np.float32))[0].numpy()
+
+      e_x        = np.exp(logits - np.max(logits))
+      softmaxed  = e_x / e_x.sum(axis=0)
+      #logits     = logits.numpy()
+      #logits    /= logits.sum()
+      print(softmaxed)
+      action     = np.random.choice(n_actions, p=softmaxed)
+      print(action)
+      #action     =  env.action_space.sample()
     else:
-      action =  env.action_space.sample()
+      action     =  env.action_space.sample()
 
     _, reward, done, _ = env.step(action)
 
+    score = score+reward
+
     # sample цуглуулах
     if len(temporal_frames)==temporal_length:
-      states.append(state)
+      states.append(inp_state)
       actions.append(action)
-      rewards.append(reward)  
+      rewards.append(reward)
+      #print(states[-1])
 
     new_state                     = env.render(mode='rgb_array')
     new_state, new_state_reshaped = preprocess_frame(new_state, shape=desired_shape)
-    temporal_frames.append(new_state_reshaped)    
+    temporal_frames.append(np.reshape(new_state_reshaped, (desired_shape[0], desired_shape[1], 1)))
 
     if debug_render:
-      img.set_data(new_state)
+      #img.set_data(new_state)
+      img.set_data(np.reshape(list(temporal_frames)[0], (desired_shape[1], desired_shape[0])))
       plt.draw()
-      plt.pause(1e-5)
+      plt.pause(1e-6)
+      pass
 
     if global_steps%save_per_step==0 and training_happened==True:
-      q_network.save("model_weights/PolicyGradient")
+      policy_gradient.save("model_weights/PolicyGradient")
       print("моделийг model_weights/PolicyGradient фолдерт хадгаллаа")
 
     if done==True:
@@ -141,17 +153,19 @@ for episode in range(num_episodes):
         inputs[i]                 = states[i]
         advantages[i][actions[i]] = discounted_rewards[i]
 
+      
+
       # Policy неорон сүлжээг сургах
       with tf.GradientTape() as tape:
         predictions = policy_gradient(inputs)
         loss        = tf.keras.losses.CategoricalCrossentropy(from_logits=True)(advantages, predictions)
+      #print(loss.numpy())
       gradients = tape.gradient(loss, policy_gradient.trainable_variables)
       optimizer.apply_gradients(zip(gradients, policy_gradient.trainable_variables))
-      print("%s урттай эпизодыг неорон сүлжээнд сургалаа."%(episode_length))
-            
+      
       training_happened = True
       states, rewards, actions  = [], [], []
-      print(episode, "р ажиллагаа дууслаа")
+      print("%s : %s урттай ажиллагаа %s оноотой дууслаа"%(episode, episode_length, score))
 
 
 if debug_render:
