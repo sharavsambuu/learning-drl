@@ -18,7 +18,7 @@ train_start_count = 1000       # хичнээн sample цуглуулсны да
 save_per_step     = 2500       # хэдэн алхам тутамд сургасан моделийг хадгалах вэ
 training_happened = False
 train_count       = 1          # хэдэн удаа сургах вэ
-desired_shape     = (260, 120) # фрэймыг багасгаж ашиглах хэмжээ
+desired_shape     = (84, 84) # фрэймыг багасгаж ашиглах хэмжээ
 gamma             = 0.99       # discount factor
 
 # temporal state
@@ -53,11 +53,11 @@ class PolicyGradient(tf.keras.Model):
     return self.output_layer(dense_out)
 
 
-loss_object = tf.keras.losses.CategoricalCrossentropy(from_logits=True)
+loss_object = tf.keras.losses.CategoricalCrossentropy(from_logits=False)
 optimizer   = tf.keras.optimizers.Adam(learning_rate=0.001)
 
 
-env = gym.make('LunarLander-v2')
+env = gym.make('Pong-v0')
 env.reset()
 n_actions        = env.action_space.n
 
