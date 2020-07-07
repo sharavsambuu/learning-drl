@@ -95,10 +95,7 @@ for episode in range(num_episodes):
       state  = np.reshape(state, (state.shape[ 0], state.shape[ 1], state.shape[-1]))
       logits = policy_gradient(np.array([state], dtype=np.float32))[0].numpy()
       logits /= logits.sum()
-      #print("logits")
-      #print(logits)
       action = np.random.choice(n_actions, 1, p=logits)[0]
-      #print(action)
     else:
       action =  env.action_space.sample()
 
@@ -137,20 +134,20 @@ for episode in range(num_episodes):
         discounted_rewards[t] = running_add
       discounted_rewards -= np.mean(discounted_rewards)
       discounted_rewards /= np.std(discounted_rewards)
-
-      print("episode_length", episode_length)
       
       inputs     = np.zeros((episode_length, desired_shape[0], desired_shape[1], temporal_length), dtype=np.float32)
       advantages = np.zeros((episode_length, n_actions), dtype=np.float32)
       for i in range(episode_length):
-        print("state shape")
-        print(states[i].shape)
-        print("inputs shape")
-        print(inputs[i].shape)
-        #print(inputs[i].shape)
-        #print(states[i].shape)
-        inputs[i] = states[i]
-        #advantages[i][actions[i]] = discounted_rewards[i]
+        inputs[i]                 = states[i]
+        advantages[i][actions[i]] = discounted_rewards[i]
+
+      # Policy неорон сүлжээг сургах
+      with tf.GradientTape() as tape:
+        predictions = policy_gradient(inputs)
+        loss        = tf.keras.losses.CategoricalCrossentropy(from_logits=True)(advantages, predictions)
+      gradients = tape.gradient(loss, policy_gradient.trainable_variables)
+      optimizer.apply_gradients(zip(gradients, policy_gradient.trainable_variables))
+      print("%s урттай эпизодыг неорон сүлжээнд сургалаа."%(episode_length))
             
       training_happened = True
       states, rewards, actions  = [], [], []
