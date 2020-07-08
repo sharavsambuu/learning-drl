@@ -35,9 +35,9 @@ def preprocess_frame(frame, shape=(84, 84)):
   return frame, frame_reshaped
 
 
-class PolicyGradient(tf.keras.Model):
+class PolicyNetwork(tf.keras.Model):
   def __init__(self, n_actions):
-    super(PolicyGradient, self).__init__()
+    super(PolicyNetwork, self).__init__()
     self.conv_layer1    = tf.keras.layers.Conv2D(32, 8, strides=4, activation='relu')
     self.conv_layer2    = tf.keras.layers.Conv2D(64, 4, strides=2, activation='relu')
     self.conv_layer3    = tf.keras.layers.Conv2D(64, 3, strides=1, activation='relu')
@@ -62,28 +62,28 @@ env.reset()
 n_actions        = env.action_space.n
 
 
-policy_gradient  = PolicyGradient(n_actions)
+policy  = PolicyNetwork(n_actions)
 
 @tf.function(experimental_relax_shapes=True)
-def train_policy_gradient(inputs, advantages):
+def train_policy_network(inputs, advantages):
   with tf.GradientTape() as tape:
-    predictions = policy_gradient(inputs, training=True)
+    predictions = policy(inputs, training=True)
     loss        = loss_object(advantages, predictions)
 
-  gradients = tape.gradient(loss, policy_gradient.trainable_variables)
-  optimizer.apply_gradients(zip(gradients, policy_gradient.trainable_variables))
+  gradients = tape.gradient(loss, policy.trainable_variables)
+  optimizer.apply_gradients(zip(gradients, policy.trainable_variables))
   
 @tf.function(experimental_relax_shapes=True)
 def take_action_logits(inputs):
-  return policy_gradient(inputs, training=False)
+  return policy(inputs, training=False)
 
 
 
 if not os.path.exists("model_weights"):
   os.makedirs("model_weights")
-if os.path.exists('model_weights/PolicyGradient'):
-  policy_gradient = tf.keras.models.load_model("model_weights/PolicyGradient")
-  print("өмнөх сургасан PolicyGradient моделийг ачааллаа")
+if os.path.exists('model_weights/PolicyNetwork'):
+  policy = tf.keras.models.load_model("model_weights/PolicyNetwork")
+  print("өмнөх сургасан PolicyNetwork моделийг ачааллаа")
 
 
 global_steps = 0
@@ -143,8 +143,8 @@ for episode in range(num_episodes):
       pass
 
     if global_steps%save_per_step==0 and training_happened==True:
-      policy_gradient.save("model_weights/PolicyGradient")
-      print("моделийг model_weights/PolicyGradient фолдерт хадгаллаа")
+      policy.save("model_weights/PolicyNetwork")
+      print("моделийг model_weights/PolicyNetwork фолдерт хадгаллаа")
 
     if done==True:
       if debug_render:
@@ -167,7 +167,7 @@ for episode in range(num_episodes):
         inputs[i]                 = states[i]
         advantages[i][actions[i]] = discounted_rewards[i]
 
-      train_policy_gradient(inputs, advantages)
+      train_policy_network(inputs, advantages)
       
       
       training_happened = True
