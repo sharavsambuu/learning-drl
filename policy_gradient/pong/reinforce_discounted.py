@@ -70,6 +70,7 @@ def loss_fn(action_logits, actions, targets):
   actions                     = tf.convert_to_tensor(
     list(zip(np.arange(len(actions)), actions))
     )
+  # πθ(a|s)
   action_probabilities        = tf.nn.softmax(action_logits)
   # Үйлдлийн индексд харгалзах магадлалын оноог авах
   picked_action_probabilities = tf.gather_nd(action_probabilities, actions) 
@@ -77,13 +78,14 @@ def loss_fn(action_logits, actions, targets):
   log_probabilites            = tf.cast(tf.math.log(picked_action_probabilities), dtype=tf.float64)
   # logπθ(a|s)*G_t, үйлдлийн магадлалыг discount авсан reward-аар үржих
   loss                        = tf.multiply(log_probabilites, tf.convert_to_tensor(targets))
-  # gradient ascent
+  # максимумчилахын тулд оптимайзерын минимумчилагчийн эсрэг хасах loss
   return -tf.reduce_sum(loss)
 
 
 @tf.function(experimental_relax_shapes=True)
 def train_policy_network(inputs, actions, advantages):
   with tf.GradientTape() as tape:
+    # πθ(a|s)
     predictions = policy(inputs, training=True)
     loss        = loss_fn(predictions, actions, advantages)
   if debug_render:
@@ -122,7 +124,7 @@ for episode in range(num_episodes):
       inp_state     = list(temporal_frames)[0:]
       inp_state     = np.stack(inp_state, axis=-1)
       inp_state     = np.reshape(inp_state, (inp_state.shape[ 0], inp_state.shape[ 1], inp_state.shape[-1]))
-      logits        = policy(np.array([inp_state], dtype=np.float32), training=False)
+      logits        = policy(np.array([inp_state], dtype=np.float32), training=False) # πθ(a|s)
       probabilities = tf.nn.softmax(logits).numpy()[0]
       action        = np.random.choice(n_actions, p=probabilities)
     else:
