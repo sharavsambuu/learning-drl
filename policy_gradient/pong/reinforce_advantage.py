@@ -73,7 +73,7 @@ class ValueNetwork(tf.keras.Model):
 
 
 
-env       = gym.make('Breakout-v0')
+env       = gym.make('Pong-v0')
 env.reset()
 n_actions = env.action_space.n
 

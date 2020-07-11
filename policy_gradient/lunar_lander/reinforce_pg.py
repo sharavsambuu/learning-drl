@@ -18,7 +18,7 @@ train_start_count = 1000       # хичнээн sample цуглуулсны да
 save_per_step     = 2500       # хэдэн алхам тутамд сургасан моделийг хадгалах вэ
 training_happened = False
 train_count       = 1          # хэдэн удаа сургах вэ
-desired_shape     = (260, 120) # фрэймыг багасгаж ашиглах хэмжээ
+desired_shape     = (260, 120)   # фрэймыг багасгаж ашиглах хэмжээ
 gamma             = 0.99       # discount factor
 
 # temporal state
@@ -53,19 +53,41 @@ class PolicyNetwork(tf.keras.Model):
     dense_out    = self.dense_layer(flatten_out)
     return self.output_layer(dense_out)
 
- 
-optimizer   = tf.keras.optimizers.Adam()
+class ValueNetwork(tf.keras.Model):
+  def __init__(self,):
+    super(ValueNetwork, self).__init__()
+    self.conv_layer1    = tf.keras.layers.Conv2D(32, 8, strides=4, activation='relu')
+    self.conv_layer2    = tf.keras.layers.Conv2D(64, 4, strides=2, activation='relu')
+    self.conv_layer3    = tf.keras.layers.Conv2D(64, 3, strides=1, activation='relu')
+    self.flatten_layer  = tf.keras.layers.Flatten()
+    self.dense_layer    = tf.keras.layers.Dense(512, activation='relu', kernel_initializer='glorot_uniform')
+    self.output_layer   = tf.keras.layers.Dense(1)
+  @tf.function(experimental_relax_shapes=True)
+  def call(self, inputs):
+    conv_out1    = self.conv_layer1(inputs)
+    conv_out2    = self.conv_layer2(conv_out1)
+    conv_out3    = self.conv_layer3(conv_out2)
+    flatten_out  = self.flatten_layer(conv_out3)
+    dense_out    = self.dense_layer(flatten_out)
+    return self.output_layer(dense_out)
+
+
 
 env       = gym.make('LunarLander-v2')
 env.reset()
 n_actions = env.action_space.n
 
 
-policy  = PolicyNetwork(n_actions)
+policy_optimizer = tf.keras.optimizers.Adam()
+value_optimizer  = tf.keras.optimizers.Adam()
 
+policy  = PolicyNetwork(n_actions)
+value   = ValueNetwork()
+
+value_loss = tf.keras.losses.Huber()
 
 @tf.function(experimental_relax_shapes=True)
-def loss_fn(action_logits, actions, targets):
+def policy_loss_fn(action_logits, actions, targets):
   # [actions,...] -> [(idx, action_index),...]
   actions                     = tf.convert_to_tensor(
     list(zip(np.arange(len(actions)), actions))
@@ -87,18 +109,28 @@ def train_policy_network(inputs, actions, advantages):
   with tf.GradientTape() as tape:
     # πθ(a|s)
     predictions = policy(inputs, training=True)
-    loss        = loss_fn(predictions, actions, advantages)
+    loss        = policy_loss_fn(predictions, actions, advantages)
   if debug_render:
     tf.print("loss : ", loss)
   gradients = tape.gradient(loss, policy.trainable_variables)
-  optimizer.apply_gradients(zip(gradients, policy.trainable_variables))
+  policy_optimizer.apply_gradients(zip(gradients, policy.trainable_variables))
+
+@tf.function(experimental_relax_shapes=True)
+def train_value_network(inputs, total_returns):
+  with tf.GradientTape() as tape:
+    predictions = value(inputs)
+    loss        = value_loss(total_returns, predictions)
+  gradients = tape.gradient(loss, value.trainable_variables)
+  value_optimizer.apply_gradients(zip(gradients, value.trainable_variables))
+
   
 
 if not os.path.exists("model_weights"):
   os.makedirs("model_weights")
-if os.path.exists('model_weights/ReinforceDiscounted'):
-  policy = tf.keras.models.load_model("model_weights/ReinforceDiscounted")
-  print("өмнөх сургасан ReinforceDiscounted моделийг ачааллаа")
+if os.path.exists('model_weights/ReinforceAdvantage'):
+  policy = tf.keras.models.load_model("model_weights/ReinforceAdvantagePolicy")
+  value  = tf.keras.models.load_model("model_weights/ReinforceAdvantageValue")
+  print("өмнөх сургасан моделийг ачааллаа")
 
 
 global_steps = 0
@@ -152,25 +184,36 @@ for episode in range(num_episodes):
       pass
 
     if global_steps%save_per_step==0 and training_happened==True:
-      policy.save("model_weights/ReinforceDiscounted")
-      print("моделийг model_weights/ReinforceDiscounted фолдерт хадгаллаа")
+      policy.save("model_weights/ReinforceAdvantagePolicy")
+      value .save("model_weights/ReinforceAdvantageValue")
+      print("Policy болон Value моделиудыг model_weights/ фолдерт хадгаллаа")
 
     if done==True:
       if debug_render:
         plt.clf()
 
-      episode_length     = len(states)
-      inputs             = np.zeros((episode_length, desired_shape[0], desired_shape[1], temporal_length), dtype=np.float32)
-      discounted_rewards = np.zeros_like(rewards)
-      running_add        = 0
+      episode_length = len(states)
+      inputs         = np.zeros((episode_length, desired_shape[0], desired_shape[1], temporal_length), dtype=np.float32)
+      total_returns  = np.zeros_like(rewards)
+      advantages     = np.zeros_like(rewards)
+      
       for t in range(0, episode_length):
-        running_add           = running_add + (gamma**t)*rewards[t]
-        discounted_rewards[t] = running_add
-        inputs[t]             = states[t]
+        inputs[t] = states[t]
+        V_t = 0
+        for idx, j in enumerate(range(t, episode_length)):
+          V_t = V_t + (gamma**idx)*rewards[j]
+        total_returns[t] = V_t
+        estimated_value  = value(tf.convert_to_tensor([states[t]], dtype=tf.float32)).numpy()[0][0]
+        advantage_value  = V_t - estimated_value
+        advantages[t]    = advantage_value
       
-      train_policy_network(inputs, actions, discounted_rewards)
+      train_value_network(inputs, total_returns)
+      print("value неорон сүлжээг сургалаа")
+
+      train_policy_network(inputs, actions, advantages)
+      print("policy неорон сүлжээг сургалаа")
       
-      training_happened = True
+      training_happened         = True
       states, rewards, actions  = [], [], []
       print("%s : %s урттай ажиллагаа %s оноотой дууслаа"%(episode, episode_length, score))
 
