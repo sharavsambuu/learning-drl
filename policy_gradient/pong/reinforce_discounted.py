@@ -170,7 +170,7 @@ for episode in range(num_episodes):
       
       train_policy_network(inputs, actions, discounted_rewards)
       
-      training_happened = True
+      training_happened         = True
       states, rewards, actions  = [], [], []
       print("%s : %s урттай ажиллагаа %s оноотой дууслаа"%(episode, episode_length, score))
 

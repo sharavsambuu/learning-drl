@@ -70,10 +70,11 @@ class ValueNetwork(tf.keras.Model):
     flatten_out  = self.flatten_layer(conv_out3)
     dense_out    = self.dense_layer(flatten_out)
     return self.output_layer(dense_out)
- 
+
+
 optimizer   = tf.keras.optimizers.Adam()
 
-env       = gym.make('Pong-v0')
+env       = gym.make('Breakout-v0')
 env.reset()
 n_actions = env.action_space.n
 
@@ -188,10 +189,13 @@ for episode in range(num_episodes):
         running_add           = running_add + (gamma**t)*rewards[t]
         discounted_rewards[t] = running_add
         inputs[t]             = states[t]
+
+        estimated_value       = value(tf.convert_to_tensor([states[t]], dtype=tf.float32)).numpy()[0][0]
+        print("estimated_value : ", estimated_value)
       
       train_policy_network(inputs, actions, discounted_rewards)
       
-      training_happened = True
+      training_happened         = True
       states, rewards, actions  = [], [], []
       print("%s : %s урттай ажиллагаа %s оноотой дууслаа"%(episode, episode_length, score))
 
