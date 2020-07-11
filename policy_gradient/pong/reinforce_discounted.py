@@ -66,7 +66,7 @@ policy  = PolicyNetwork(n_actions)
 
 @tf.function(experimental_relax_shapes=True)
 def loss_fn(action_logits, actions, targets):
-  # [actions] -> [(idx, action_index)...]
+  # [actions,...] -> [(idx, action_index),...]
   actions                     = tf.convert_to_tensor(
     list(zip(np.arange(len(actions)), actions))
     )
@@ -164,7 +164,7 @@ for episode in range(num_episodes):
       # discount factor-г reward жагсаалтруу оруулж ирэх
       discounted_rewards = np.zeros_like(rewards)
       running_add = 0
-      for t in reversed(range(0, episode_length)):
+      for t in range(0, episode_length):
         running_add = running_add*gamma + rewards[t]
         discounted_rewards[t] = running_add
       discounted_rewards -= np.mean(discounted_rewards)
