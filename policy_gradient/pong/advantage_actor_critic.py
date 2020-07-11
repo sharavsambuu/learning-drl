@@ -210,6 +210,8 @@ for episode in range(num_episodes):
       td_targets            = np.zeros_like(rewards) # Temporal Difference targets
       td_errors             = np.zeros_like(rewards) # Temporal Difference errors
       
+      # Advantage Actor Critic
+      
       for t in range(0, episode_length):
         td_targets[t] = rewards   [t] + gamma*estimated_next_values[t]
         td_errors [t] = td_targets[t] - estimated_values[t]
