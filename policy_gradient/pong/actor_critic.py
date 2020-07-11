@@ -146,19 +146,22 @@ for episode in range(num_episodes):
 
 
   score = 0
-  states, rewards, actions  = [], [], []
+  states, actions, rewards, new_states  = [], [], [], []
   
   while not done:
-    global_steps = global_steps+1
-
+    global_steps        = global_steps+1
+    current_state       = None
+    first_state_sampled = False
     # stochastic action sampling
     if (len(temporal_frames)==temporal_length):
-      inp_state     = list(temporal_frames)[0:]
-      inp_state     = np.stack(inp_state, axis=-1)
-      inp_state     = np.reshape(inp_state, (inp_state.shape[ 0], inp_state.shape[ 1], inp_state.shape[-1]))
-      logits        = policy(np.array([inp_state], dtype=np.float32), training=False) # πθ(a|s)
+      current_state = list(temporal_frames)[0:]
+      current_state = np.stack(current_state, axis=-1)
+      current_state = np.reshape(current_state, (current_state.shape[ 0], current_state.shape[ 1], current_state.shape[-1]))
+      logits        = policy(np.array([current_state], dtype=np.float32), training=False) # πθ(a|s)
       probabilities = tf.nn.softmax(logits).numpy()[0]
       action        = np.random.choice(n_actions, p=probabilities)
+
+      first_state_sampled = True
     else:
       action = env.action_space.sample()
 
@@ -166,19 +169,23 @@ for episode in range(num_episodes):
 
     score = score+reward
 
-    # sample цуглуулах
-    if len(temporal_frames)==temporal_length:
-      states.append(inp_state)
-      actions.append(action)
-      rewards.append(reward)
-
-    new_state                     = env.render(mode='rgb_array')
-    new_state, new_state_reshaped = preprocess_frame(new_state, shape=desired_shape)
+    new_state_rendered    = env.render(mode='rgb_array')
+    _, new_state_reshaped = preprocess_frame(new_state_rendered, shape=desired_shape)
     temporal_frames.append(np.reshape(new_state_reshaped, (desired_shape[0], desired_shape[1], 1)))
 
+    new_state             = list(temporal_frames)[0:]
+    new_state             = np.stack(new_state, axis=-1)
+    new_state             = np.reshape(new_state, (new_state.shape[ 0], new_state.shape[ 1], new_state.shape[-1]))
+
+    # sample цуглуулах
+    if (len(temporal_frames)==temporal_length and first_state_sampled==True):
+      states.append(current_state)
+      actions.append(action)
+      rewards.append(reward)
+      new_states.append(new_state)
+
     if debug_render:
-      #img.set_data(new_state)
-      img.set_data(np.reshape(list(temporal_frames)[0], (desired_shape[1], desired_shape[0])))
+      img.set_data(np.reshape(list(temporal_frames)[-1], (desired_shape[1], desired_shape[0])))
       plt.draw()
       plt.pause(1e-6)
       pass
@@ -212,7 +219,7 @@ for episode in range(num_episodes):
       print("policy неорон сүлжээг сургалаа")
       
       training_happened         = True
-      states, rewards, actions  = [], [], []
+      states, actions, rewards, new_states  = [], [], [], []
       print("%s : %s урттай ажиллагаа %s оноотой дууслаа"%(episode, episode_length, score))
 
 
