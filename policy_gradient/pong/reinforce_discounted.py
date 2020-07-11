@@ -160,15 +160,14 @@ for episode in range(num_episodes):
         plt.clf()
 
       episode_length     = len(states)
-      inputs             = np.zeros((episode_length, desired_shape[0], desired_shape[1], temporal_length), dtype=np.float32)
+      input_states       = tf.convert_to_tensor(states, dtype=tf.float32)
       discounted_rewards = np.zeros_like(rewards)
       running_add        = 0
       for t in range(0, episode_length):
         running_add           = running_add + (gamma**t)*rewards[t]
         discounted_rewards[t] = running_add
-        inputs[t]             = states[t]
       
-      train_policy_network(inputs, actions, discounted_rewards)
+      train_policy_network(input_states, actions, discounted_rewards)
       
       training_happened         = True
       states, rewards, actions  = [], [], []

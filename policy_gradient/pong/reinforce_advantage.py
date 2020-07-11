@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 
 
-debug_render      = False
+debug_render      = True
 num_episodes      = 5000
 train_start_count = 1000       # хичнээн sample цуглуулсны дараа сургаж болох вэ
 save_per_step     = 2500       # хэдэн алхам тутамд сургасан моделийг хадгалах вэ
@@ -192,25 +192,23 @@ for episode in range(num_episodes):
       if debug_render:
         plt.clf()
 
-      episode_length = len(states)
-      inputs         = np.zeros((episode_length, desired_shape[0], desired_shape[1], temporal_length), dtype=np.float32)
-      total_returns  = np.zeros_like(rewards)
-      advantages     = np.zeros_like(rewards)
+      episode_length   = len(states)
       
+      total_returns    = np.zeros_like(rewards)
+      advantages       = np.zeros_like(rewards)
+      input_states     = tf.convert_to_tensor(states, dtype=tf.float32)
+      estimated_values = value(input_states).numpy()
       for t in range(0, episode_length):
-        inputs[t] = states[t]
         V_t = 0
         for idx, j in enumerate(range(t, episode_length)):
           V_t = V_t + (gamma**idx)*rewards[j]
         total_returns[t] = V_t
-        estimated_value  = value(tf.convert_to_tensor([states[t]], dtype=tf.float32)).numpy()[0][0]
-        advantage_value  = V_t - estimated_value
-        advantages[t]    = advantage_value
+        advantages   [t] = V_t - estimated_values[t]
       
-      train_value_network(inputs, total_returns)
+      train_value_network(input_states, total_returns)
       print("value неорон сүлжээг сургалаа")
 
-      train_policy_network(inputs, actions, advantages)
+      train_policy_network(input_states, actions, advantages)
       print("policy неорон сүлжээг сургалаа")
       
       training_happened         = True
