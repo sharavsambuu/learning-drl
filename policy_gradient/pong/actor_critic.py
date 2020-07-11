@@ -146,7 +146,7 @@ for episode in range(num_episodes):
 
 
   score = 0
-  states, actions, rewards, new_states  = [], [], [], []
+  states, actions, rewards, next_states  = [], [], [], []
   
   while not done:
     global_steps        = global_steps+1
@@ -179,10 +179,10 @@ for episode in range(num_episodes):
 
     # sample цуглуулах
     if (len(temporal_frames)==temporal_length and first_state_sampled==True):
-      states.append(current_state)
-      actions.append(action)
-      rewards.append(reward)
-      new_states.append(new_state)
+      states     .append(current_state)
+      actions    .append(action       )
+      rewards    .append(reward       )
+      next_states.append(new_state    )
 
     if debug_render:
       img.set_data(np.reshape(list(temporal_frames)[-1], (desired_shape[1], desired_shape[0])))
@@ -199,27 +199,31 @@ for episode in range(num_episodes):
       if debug_render:
         plt.clf()
 
-      episode_length   = len(states)
+      episode_length        = len(states)
       
-      total_returns    = np.zeros_like(rewards)
-      advantages       = np.zeros_like(rewards)
-      input_states     = tf.convert_to_tensor(states, dtype=tf.float32)
-      estimated_values = value(input_states).numpy()
+      total_returns         = np.zeros_like(rewards)
+      input_states          = tf.convert_to_tensor(states, dtype=tf.float32)
+      input_next_states     = tf.convert_to_tensor(next_states, dtype=tf.float32)
+      
+      estimated_values      = value(input_states).numpy()
+      estimated_next_values = value(input_next_states).numpy()
+      
+      td_targets            = np.zeros_like(rewards) # Temporal Difference targets
+      td_errors             = np.zeros_like(rewards) # Temporal Difference errors
+      
       for t in range(0, episode_length):
-        V_t = 0
-        for idx, j in enumerate(range(t, episode_length)):
-          V_t = V_t + (gamma**idx)*rewards[j]
-        total_returns[t] = V_t
-        advantages   [t] = V_t - estimated_values[t]
+        td_targets[t] = rewards   [t] + gamma*estimated_next_values[t]
+        td_errors [t] = td_targets[t] - estimated_values[t]
       
-      train_value_network(input_states, total_returns)
+      train_value_network(input_states, td_targets)
       print("value неорон сүлжээг сургалаа")
 
-      train_policy_network(input_states, actions, advantages)
+      # td_error-ийг advantage дөхөлтөнд хэрэглэх
+      train_policy_network(input_states, actions, td_errors)
       print("policy неорон сүлжээг сургалаа")
       
-      training_happened         = True
-      states, actions, rewards, new_states  = [], [], [], []
+      training_happened = True
+      states, actions, rewards, next_states  = [], [], [], []
       print("%s : %s урттай ажиллагаа %s оноотой дууслаа"%(episode, episode_length, score))
 
 
