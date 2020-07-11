@@ -18,7 +18,7 @@ train_start_count = 1000       # хичнээн sample цуглуулсны да
 save_per_step     = 2500       # хэдэн алхам тутамд сургасан моделийг хадгалах вэ
 training_happened = False
 train_count       = 1          # хэдэн удаа сургах вэ
-desired_shape     = (260, 120) # фрэймыг багасгаж ашиглах хэмжээ
+desired_shape     = (260, 120)   # фрэймыг багасгаж ашиглах хэмжээ
 gamma             = 0.99       # discount factor
 
 # temporal state
@@ -44,6 +44,7 @@ class PolicyNetwork(tf.keras.Model):
     self.flatten_layer  = tf.keras.layers.Flatten()
     self.dense_layer    = tf.keras.layers.Dense(512, activation='relu', kernel_initializer='glorot_uniform')
     self.output_layer   = tf.keras.layers.Dense(n_actions, activation='softmax', kernel_initializer='glorot_uniform')
+  @tf.function(experimental_relax_shapes=True)
   def call(self, inputs):
     conv_out1    = self.conv_layer1(inputs)
     conv_out2    = self.conv_layer2(conv_out1)
@@ -52,38 +53,52 @@ class PolicyNetwork(tf.keras.Model):
     dense_out    = self.dense_layer(flatten_out)
     return self.output_layer(dense_out)
 
+ 
+optimizer   = tf.keras.optimizers.Adam()
 
-loss_object = tf.keras.losses.CategoricalCrossentropy(from_logits=True)
-optimizer   = tf.keras.optimizers.Adam(learning_rate=0.001)
-
-
-env = gym.make('LunarLander-v2')
+env       = gym.make('LunarLander-v2')
 env.reset()
-n_actions        = env.action_space.n
+n_actions = env.action_space.n
 
 
 policy  = PolicyNetwork(n_actions)
 
-@tf.function(experimental_relax_shapes=True)
-def train_policy_network(inputs, advantages):
-  with tf.GradientTape() as tape:
-    predictions = policy(inputs, training=True)
-    loss        = loss_object(advantages, predictions)
 
+@tf.function(experimental_relax_shapes=True)
+def loss_fn(action_logits, actions, targets):
+  # [actions,...] -> [(idx, action_index),...]
+  actions                     = tf.convert_to_tensor(
+    list(zip(np.arange(len(actions)), actions))
+    )
+  # πθ(a|s)
+  action_probabilities        = tf.nn.softmax(action_logits)
+  # Үйлдлийн индексд харгалзах магадлалын оноог авах
+  picked_action_probabilities = tf.gather_nd(action_probabilities, actions) 
+  # logπθ(a|s)
+  log_probabilites            = tf.cast(tf.math.log(picked_action_probabilities), dtype=tf.float64)
+  # logπθ(a|s)*G_t, үйлдлийн магадлалыг discount авсан reward-аар үржих
+  loss                        = tf.multiply(log_probabilites, tf.convert_to_tensor(targets))
+  # максимумчилахын тулд оптимайзерын минимумчилагчийн эсрэг хасах loss
+  return -tf.reduce_sum(loss)
+
+
+@tf.function(experimental_relax_shapes=True)
+def train_policy_network(inputs, actions, advantages):
+  with tf.GradientTape() as tape:
+    # πθ(a|s)
+    predictions = policy(inputs, training=True)
+    loss        = loss_fn(predictions, actions, advantages)
+  if debug_render:
+    tf.print("loss : ", loss)
   gradients = tape.gradient(loss, policy.trainable_variables)
   optimizer.apply_gradients(zip(gradients, policy.trainable_variables))
   
-@tf.function(experimental_relax_shapes=True)
-def take_action_logits(inputs):
-  return policy(inputs, training=False)
-
-
 
 if not os.path.exists("model_weights"):
   os.makedirs("model_weights")
-if os.path.exists('model_weights/PolicyNetwork'):
-  policy = tf.keras.models.load_model("model_weights/PolicyNetwork")
-  print("өмнөх сургасан PolicyNetwork моделийг ачааллаа")
+if os.path.exists('model_weights/ReinforceDiscounted'):
+  policy = tf.keras.models.load_model("model_weights/ReinforceDiscounted")
+  print("өмнөх сургасан ReinforceDiscounted моделийг ачааллаа")
 
 
 global_steps = 0
@@ -106,19 +121,14 @@ for episode in range(num_episodes):
 
     # stochastic action sampling
     if (len(temporal_frames)==temporal_length):
-      inp_state  = list(temporal_frames)[0:]
-      inp_state  = np.stack(inp_state, axis=-1)
-      inp_state  = np.reshape(inp_state, (inp_state.shape[ 0], inp_state.shape[ 1], inp_state.shape[-1]))
-      logits     = take_action_logits(np.array([inp_state], dtype=np.float32))
-      action_distribution = logits[0].numpy()
-      print(action_distribution)
-      # action_distribution тэй ойролцоо магадлалыг сонгох
-      action = np.random.choice(action_distribution, p=action_distribution)
-      #print(action)
-      action = np.argmax(action_distribution == action)
-      #print(action)
+      inp_state     = list(temporal_frames)[0:]
+      inp_state     = np.stack(inp_state, axis=-1)
+      inp_state     = np.reshape(inp_state, (inp_state.shape[ 0], inp_state.shape[ 1], inp_state.shape[-1]))
+      logits        = policy(np.array([inp_state], dtype=np.float32), training=False) # πθ(a|s)
+      probabilities = tf.nn.softmax(logits).numpy()[0]
+      action        = np.random.choice(n_actions, p=probabilities)
     else:
-      action     =  env.action_space.sample()
+      action = env.action_space.sample()
 
     _, reward, done, _ = env.step(action)
 
@@ -129,7 +139,6 @@ for episode in range(num_episodes):
       states.append(inp_state)
       actions.append(action)
       rewards.append(reward)
-      #print(states[-1])
 
     new_state                     = env.render(mode='rgb_array')
     new_state, new_state_reshaped = preprocess_frame(new_state, shape=desired_shape)
@@ -143,8 +152,8 @@ for episode in range(num_episodes):
       pass
 
     if global_steps%save_per_step==0 and training_happened==True:
-      policy.save("model_weights/PolicyNetwork")
-      print("моделийг model_weights/PolicyNetwork фолдерт хадгаллаа")
+      policy.save("model_weights/ReinforceDiscounted")
+      print("моделийг model_weights/ReinforceDiscounted фолдерт хадгаллаа")
 
     if done==True:
       if debug_render:
@@ -155,20 +164,15 @@ for episode in range(num_episodes):
       # discount factor-г reward жагсаалтруу оруулж ирэх
       discounted_rewards = np.zeros_like(rewards)
       running_add = 0
-      for t in reversed(range(0, episode_length)):
+      for t in range(0, episode_length):
         running_add = running_add*gamma + rewards[t]
         discounted_rewards[t] = running_add
-      discounted_rewards -= np.mean(discounted_rewards)
-      discounted_rewards /= np.std(discounted_rewards)
+      #discounted_rewards -= np.mean(discounted_rewards)
+      #discounted_rewards /= np.std(discounted_rewards)
       
       inputs     = np.zeros((episode_length, desired_shape[0], desired_shape[1], temporal_length), dtype=np.float32)
-      advantages = np.zeros((episode_length, n_actions), dtype=np.float32)
-      for i in range(episode_length):
-        inputs[i]                 = states[i]
-        advantages[i][actions[i]] = discounted_rewards[i]
 
-      train_policy_network(inputs, advantages)
-      
+      train_policy_network(inputs, actions, discounted_rewards)
       
       training_happened = True
       states, rewards, actions  = [], [], []
