@@ -162,10 +162,11 @@ for episode in range(num_episodes):
       episode_length     = len(states)
       input_states       = tf.convert_to_tensor(states, dtype=tf.float32)
       discounted_rewards = np.zeros_like(rewards)
-      running_add        = 0
       for t in range(0, episode_length):
-        running_add           = running_add + (gamma**t)*rewards[t]
-        discounted_rewards[t] = running_add
+        V_t = 0
+        for idx, j in enumerate(range(t, episode_length)):
+          V_t = V_t + (gamma**idx)*rewards[j]
+        discounted_rewards[t] = V_t
       
       train_policy_network(input_states, actions, discounted_rewards)
       
