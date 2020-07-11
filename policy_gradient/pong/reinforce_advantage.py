@@ -18,7 +18,7 @@ train_start_count = 1000       # хичнээн sample цуглуулсны да
 save_per_step     = 2500       # хэдэн алхам тутамд сургасан моделийг хадгалах вэ
 training_happened = False
 train_count       = 1          # хэдэн удаа сургах вэ
-desired_shape     = (84, 84) # фрэймыг багасгаж ашиглах хэмжээ
+desired_shape     = (84, 84)   # фрэймыг багасгаж ашиглах хэмжээ
 gamma             = 0.99       # discount factor
 
 # temporal state
@@ -96,9 +96,9 @@ def train_policy_network(inputs, actions, advantages):
 
 if not os.path.exists("model_weights"):
   os.makedirs("model_weights")
-if os.path.exists('model_weights/ReinforceDiscounted'):
-  policy = tf.keras.models.load_model("model_weights/ReinforceDiscounted")
-  print("өмнөх сургасан ReinforceDiscounted моделийг ачааллаа")
+if os.path.exists('model_weights/ReinforceAdvantage'):
+  policy = tf.keras.models.load_model("model_weights/ReinforceAdvantage")
+  print("өмнөх сургасан ReinforceAdvantage моделийг ачааллаа")
 
 
 global_steps = 0
@@ -152,8 +152,8 @@ for episode in range(num_episodes):
       pass
 
     if global_steps%save_per_step==0 and training_happened==True:
-      policy.save("model_weights/ReinforceDiscounted")
-      print("моделийг model_weights/ReinforceDiscounted фолдерт хадгаллаа")
+      policy.save("model_weights/ReinforceAdvantage")
+      print("моделийг model_weights/ReinforceAdvantage фолдерт хадгаллаа")
 
     if done==True:
       if debug_render:
@@ -167,8 +167,8 @@ for episode in range(num_episodes):
       for t in range(0, episode_length):
         running_add = running_add*gamma + rewards[t]
         discounted_rewards[t] = running_add
-      discounted_rewards -= np.mean(discounted_rewards)
-      discounted_rewards /= np.std(discounted_rewards)
+      #discounted_rewards -= np.mean(discounted_rewards)
+      #discounted_rewards /= np.std(discounted_rewards)
       
       inputs     = np.zeros((episode_length, desired_shape[0], desired_shape[1], temporal_length), dtype=np.float32)
 

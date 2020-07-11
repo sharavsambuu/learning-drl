@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 
 
-debug_render      = True
+debug_render      = False
 num_episodes      = 5000
 train_start_count = 1000       # хичнээн sample цуглуулсны дараа сургаж болох вэ
 save_per_step     = 2500       # хэдэн алхам тутамд сургасан моделийг хадгалах вэ
@@ -56,7 +56,7 @@ class PolicyNetwork(tf.keras.Model):
  
 optimizer   = tf.keras.optimizers.Adam()
 
-env       = gym.make('Pong-v0')
+env       = gym.make('Breakout-v0')
 env.reset()
 n_actions = env.action_space.n
 
