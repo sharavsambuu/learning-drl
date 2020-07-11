@@ -116,10 +116,10 @@ def train_policy_network(inputs, actions, advantages):
   policy_optimizer.apply_gradients(zip(gradients, policy.trainable_variables))
 
 @tf.function(experimental_relax_shapes=True)
-def train_value_network(inputs, total_returns):
+def train_value_network(inputs, targets):
   with tf.GradientTape() as tape:
     predictions = value(inputs)
-    loss        = value_loss(total_returns, predictions)
+    loss        = value_loss(targets, predictions)
   gradients = tape.gradient(loss, value.trainable_variables)
   value_optimizer.apply_gradients(zip(gradients, value.trainable_variables))
 
@@ -201,7 +201,6 @@ for episode in range(num_episodes):
 
       episode_length        = len(states)
       
-      total_returns         = np.zeros_like(rewards)
       input_states          = tf.convert_to_tensor(states, dtype=tf.float32)
       input_next_states     = tf.convert_to_tensor(next_states, dtype=tf.float32)
       
