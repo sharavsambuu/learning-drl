@@ -72,19 +72,22 @@ class ValueNetwork(tf.keras.Model):
     return self.output_layer(dense_out)
 
 
-optimizer   = tf.keras.optimizers.Adam()
 
 env       = gym.make('Breakout-v0')
 env.reset()
 n_actions = env.action_space.n
 
 
+policy_optimizer = tf.keras.optimizers.Adam()
+value_optimizer  = tf.keras.optimizers.Adam()
+
 policy  = PolicyNetwork(n_actions)
 value   = ValueNetwork()
 
+value_loss = tf.keras.losses.Huber()
 
 @tf.function(experimental_relax_shapes=True)
-def loss_fn(action_logits, actions, targets):
+def policy_loss_fn(action_logits, actions, targets):
   # [actions,...] -> [(idx, action_index),...]
   actions                     = tf.convert_to_tensor(
     list(zip(np.arange(len(actions)), actions))
@@ -106,21 +109,28 @@ def train_policy_network(inputs, actions, advantages):
   with tf.GradientTape() as tape:
     # πθ(a|s)
     predictions = policy(inputs, training=True)
-    loss        = loss_fn(predictions, actions, advantages)
+    loss        = policy_loss_fn(predictions, actions, advantages)
   if debug_render:
     tf.print("loss : ", loss)
   gradients = tape.gradient(loss, policy.trainable_variables)
-  optimizer.apply_gradients(zip(gradients, policy.trainable_variables))
+  policy_optimizer.apply_gradients(zip(gradients, policy.trainable_variables))
 
-#@tf.function(experimental_relax_shapes=True)
-#def train_value_network(inputs, )
+@tf.function(experimental_relax_shapes=True)
+def train_value_network(inputs, total_returns):
+  with tf.GradientTape() as tape:
+    predictions = value(inputs)
+    loss        = value_loss(total_returns, predictions)
+  gradients = tape.gradient(loss, value.trainable_variables)
+  value_optimizer.apply_gradients(zip(gradients, value.trainable_variables))
+
   
 
 if not os.path.exists("model_weights"):
   os.makedirs("model_weights")
 if os.path.exists('model_weights/ReinforceAdvantage'):
-  policy = tf.keras.models.load_model("model_weights/ReinforceAdvantage")
-  print("өмнөх сургасан ReinforceAdvantage моделийг ачааллаа")
+  policy = tf.keras.models.load_model("model_weights/ReinforceAdvantagePolicy")
+  value  = tf.keras.models.load_model("model_weights/ReinforceAdvantageValue")
+  print("өмнөх сургасан моделийг ачааллаа")
 
 
 global_steps = 0
@@ -174,26 +184,34 @@ for episode in range(num_episodes):
       pass
 
     if global_steps%save_per_step==0 and training_happened==True:
-      policy.save("model_weights/ReinforceAdvantage")
-      print("моделийг model_weights/ReinforceAdvantage фолдерт хадгаллаа")
+      policy.save("model_weights/ReinforceAdvantagePolicy")
+      value .save("model_weights/ReinforceAdvantageValue")
+      print("Policy болон Value моделиудыг model_weights/ фолдерт хадгаллаа")
 
     if done==True:
       if debug_render:
         plt.clf()
 
-      episode_length     = len(states)
-      inputs             = np.zeros((episode_length, desired_shape[0], desired_shape[1], temporal_length), dtype=np.float32)
-      discounted_rewards = np.zeros_like(rewards)
-      running_add        = 0
-      for t in range(0, episode_length):
-        running_add           = running_add + (gamma**t)*rewards[t]
-        discounted_rewards[t] = running_add
-        inputs[t]             = states[t]
-
-        estimated_value       = value(tf.convert_to_tensor([states[t]], dtype=tf.float32)).numpy()[0][0]
-        print("estimated_value : ", estimated_value)
+      episode_length = len(states)
+      inputs         = np.zeros((episode_length, desired_shape[0], desired_shape[1], temporal_length), dtype=np.float32)
+      total_returns  = np.zeros_like(rewards)
+      advantages     = np.zeros_like(rewards)
       
-      train_policy_network(inputs, actions, discounted_rewards)
+      for t in range(0, episode_length):
+        inputs[t] = states[t]
+        V_t = 0
+        for j in range(t, episode_length):
+          V_t = V_t + (gamma**j)*rewards[j]
+        total_returns[t] = V_t
+        estimated_value  = value(tf.convert_to_tensor([states[t]], dtype=tf.float32)).numpy()[0][0]
+        advantage_value  = V_t - estimated_value
+        advantages[t]    = advantage_value
+      
+      train_value_network(inputs, total_returns)
+      print("value неорон сүлжээг сургалаа")
+
+      train_policy_network(inputs, actions, advantages)
+      print("policy неорон сүлжээг сургалаа")
       
       training_happened         = True
       states, rewards, actions  = [], [], []
