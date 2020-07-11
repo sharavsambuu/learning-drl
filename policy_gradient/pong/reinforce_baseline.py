@@ -96,9 +96,9 @@ def train_policy_network(inputs, actions, advantages):
 
 if not os.path.exists("model_weights"):
   os.makedirs("model_weights")
-if os.path.exists('model_weights/ReinforceDiscounted'):
-  policy = tf.keras.models.load_model("model_weights/ReinforceDiscounted")
-  print("өмнөх сургасан ReinforceDiscounted моделийг ачааллаа")
+if os.path.exists('model_weights/ReinforceBaseline'):
+  policy = tf.keras.models.load_model("model_weights/ReinforceBaseline")
+  print("өмнөх сургасан ReinforceBaseline моделийг ачааллаа")
 
 
 global_steps = 0
@@ -152,8 +152,8 @@ for episode in range(num_episodes):
       pass
 
     if global_steps%save_per_step==0 and training_happened==True:
-      policy.save("model_weights/ReinforceDiscounted")
-      print("моделийг model_weights/ReinforceDiscounted фолдерт хадгаллаа")
+      policy.save("model_weights/ReinforceBaseline")
+      print("моделийг model_weights/ReinforceBaseline фолдерт хадгаллаа")
 
     if done==True:
       if debug_render:
@@ -163,10 +163,10 @@ for episode in range(num_episodes):
       input_states       = tf.convert_to_tensor(states, dtype=tf.float32)
       discounted_rewards = np.zeros_like(rewards)
       for t in range(0, episode_length):
-        V_t = 0
+        G_t = 0
         for idx, j in enumerate(range(t, episode_length)):
-          V_t = V_t + (gamma**idx)*rewards[j]
-        discounted_rewards[t] = V_t
+          G_t = G_t + (gamma**idx)*rewards[j]
+        discounted_rewards[t] = G_t
       
       train_policy_network(input_states, actions, discounted_rewards)
       
