@@ -164,7 +164,7 @@ for episode in range(num_episodes):
       discounted_rewards = np.zeros_like(rewards)
       running_add        = 0
       for t in range(0, episode_length):
-        running_add           = running_add*gamma + rewards[t]
+        running_add           = running_add + (gamma**t)*rewards[t]
         discounted_rewards[t] = running_add
         inputs[t]             = states[t]
       
