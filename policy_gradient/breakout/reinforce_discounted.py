@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 
 
-debug_render      = False
+debug_render      = True
 num_episodes      = 5000
 train_start_count = 1000       # хичнээн sample цуглуулсны дараа сургаж болох вэ
 save_per_step     = 2500       # хэдэн алхам тутамд сургасан моделийг хадгалах вэ
@@ -160,18 +160,14 @@ for episode in range(num_episodes):
         plt.clf()
 
       episode_length     = len(states)
-
-      # discount factor-г reward жагсаалтруу оруулж ирэх
+      inputs             = np.zeros((episode_length, desired_shape[0], desired_shape[1], temporal_length), dtype=np.float32)
       discounted_rewards = np.zeros_like(rewards)
-      running_add = 0
+      running_add        = 0
       for t in range(0, episode_length):
-        running_add = running_add*gamma + rewards[t]
+        running_add           = running_add*gamma + rewards[t]
         discounted_rewards[t] = running_add
-      #discounted_rewards -= np.mean(discounted_rewards)
-      #discounted_rewards /= np.std(discounted_rewards)
+        inputs[t]             = states[t]
       
-      inputs     = np.zeros((episode_length, desired_shape[0], desired_shape[1], temporal_length), dtype=np.float32)
-
       train_policy_network(inputs, actions, discounted_rewards)
       
       training_happened = True
