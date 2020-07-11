@@ -200,8 +200,8 @@ for episode in range(num_episodes):
       for t in range(0, episode_length):
         inputs[t] = states[t]
         V_t = 0
-        for j in range(t, episode_length):
-          V_t = V_t + (gamma**j)*rewards[j]
+        for idx, j in enumerate(range(t, episode_length)):
+          V_t = V_t + (gamma**idx)*rewards[j]
         total_returns[t] = V_t
         estimated_value  = value(tf.convert_to_tensor([states[t]], dtype=tf.float32)).numpy()[0][0]
         advantage_value  = V_t - estimated_value
