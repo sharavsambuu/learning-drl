@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 
 
-debug_render      = True
+debug_render      = False
 num_episodes      = 5000
 train_start_count = 1000       # хичнээн sample цуглуулсны дараа сургаж болох вэ
 save_per_step     = 2500       # хэдэн алхам тутамд сургасан моделийг хадгалах вэ
@@ -127,7 +127,7 @@ def train_value_network(inputs, total_returns):
 
 if not os.path.exists("model_weights"):
   os.makedirs("model_weights")
-if os.path.exists('model_weights/ReinforceAdvantage'):
+if os.path.exists('model_weights/ReinforceAdvantagePolicy'):
   policy = tf.keras.models.load_model("model_weights/ReinforceAdvantagePolicy")
   value  = tf.keras.models.load_model("model_weights/ReinforceAdvantageValue")
   print("өмнөх сургасан моделийг ачааллаа")
