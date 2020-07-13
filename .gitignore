@@ -140,6 +140,7 @@ cython_debug/
 
 Rocket_Lander_Gym/
 dqn/rocket_lander/model_weights/
+dqn/cart_pole/model_weights/
 dqn/breakout/model_weights/
 dqn/lunar_lander/model_weights/
 policy_gradient/lunar_lander/model_weights/
