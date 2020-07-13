@@ -11,9 +11,10 @@ matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 import tensorflow as tf
 
+tf.get_logger().setLevel('ERROR')
 
-debug_render      = True
-num_episodes      = 200
+debug_render      = False
+num_episodes      = 2000
 train_start_count = 1000       # хичнээн sample цуглуулсны дараа сургаж болох вэ
 save_per_step     = 2500       # хэдэн алхам тутамд сургасан моделийг хадгалах вэ
 training_happened = False
@@ -56,7 +57,7 @@ class PolicyNetwork(tf.keras.Model):
  
 optimizer   = tf.keras.optimizers.Adam()
 
-env       = gym.make('Pong-v0')
+env       = gym.make('CartPole-v0')
 env.reset()
 n_actions = env.action_space.n
 
@@ -96,8 +97,8 @@ def train_policy_network(inputs, actions, advantages):
 
 if not os.path.exists("model_weights"):
   os.makedirs("model_weights")
-if os.path.exists('model_weights/ReinforceBaseline'):
-  policy = tf.keras.models.load_model("model_weights/ReinforceBaseline")
+if os.path.exists('model_weights/ReinforceBaselineRawpixel'):
+  policy = tf.keras.models.load_model("model_weights/ReinforceBaselineRawpixel")
   print("өмнөх сургасан ReinforceBaseline моделийг ачааллаа")
 
 
@@ -154,8 +155,8 @@ for episode in range(num_episodes):
       pass
 
     if global_steps%save_per_step==0 and training_happened==True:
-      policy.save("model_weights/ReinforceBaseline")
-      print("моделийг model_weights/ReinforceBaseline фолдерт хадгаллаа")
+      policy.save("model_weights/ReinforceBaselineRawpixel")
+      print("моделийг model_weights/ReinforceBaselineRawpixel фолдерт хадгаллаа")
 
     if done==True:
       if debug_render:
@@ -182,7 +183,7 @@ plt.style.use('seaborn')
 plt.plot(rewards_history)
 plt.xlabel('Episode')
 plt.ylabel('Total Reward')
-plt.savefig('reinforce_baseline.png')
+plt.savefig('reinforce_baseline_rawpixel.png')
 
 if debug_render:
   plt.close("all")

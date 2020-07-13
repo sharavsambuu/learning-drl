@@ -16,18 +16,20 @@ tf.get_logger().setLevel('ERROR')
 debug_render  = False
 num_episodes  = 2000
 save_per_step = 1000  # хэдэн алхам тутамд сургасан моделийг хадгалах вэ
-gamma         = 0.99  # discount factor
+gamma         = 0.95  # discount factor
 
 
 class PolicyNetwork(tf.keras.Model):
   def __init__(self, n_actions):
     super(PolicyNetwork, self).__init__()
-    self.dense_layer  = tf.keras.layers.Dense(128, activation='relu', kernel_initializer='glorot_uniform')
-    self.output_layer = tf.keras.layers.Dense(n_actions, activation='softmax', kernel_initializer='glorot_uniform')
+    self.dense_layer   = tf.keras.layers.Dense(128, activation='relu', kernel_initializer='glorot_uniform')
+    self.dropout_layer = tf.keras.layers.Dropout(0.1)
+    self.output_layer  = tf.keras.layers.Dense(n_actions, activation='softmax', kernel_initializer='glorot_uniform')
   @tf.function(experimental_relax_shapes=True)
   def call(self, inputs):
-    dense_out = self.dense_layer(inputs)
-    return self.output_layer(dense_out)
+    dense_out   = self.dense_layer(inputs)
+    dropout_out = self.dropout_layer(dense_out)
+    return self.output_layer(dropout_out)
 
 
 
@@ -36,8 +38,8 @@ env.reset()
 n_actions = env.action_space.n
 
 
-policy_optimizer = tf.keras.optimizers.RMSprop(lr=0.0007)
-#policy_optimizer = tf.keras.optimizers.Adam()
+#policy_optimizer = tf.keras.optimizers.RMSprop(lr=0.0007)
+policy_optimizer = tf.keras.optimizers.Adam(0.001)
 
 policy  = PolicyNetwork(n_actions)
 
@@ -115,6 +117,10 @@ for episode in range(num_episodes):
       episode_length     = len(states)
       input_states       = tf.convert_to_tensor(states, dtype=tf.float32)
       discounted_rewards = np.zeros_like(rewards)
+      running_add        = 0
+      #for i in reversed(range(len(rewards))):
+      #  running_add = running_add * gamma + rewards[i]
+      #  discounted_rewards[i] = running_add
       for t in range(0, episode_length):
         G_t = 0
         for idx, j in enumerate(range(t, episode_length)):
@@ -122,6 +128,7 @@ for episode in range(num_episodes):
         discounted_rewards[t] = G_t
       # normalize rewards
       discounted_rewards = (discounted_rewards - np.mean(discounted_rewards)) / (np.std(discounted_rewards) + 1e-10)
+      #discounted_rewards = discounted_rewards / np.std(discounted_rewards - np.mean(discounted_rewards))
       
       train_policy_network(input_states, actions, discounted_rewards)
       
@@ -131,10 +138,10 @@ for episode in range(num_episodes):
       rewards_history.append(score)
 
 
-plt.style.use('seaborn')
 plt.plot(rewards_history)
-plt.xlabel('Episode')
-plt.ylabel('Total Reward')
+x = np.array(range(len(rewards_history)))
+smooth_func = np.poly1d(np.polyfit(x, rewards_history, 3))
+plt.plot(x, smooth_func(x), label='Mean', linestyle='--')
 plt.savefig('reinforce_baseline.png')
 #plt.show()
 
