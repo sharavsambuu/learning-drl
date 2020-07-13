@@ -167,6 +167,7 @@ for episode in range(num_episodes):
         for idx, j in enumerate(range(t, episode_length)):
           G_t = G_t + (gamma**idx)*rewards[j]
         discounted_rewards[t] = G_t
+      discounted_rewards = (discounted_rewards - np.mean(discounted_rewards)) / (np.std(discounted_rewards) + 1e-10)
       
       train_policy_network(input_states, actions, discounted_rewards)
       
