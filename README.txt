@@ -11,3 +11,18 @@
   change CONTINUOUS variable in Rocket_Lander_Gym/rocket_lander_gym/envs/rocket_lander.py to False
 
   cd Rocket_Lander_Gym && pip install .
+
+# Google's Trax and Flax
+  https://github.com/google/jax
+  https://github.com/google/flax
+`
+	PYTHON_VERSION=cp38  # alternatives: cp36, cp37, cp38
+	CUDA_VERSION=cuda101  # alternatives: cuda100, cuda101, cuda102, cuda110
+	PLATFORM=manylinux2010_x86_64  # alternatives: manylinux2010_x86_64
+	BASE_URL='https://storage.googleapis.com/jax-releases'
+	pip install --upgrade $BASE_URL/$CUDA_VERSION/jaxlib-0.1.51-$PYTHON_VERSION-none-$PLATFORM.whl
+	pip install --upgrade jax  # install jax
+	pip install --upgrade jaxlib
+	pip install --upgrade flax
+	
+`
