@@ -1,5 +1,6 @@
 import os
 import random
+import math
 from time import sleep
 from collections import deque
 import numpy as np
@@ -14,25 +15,25 @@ import tensorflow as tf
 
 tf.get_logger().setLevel('ERROR')
 
-debug_render      = True
-num_episodes      = 2000
+debug_render      = False
+num_episodes      = 100000
 train_start_count = 1000       # хичнээн sample цуглуулсны дараа сургаж болох вэ
-train_per_step    = 500        # хэдэн алхам тутамд сургах вэ
+train_per_step    = 1          # хэдэн алхам тутамд сургах вэ
 save_per_step     = 2500       # хэдэн алхам тутамд сургасан моделийг хадгалах вэ
 training_happened = False
 sync_per_step     = 1000       # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
 train_count       = 1          # хэдэн удаа сургах вэ
-batch_size        = 32
-desired_shape     = (320, 420) # фрэймыг багасгаж ашиглах хэмжээ
+batch_size        = 64
 gamma             = 0.99       # discount factor
 
 # exploration vs exploitation
-epsilon           = 1.0        
-epsilon_decay     = 0.999
-epsilon_min       = 0.13
+epsilon           = 1.0
+epsilon_decay     = 0.001
+epsilon_max       = 1
+epsilon_min       = 0.01
 
 # replay memory
-memory_length     = 3000 
+memory_length     = 100000
 
 
 class SumTree:
@@ -133,15 +134,15 @@ per_memory = PERMemory(memory_length)
 
 global_steps = 0
 for episode in range(num_episodes):
-  print(episode, "р ажиллагаа эхэллээ")
+  #print(episode, "р ажиллагаа эхэллээ")
   done        = False
   state       = env.reset()
   state_shape = state.shape
-  
+
   if debug_render:
     env.render()
 
-  episode_rewards = [] 
+  episode_rewards = []
 
   while not done:
     global_steps = global_steps+1
@@ -152,15 +153,15 @@ for episode in range(num_episodes):
     else:
       q_value = q_network(np.array([state], dtype=np.float32))
       action  = np.argmax(q_value[0])
-    
+
     new_state, reward, done, _ = env.step(action)
 
     episode_rewards.append(reward)
 
     # TD error-г тооцоолох, энэ алдааны утгаар sample-д priority утга өгнө
     # алдааны утга нь их байх тусмаа сургах batch дээр гарч ирэх магадлал нь ихэснэ
-    if epsilon == 1:
-      done = True
+    #if epsilon == 1:
+    #  done = True
     q_out        = q_network(np.array([state], dtype=np.float32)).numpy()
     old_value    = q_out[0][action]
     target_q_out = target_q_network(np.array([new_state], dtype=np.float32)).numpy()
@@ -170,14 +171,15 @@ for episode in range(num_episodes):
       q_out[0][action] = reward + gamma*np.amax(target_q_out[0])
     td_error = abs(old_value-q_out[0][action])
     per_memory.add(td_error, (state, action, reward, new_state, done))
-    
+
     # explore хийх epsilon утга шинэчлэх
     if epsilon>epsilon_min:
-      epsilon = epsilon*epsilon_decay
+      epsilon = epsilon_min + (epsilon_max-epsilon_min)*math.exp(-epsilon_decay*global_steps)
+      #print(epsilon)
 
     # хангалттай sample цугларсан тул Q неорон сүлжээг сургах
     if (global_steps%train_per_step==0):
-      print("Q сүлжээг сургаж байна түр хүлээгээрэй")
+      #print("Q сүлжээг сургаж байна түр хүлээгээрэй")
       for train_step in range(train_count):
         # цугларсан жишээнүүдээсээ эхлээд batch sample-дэж үүсгэх
         sampled_batch  = per_memory.sample(batch_size)
@@ -197,7 +199,7 @@ for episode in range(num_episodes):
           actions.append(sampled_batch[i][1][1])     # action
           rewards.append(sampled_batch[i][1][2])     # reward
           dones  .append(sampled_batch[i][1][4])     # is done
-      
+
         q_out        = q_network(q_input).numpy()
         target_q_out = target_q_network(target_q_input).numpy()
 
@@ -225,21 +227,21 @@ for episode in range(num_episodes):
         optimizer.apply_gradients(zip(gradients, q_network.trainable_variables))
 
       training_happened = True
-      print("Q сүлжээг сургаж дууслаа")
+      #print("Q сүлжээг сургаж дууслаа")
 
     # target q неорон сүлжээг шинэчлэх цаг боллоо
     if global_steps%sync_per_step==0 and training_happened==True:
       target_q_network.set_weights(q_network.get_weights())
-      print("target неорон сүлжээнийг жингүүдийг шинэчиллээ")
+      #print("target неорон сүлжээнийг жингүүдийг шинэчиллээ")
 
     if global_steps%save_per_step==0 and training_happened==True:
       q_network.save("model_weights/dqn_per_q")
       target_q_network.save("model_weights/dqn_per_q_target")
-      print("моделийг model_weights/ фолдерт хадгаллаа")
+      #print("моделийг model_weights/ фолдерт хадгаллаа")
 
     if done==True:
-      print(episode, "р ажиллагаа дууслаа")
-      print("нийт reward   :", sum(episode_rewards))
-      print("дундаж reward :", sum(episode_rewards)/len(episode_rewards))
+      #print(episode, "р ажиллагаа дууслаа")
+      print("{} - нийт reward : {}".format(episode, sum(episode_rewards)))
+      #print("дундаж reward :", sum(episode_rewards)/len(episode_rewards))
 
 env.close()
