@@ -139,12 +139,12 @@ cython_debug/
 
 
 Rocket_Lander_Gym/
-dqn/rocket_lander/model_weights/
-dqn/cart_pole/model_weights/
-dqn/breakout/model_weights/
-dqn/lunar_lander/model_weights/
-policy_gradient/lunar_lander/model_weights/
-policy_gradient/pong/model_weights/
-policy_gradient/breakout/model_weights/
-policy_gradient/cart_pole/model_weights/
+tf2/dqn/rocket_lander/model_weights/
+tf2/dqn/cart_pole/model_weights/
+tf2/dqn/breakout/model_weights/
+tf2/dqn/lunar_lander/model_weights/
+tf2/policy_gradient/lunar_lander/model_weights/
+tf2/policy_gradient/pong/model_weights/
+tf2/policy_gradient/breakout/model_weights/
+tf2/policy_gradient/cart_pole/model_weights/
 
