@@ -169,3 +169,91 @@ def loss_fn(model):
 model_gradients = jax.grad(loss_fn)(model)
 print("Моделийн loss-оос авсан gradient утгууд")
 print(model_gradients.params)
+
+
+# BatchNorm мэтийн тохиолдолд batch-уудын mean, variance гэх мэт статистик өгөгдлүүдийг
+# хадгалаж хэрэглэх хэрэгцээ гардаг энэ тохиолдолд Module.state-г хэрэглэж болно
+class BatchNorm(flax.nn.Module):
+    def apply(self, x,
+            red_axis   = 0,
+            eps        = 1e-5,
+            momentum   = 0.99,
+            training   = False,
+            gamma_init = jax.nn.initializers.ones,
+            beta_init  = jax.nn.initializers.zeros
+            ):
+        # Оролтын моментүүдийг тооцоолох
+        mean    = x.mean(red_axis, keepdims=True)
+        var     = jnp.square(x-mean).mean(red_axis, keepdims=True)
+        # State хувьсагчууд тодорхойлох
+        ra_mean = self.state('mean', mean.shape, jax.nn.initializers.zeros)
+        ra_var  = self.state('var' , var.shape , jax.nn.initializers.ones )
+        # Жингүүдийг эхний байдлаар цэнэглэж байгаа бол 
+        # average утгуудыг тооцох шаардлага байхгүй
+        if not self.is_initializing():
+            if training:
+                # Сургаж байгаа үед average-үүдийг шинэчлэх ёстой
+                alpha          = 1. - momentum
+                ra_mean.value += alpha*(mean - ra_mean.value)
+                ra_var.value  += alpha*(var  - ra_var.value )
+            else:
+                # Сургаагүй тохиолдолд average-уудаа хэрэглэнэ
+                mean = ra_mean.value
+                var  = ra_var.value
+        # Оролтын өгөгдлөө стандартчилах
+        y = (x-mean)/jnp.sqrt(var+eps)
+        # Оролтын scale болон bias-уудыг суралцах
+        gamma = self.param('gamma', mean.shape, gamma_init)
+        beta  = self.param('beta' , mean.shape, beta_init )
+        return gamma*y+beta
+
+# Хэрэв state хэрэглэхээр бол flax.nn.stateful context manager ашиглана
+# Энэ state-үүд flax.nn.Collection дотор хадгалагддаг
+
+class MyModel(flax.nn.Module):
+    def apply(self, x, training=False):
+        x = Dense(x, features=4)
+        x = BatchNorm(x, training=training, momentum=0., name='batch_norm')
+        return x
+
+dist_a = lambda rng, shape: jax.random.normal(rng, shape)*jnp.array([[1., 3.]])
+x_a    = dist_a(jax.random.PRNGKey(1), (1024, 2))
+print("Оролтын өгөгдлын стандарт хазайлт :", x_a.std(0))
+
+with flax.nn.stateful() as init_state:
+    y, params = MyModel.init(jax.random.PRNGKey(2), x_a)
+print("Гаралтын стандарт хазайлт (init) :", y.std(0))
+
+with flax.nn.stateful(init_state) as new_state:
+    y = MyModel.call(params, x_a, training=True)
+print("Гаралтын стандарт хазайлт (training) :", y.std(0))
+
+with flax.nn.stateful(new_state, mutable=False):
+    y = MyModel.call(params, x_a, training=False)
+print("Гаралтын стандарт хазайлт (testing) :", y.std(0))
+
+# state өгөгдлийг Collection.as_dict() ээр шалгаж болно
+print("Эхлэл state :")
+print(init_state.as_dict())
+
+print("Шинэ state :")
+print(new_state.as_dict())
+
+# state тооцох механизм нь ил байх ёстой жишээлбэл 
+# тест хийж байх үед state тооцоолох шаардлагагүй
+# мөн өөр оролтын өгөгдлүүд хэрэглэн өөр статистик 
+# state цуглуулах шаардлага гардаг энэ тохиолд
+# ил байдлаар state тооцохын үр ашиг гардаг
+dist_b = lambda rng, shape: jax.random.normal(rng, shape)*jnp.array([[2., 5.]])
+x_b    = dist_b(jax.random.PRNGKey(1), (1024, 2))
+with flax.nn.stateful(new_state, mutable=False):
+    y = MyModel.call(params, x_b, training=False)
+print(y.std(0)) # Энэ тохиолдолд зөв нормчилогдож чадахгүй
+
+with flax.nn.stateful(init_state) as state_b:
+    y = MyModel.call(params, x_b, training=True)
+print("Гаралтын стандарт хазайлт (training) :", y.std(0))
+
+with flax.nn.stateful(state_b, mutable=False):
+    y = MyModel.call(params, x_b, training=False)
+print("Гаралтын стандарт хазайлт (testing) :", y.std(0))
