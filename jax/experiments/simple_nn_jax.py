@@ -101,6 +101,7 @@ def train_neural_network_step(parameters, inputs, labels):
     #print("Сургах ёстой параметрүүд :")
     #print(parameters)
     updated_parameters = []
+    # θ = θ - ∇_θ(Loss), gradient descent
     for param, grad in zip(parameters, gradients):
         updated_parameters.append(param - learning_rate*grad)
     return tuple(updated_parameters)
