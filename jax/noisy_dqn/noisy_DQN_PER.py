@@ -94,26 +94,46 @@ class PERMemory:
 #    - https://flax.readthedocs.io/en/latest/notebooks/flax_guided_tour.html 
 #    - https://github.com/google/flax/blob/master/examples/vae/train.py
 #    - https://jax.readthedocs.io/en/latest/_modules/jax/nn/initializers.html
-def constant_initializer(value, dtype=jnp.float32):
+def sigma_initializer(value, dtype=jnp.float32):
     def init(key, shape, dtype=dtype):
         return jnp.full(shape, value, dtype=dtype)
     return init
 
 class NoisyDense(flax.nn.Module):
-    def apply(self, x,
+    def apply(self, x, noise_rng,
             features,
             sigma_init         = 0.017,
             use_bias           = True,
             kernel_initializer = jax.nn.initializers.orthogonal(),
-            bias_initializer   = jax.nn.initializers.zeros
+            bias_initializer   = jax.nn.initializers.zeros,
             ):
         input_features = x.shape[-1]
         kernel_shape   = (input_features, features)
         kernel         = self.param('kernel'      , kernel_shape, kernel_initializer)
-        sigma_kernel   = self.param('sigma_kernel', kernel_shape,
-                constant_initializer(value=sigma_init))
+        sigma_kernel   = self.param('sigma_kernel', kernel_shape, sigma_initializer(value=sigma_init))
 
-        pass
+        perturbed_kernel = jnp.add(
+                kernel,
+                jnp.multiply(
+                    sigma_kernel,
+                    jax.random.uniform(noise_rng, kernel_shape)
+                    )
+                )
+        outputs = jnp.dot(x, perturbed_kernel)
+
+        if use_bias:
+            bias       = self.param('bias'      , (features,), bias_initializer)
+            sigma_bias = self.param('sigma_bias', (features,), sigma_initializer(value=sigma_init))
+            perturbed_bias = jnp.add(
+                    bias,
+                    jnp.multiply(
+                        sigma_bias,
+                        jax.random.uniform(noise_rng, (features,))
+                        )
+                    )
+            outputs = jnp.add(outputs, perturbed_bias)
+
+        return outputs
 
 class DeepQNetwork(flax.nn.Module):
     def apply(self, x, noise_rng, n_actions):
@@ -225,9 +245,9 @@ try:
 
             # sample нэмэхдээ temporal difference error-ийг тооцож нэмэх
             temporal_difference = float(td_error(optimizer.target, target_q_network, (
-                    jnp.asarray([state]),
-                    jnp.asarray([action]),
-                    jnp.asarray([reward]),
+                    jnp.asarray([state    ]),
+                    jnp.asarray([action   ]),
+                    jnp.asarray([reward   ]),
                     jnp.asarray([new_state])
                 ), key)[0])
             per_memory.add(temporal_difference, (state, action, reward, new_state, int(done)))
