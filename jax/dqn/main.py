@@ -7,14 +7,21 @@ from collections import deque
 import flax
 import jax
 from jax import numpy as jnp
+import numpy as np
+
 
 debug_render  = True
 debug         = True
 num_episodes  = 100
-memory_length = 4000
 batch_size    = 64
 learning_rate = 0.001
+memory_length = 4000
 replay_memory = deque(maxlen=memory_length)
+
+epsilon       = 1.0
+epsilon_decay = 0.001
+epsilon_max   = 1.0
+epsilon_min   = 0.01
 
 
 class DeepQNetwork(flax.nn.Module):
@@ -54,13 +61,20 @@ try:
         while True:
             global_steps = global_steps+1
 
-            action, q_values = policy(optimizer.target, state)
-            if debug:
-                print("q утгууд :"       , q_values)
-                print("сонгосон action :", action  )
+            if np.random.rand() <= epsilon:
+                action = env.action_space.sample()
+            else:
+                action, q_values = policy(optimizer.target, state)
+                if debug:
+                    print("q утгууд :"       , q_values)
+                    print("сонгосон action :", action  )
 
-            action                     = env.action_space.sample()
-            new_state, reward, done, _ = env.step(action)
+            if epsilon>epsilon_min:
+                epsilon = epsilon_min+(epsilon_max-epsilon_min)*math.exp(-epsilon_decay*global_steps)
+                if debug:
+                    print("epsilon :", epsilon)
+
+            new_state, reward, done, _ = env.step(int(action))
             #print(new_state.shape)
             if done:
                 new_state = None
