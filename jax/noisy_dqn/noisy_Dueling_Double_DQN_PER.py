@@ -73,7 +73,7 @@ class PERMemory:
         return (error+self.e)**self.a
     def add(self, error, sample):
         p = self._get_priority(error)
-        self.tree.add(p, sample)
+        self.tree.add(p, sample) 
     def sample(self, n):
         batch   = []
         segment = self.tree.total()/n
@@ -111,7 +111,6 @@ class NoisyDense(flax.nn.Module):
         kernel_shape   = (input_features, features)
         kernel         = self.param('kernel'      , kernel_shape, kernel_initializer)
         sigma_kernel   = self.param('sigma_kernel', kernel_shape, sigma_initializer(value=sigma_init))
-
         perturbed_kernel = jnp.add(
                 kernel,
                 jnp.multiply(
@@ -120,7 +119,6 @@ class NoisyDense(flax.nn.Module):
                     )
                 )
         outputs = jnp.dot(x, perturbed_kernel)
-
         if use_bias:
             bias       = self.param('bias'      , (features,), bias_initializer)
             sigma_bias = self.param('sigma_bias', (features,), sigma_initializer(value=sigma_init))
@@ -132,17 +130,27 @@ class NoisyDense(flax.nn.Module):
                         )
                     )
             outputs = jnp.add(outputs, perturbed_bias)
-
         return outputs
 
-class DeepQNetwork(flax.nn.Module):
+class NoisyDuelingQNetwork(flax.nn.Module):
     def apply(self, x, noise_rng, n_actions):
         dense_layer_1      = flax.nn.Dense(x, 64)
         activation_layer_1 = flax.nn.relu(dense_layer_1)
-        noisy_dense_layer  = NoisyDense(activation_layer_1, noise_rng, 32)
-        activation_layer_2 = flax.nn.relu(noisy_dense_layer)
-        output_layer       = NoisyDense(activation_layer_2, noise_rng, n_actions)
-        return output_layer
+        noisy_layer        = NoisyDense(activation_layer_1, noise_rng, 64)
+        activation_layer_2 = flax.nn.relu(noisy_layer)
+
+        noisy_value       = NoisyDense(activation_layer_2, noise_rng, 64)
+        value             = flax.nn.relu(noisy_value)
+        value             = NoisyDense(value, noise_rng, 1)
+
+        noisy_advantage   = NoisyDense(activation_layer_2, noise_rng, 64)
+        advantage         = flax.nn.relu(noisy_advantage)
+        advantage         = NoisyDense(advantage, noise_rng, n_actions)
+
+        advantage_average = jnp.mean(advantage, keepdims=True)
+
+        q_values_layer    = jnp.subtract(jnp.add(advantage, value), advantage_average)
+        return q_values_layer
 
 
 env   = gym.make('CartPole-v0')
@@ -150,17 +158,18 @@ state = env.reset()
 
 n_actions        = env.action_space.n
 
-dqn_module       = DeepQNetwork.partial(n_actions=n_actions)
-_, params        = dqn_module.init_by_shape(
-        jax.random.PRNGKey(0),
-        [state.shape],
-        noise_rng=jax.random.PRNGKey(0))
-q_network        = flax.nn.Model(dqn_module, params)
-target_q_network = flax.nn.Model(dqn_module, params)
+noisy_dueling_dqn_module = NoisyDuelingQNetwork.partial(n_actions=n_actions)
+_, params                = noisy_dueling_dqn_module.init_by_shape(
+    jax.random.PRNGKey(0), 
+    [state.shape],
+    noise_rng=jax.random.PRNGKey(0)
+    )
+q_network          = flax.nn.Model(noisy_dueling_dqn_module, params)
+target_q_network   = flax.nn.Model(noisy_dueling_dqn_module, params)
 
-optimizer        = flax.optim.Adam(learning_rate).create(q_network)
+optimizer          = flax.optim.Adam(learning_rate).create(q_network)
 
-per_memory       = PERMemory(memory_length)
+per_memory         = PERMemory(memory_length)
 
 @jax.jit
 def policy(model, x, rng):
@@ -170,9 +179,10 @@ def policy(model, x, rng):
 
 
 @jax.vmap
-def calculate_td_error(q_value_vec, target_q_value_vec, action, reward):
-    td_target = reward + gamma*jnp.amax(target_q_value_vec)
-    td_error  = td_target - q_value_vec[action]
+def calculate_td_error(q_value_vec, next_q_value_vec, target_q_value_vec, action, reward):
+    action_select = jnp.argmax(next_q_value_vec)
+    td_target     = reward + gamma*target_q_value_vec[action_select]
+    td_error      = td_target - q_value_vec[action]
     return jnp.abs(td_error)
 
 @jax.jit
@@ -181,15 +191,17 @@ def td_error(model, target_model, batch, rng):
     # batch[1] - actions
     # batch[2] - rewards
     # batch[3] - next_states
-    predicted_q_values = model(batch[0], noise_rng=rng)
-    target_q_values    = target_model(batch[3], noise_rng=rng)
-    return calculate_td_error(predicted_q_values, target_q_values, batch[1], batch[2])
+    predicted_q_values      = model(batch[0], noise_rng=rng)
+    predicted_next_q_values = model(batch[3], noise_rng=rng)
+    target_q_values         = target_model(batch[3], noise_rng=rng)
+    return calculate_td_error(predicted_q_values, predicted_next_q_values, target_q_values, batch[1], batch[2])
 
 
 @jax.vmap
-def q_learning_loss(q_value_vec, target_q_value_vec, action, reward, done):
-    td_target = reward + gamma*jnp.amax(target_q_value_vec)*(1.-done)
-    td_error  = jax.lax.stop_gradient(td_target) - q_value_vec[action]
+def q_learning_loss(q_value_vec, next_q_value_vec, target_q_value_vec, action, reward, done):
+    action_select = jnp.argmax(next_q_value_vec)
+    td_target     = reward + gamma*target_q_value_vec[action_select]*(1.-done)
+    td_error      = jax.lax.stop_gradient(td_target) - q_value_vec[action]
     return jnp.square(td_error)
 
 @jax.jit
@@ -200,11 +212,13 @@ def train_step(optimizer, target_model, batch, rng):
     # batch[3] - next_states
     # batch[4] - dones
     def loss_fn(model):
-        predicted_q_values = model(batch[0], noise_rng=rng)
-        target_q_values    = target_model(batch[3], noise_rng=rng)
+        predicted_q_values      = model(batch[0], noise_rng=rng)
+        predicted_next_q_values = model(batch[3], noise_rng=rng)
+        target_q_values         = target_model(batch[3], noise_rng=rng)
         return jnp.mean(
                 q_learning_loss(
                     predicted_q_values,
+                    predicted_next_q_values,
                     target_q_values,
                     batch[1],
                     batch[2],
@@ -245,9 +259,9 @@ try:
 
             # sample нэмэхдээ temporal difference error-ийг тооцож нэмэх
             temporal_difference = float(td_error(optimizer.target, target_q_network, (
-                    jnp.asarray([state    ]),
-                    jnp.asarray([action   ]),
-                    jnp.asarray([reward   ]),
+                    jnp.asarray([state]),
+                    jnp.asarray([action]),
+                    jnp.asarray([reward]),
                     jnp.asarray([new_state])
                 ), key)[0])
             per_memory.add(temporal_difference, (state, action, reward, new_state, int(done)))
