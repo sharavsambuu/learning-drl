@@ -121,9 +121,10 @@ def policy(model, x):
 
 
 @jax.vmap
-def calculate_td_error(q_value_vec, target_q_value_vec, action, action_select, reward):
-    td_target = reward + gamma*target_q_value_vec[action_select]
-    td_error  = td_target - q_value_vec[action]
+def calculate_td_error(q_value_vec, next_q_value_vec, target_q_value_vec, action, reward):
+    action_select = jnp.argmax(next_q_value_vec)
+    td_target     = reward + gamma*target_q_value_vec[action_select]
+    td_error      = td_target - q_value_vec[action]
     return jnp.abs(td_error)
 
 @jax.jit
@@ -132,16 +133,17 @@ def td_error(model, target_model, batch):
     # batch[1] - actions
     # batch[2] - rewards
     # batch[3] - next_states
-    predicted_q_values = model(batch[0])
-    target_q_values    = target_model(batch[3])
-    action_selects     = model(batch[3]).argmax(-1)
-    return calculate_td_error(predicted_q_values, target_q_values, batch[1], action_selects, batch[2])
+    predicted_q_values      = model(batch[0])
+    predicted_next_q_values = model(batch[3])
+    target_q_values         = target_model(batch[3])
+    return calculate_td_error(predicted_q_values, predicted_next_q_values, target_q_values, batch[1], batch[2])
 
 
 @jax.vmap
-def q_learning_loss(q_value_vec, target_q_value_vec, action, action_select, reward, done):
-    td_target = reward + gamma*target_q_value_vec[action_select]*(1.-done)
-    td_error  = jax.lax.stop_gradient(td_target) - q_value_vec[action]
+def q_learning_loss(q_value_vec, next_q_value_vec, target_q_value_vec, action, reward, done):
+    action_select = jnp.argmax(next_q_value_vec)
+    td_target     = reward + gamma*target_q_value_vec[action_select]*(1.-done)
+    td_error      = jax.lax.stop_gradient(td_target) - q_value_vec[action]
     return jnp.square(td_error)
 
 @jax.jit
@@ -152,15 +154,16 @@ def train_step(optimizer, target_model, batch):
     # batch[3] - next_states
     # batch[4] - dones
     def loss_fn(model):
-        predicted_q_values = model(batch[0])
-        target_q_values    = target_model(batch[3])
-        action_selects     = model(batch[3]).argmax(-1)
+        # reference : https://mc.ai/introduction-to-double-deep-q-learning-ddqn/
+        predicted_q_values      = model(batch[0])
+        predicted_next_q_values = model(batch[3])
+        target_q_values         = target_model(batch[3])
         return jnp.mean(
                 q_learning_loss(
                     predicted_q_values,
+                    predicted_next_q_values,
                     target_q_values,
                     batch[1],
-                    action_selects,
                     batch[2],
                     batch[4]
                     )
