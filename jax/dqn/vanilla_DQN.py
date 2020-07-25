@@ -12,7 +12,7 @@ import numpy as np
 
 debug_render  = True
 debug         = False
-num_episodes  = 100
+num_episodes  = 200
 batch_size    = 64
 learning_rate = 0.001
 sync_steps    = 100
@@ -57,8 +57,8 @@ def policy(model, x):
     return max_q_action, predicted_q_values
 
 @jax.vmap
-def q_learning_loss(q_value_vec, target_q_value_vec, action, action_select, reward, done):
-    td_target = reward + gamma*target_q_value_vec[action_select]*(1.-done)
+def q_learning_loss(q_value_vec, target_q_value_vec, action, reward, done):
+    td_target = reward + gamma*jnp.amax(target_q_value_vec)*(1.-done)
     td_error  = jax.lax.stop_gradient(td_target) - q_value_vec[action]
     return jnp.square(td_error)
 
@@ -71,15 +71,12 @@ def train_step(optimizer, target_model, batch):
     # batch[4] - dones
     def loss_fn(model):
         predicted_q_values = model(batch[0])
-        dones              = batch[4]
         target_q_values    = target_model(batch[3])
-        action_selects     = model(batch[3]).argmax(-1)
         return jnp.mean(
                 q_learning_loss(
                     predicted_q_values,
                     target_q_values,
                     batch[1],
-                    action_selects,
                     batch[2],
                     batch[4]
                     )

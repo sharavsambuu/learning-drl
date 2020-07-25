@@ -121,8 +121,8 @@ def policy(model, x):
 
 
 @jax.vmap
-def calculate_td_error(q_value_vec, target_q_value_vec, action, action_select, reward):
-    td_target = reward + gamma*target_q_value_vec[action_select]
+def calculate_td_error(q_value_vec, target_q_value_vec, action, reward):
+    td_target = reward + gamma*jnp.amax(target_q_value_vec)
     td_error  = td_target - q_value_vec[action]
     return jnp.abs(td_error)
 
@@ -134,13 +134,12 @@ def td_error(model, target_model, batch):
     # batch[3] - next_states
     predicted_q_values = model(batch[0])
     target_q_values    = target_model(batch[3])
-    action_selects     = model(batch[3]).argmax(-1)
-    return calculate_td_error(predicted_q_values, target_q_values, batch[1], action_selects, batch[2])
+    return calculate_td_error(predicted_q_values, target_q_values, batch[1], batch[2])
 
 
 @jax.vmap
-def q_learning_loss(q_value_vec, target_q_value_vec, action, action_select, reward, done):
-    td_target = reward + gamma*target_q_value_vec[action_select]*(1.-done)
+def q_learning_loss(q_value_vec, target_q_value_vec, action, reward, done):
+    td_target = reward + gamma*jnp.amax(target_q_value_vec)*(1.-done)
     td_error  = jax.lax.stop_gradient(td_target) - q_value_vec[action]
     return jnp.square(td_error)
 
@@ -154,13 +153,11 @@ def train_step(optimizer, target_model, batch):
     def loss_fn(model):
         predicted_q_values = model(batch[0])
         target_q_values    = target_model(batch[3])
-        action_selects     = model(batch[3]).argmax(-1)
         return jnp.mean(
                 q_learning_loss(
                     predicted_q_values,
                     target_q_values,
                     batch[1],
-                    action_selects,
                     batch[2],
                     batch[4]
                     )
