@@ -6,8 +6,10 @@ from collections import deque
 
 import flax
 import jax
+from jax import numpy as jnp
 
 debug_render  = True
+debug         = True
 num_episodes  = 100
 memory_length = 4000
 batch_size    = 64
@@ -38,15 +40,28 @@ target_q_network = flax.nn.Model(dqn_module, params)
 optimizer        = flax.optim.Adam(learning_rate).create(q_network)
 
 
+@jax.jit
+def policy(model, x):
+    predicted_q_values = model(x)
+    max_q_action       = jnp.argmax(predicted_q_values)
+    return max_q_action, predicted_q_values
+
+
 global_steps = 0
 try:
     for episode in range(num_episodes):
         state = env.reset()
         while True:
             global_steps = global_steps+1
-            action       = env.action_space.sample()
+
+            action, q_values = policy(optimizer.target, state)
+            if debug:
+                print("q утгууд :"       , q_values)
+                print("сонгосон action :", action  )
+
+            action                     = env.action_space.sample()
             new_state, reward, done, _ = env.step(action)
-            print(new_state.shape)
+            #print(new_state.shape)
             if done:
                 new_state = None
             replay_memory.append((state, action, reward, new_state))
@@ -54,8 +69,10 @@ try:
             # replay логик энд бичигдэнэ
 
             state = new_state
+
             if debug_render:
                 env.render()
+
             if done:
                 break
 finally:
