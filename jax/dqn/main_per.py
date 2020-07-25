@@ -123,7 +123,7 @@ def policy(model, x):
 @jax.vmap
 def calculate_td_error(q_value_vec, target_q_value_vec, action, action_select, reward):
     td_target = reward + gamma*target_q_value_vec[action_select]
-    td_error  = jax.lax.stop_gradient(td_target) - q_value_vec[action]
+    td_error  = td_target - q_value_vec[action]
     return jnp.abs(td_error)
 
 @jax.jit
