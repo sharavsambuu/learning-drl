@@ -145,7 +145,7 @@ try:
                 env.render()
 
             if done:
-                print("Нийт reward :", sum(episode_rewards))
+                print("{} - нийт reward : {}".format(episode, sum(episode_rewards)))
                 break
 finally:
     env.close()
