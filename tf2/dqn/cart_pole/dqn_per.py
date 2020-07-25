@@ -21,7 +21,7 @@ train_start_count = 1000       # хичнээн sample цуглуулсны да
 train_per_step    = 1          # хэдэн алхам тутамд сургах вэ
 save_per_step     = 2500       # хэдэн алхам тутамд сургасан моделийг хадгалах вэ
 training_happened = False
-sync_per_step     = 1000       # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
+sync_per_step     = 100        # хэдэн алхам тутам target_q неорон сүлжээг шинэчлэх вэ
 train_count       = 1          # хэдэн удаа сургах вэ
 batch_size        = 64
 gamma             = 0.99       # discount factor
@@ -103,20 +103,20 @@ class PERMemory:
 class DeepQNetwork(tf.keras.Model):
   def __init__(self, n_actions):
     super(DeepQNetwork, self).__init__()
-    self.dense_layer   = tf.keras.layers.Dense(64, activation='relu')
-    self.dropout_layer = tf.keras.layers.Dropout(0.1)
-    self.output_layer  = tf.keras.layers.Dense(n_actions, activation='linear')
+    self.dense_layer  = tf.keras.layers.Dense(128, activation='relu')
+    self.mid_layer    = tf.keras.layers.Dense(128, activation='relu') 
+    self.output_layer = tf.keras.layers.Dense(n_actions)
   def call(self, inputs):
-    dense_out    = self.dense_layer(inputs)
-    dropout_out  = self.dropout_layer(dense_out)
-    return self.output_layer(dropout_out)
+    dense_out   = self.dense_layer(inputs)
+    mid_out     = self.mid_layer(dense_out) 
+    return self.output_layer(mid_out)
 
 
 env = gym.make('CartPole-v0')
 env.reset()
 n_actions        = env.action_space.n
 
-optimizer        = tf.keras.optimizers.Adam()
+optimizer        = tf.keras.optimizers.Adam(learning_rate=0.001)
 
 q_network        = DeepQNetwork(n_actions)
 target_q_network = DeepQNetwork(n_actions)
@@ -183,6 +183,7 @@ for episode in range(num_episodes):
       for train_step in range(train_count):
         # цугларсан жишээнүүдээсээ эхлээд batch sample-дэж үүсгэх
         sampled_batch  = per_memory.sample(batch_size)
+        print(sampled_batch[0])
         state_shape    = sampled_batch[0][1][0].shape
 
         q_input        = np.zeros((batch_size, state_shape[0]), dtype=np.float32)
@@ -241,7 +242,8 @@ for episode in range(num_episodes):
 
     if done==True:
       #print(episode, "р ажиллагаа дууслаа")
-      print("{} - нийт reward : {}".format(episode, sum(episode_rewards)))
+      #print("{} - нийт reward : {}".format(episode, sum(episode_rewards)))
       #print("дундаж reward :", sum(episode_rewards)/len(episode_rewards))
+      pass
 
 env.close()
