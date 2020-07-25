@@ -89,14 +89,25 @@ class PERMemory:
         self.tree.update(idx, p)
 
 
-class DeepQNetwork(flax.nn.Module):
+class DuelingQNetwork(flax.nn.Module):
     def apply(self, x, n_actions):
         dense_layer_1      = flax.nn.Dense(x, 64)
         activation_layer_1 = flax.nn.relu(dense_layer_1)
-        dense_layer_2      = flax.nn.Dense(activation_layer_1, 32)
+        dense_layer_2      = flax.nn.Dense(activation_layer_1, 64)
         activation_layer_2 = flax.nn.relu(dense_layer_2)
-        output_layer       = flax.nn.Dense(activation_layer_2, n_actions)
-        return output_layer
+
+        value_dense       = flax.nn.Dense(activation_layer_2, 64)
+        value             = flax.nn.relu(value_dense)
+        value             = flax.nn.Dense(value, 1)
+
+        advantage_dense   = flax.nn.Dense(activation_layer_2, 64)
+        advantage         = flax.nn.relu(advantage_dense)
+        advantage         = flax.nn.Dense(advantage, n_actions)
+
+        advantage_average = jnp.mean(advantage, keepdims=True)
+
+        q_values_layer    = jnp.subtract(jnp.add(advantage, value), advantage_average)
+        return q_values_layer
 
 
 env   = gym.make('CartPole-v0')
@@ -104,14 +115,14 @@ state = env.reset()
 
 n_actions        = env.action_space.n
 
-dqn_module       = DeepQNetwork.partial(n_actions=n_actions)
-_, params        = dqn_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
-q_network        = flax.nn.Model(dqn_module, params)
-target_q_network = flax.nn.Model(dqn_module, params)
+dueling_dqn_module = DuelingQNetwork.partial(n_actions=n_actions)
+_, params          = dueling_dqn_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
+q_network          = flax.nn.Model(dueling_dqn_module, params)
+target_q_network   = flax.nn.Model(dueling_dqn_module, params)
 
-optimizer        = flax.optim.Adam(learning_rate).create(q_network)
+optimizer          = flax.optim.Adam(learning_rate).create(q_network)
 
-per_memory       = PERMemory(memory_length)
+per_memory         = PERMemory(memory_length)
 
 @jax.jit
 def policy(model, x):
@@ -121,10 +132,9 @@ def policy(model, x):
 
 
 @jax.vmap
-def calculate_td_error(q_value_vec, next_q_value_vec, target_q_value_vec, action, reward):
-    action_select = jnp.argmax(next_q_value_vec)
-    td_target     = reward + gamma*target_q_value_vec[action_select]
-    td_error      = td_target - q_value_vec[action]
+def calculate_td_error(q_value_vec, target_q_value_vec, action, reward):
+    td_target = reward + gamma*jnp.amax(target_q_value_vec)
+    td_error  = td_target - q_value_vec[action]
     return jnp.abs(td_error)
 
 @jax.jit
@@ -133,17 +143,15 @@ def td_error(model, target_model, batch):
     # batch[1] - actions
     # batch[2] - rewards
     # batch[3] - next_states
-    predicted_q_values      = model(batch[0])
-    predicted_next_q_values = model(batch[3])
-    target_q_values         = target_model(batch[3])
-    return calculate_td_error(predicted_q_values, predicted_next_q_values, target_q_values, batch[1], batch[2])
+    predicted_q_values = model(batch[0])
+    target_q_values    = target_model(batch[3])
+    return calculate_td_error(predicted_q_values, target_q_values, batch[1], batch[2])
 
 
 @jax.vmap
-def q_learning_loss(q_value_vec, next_q_value_vec, target_q_value_vec, action, reward, done):
-    action_select = jnp.argmax(next_q_value_vec)
-    td_target     = reward + gamma*target_q_value_vec[action_select]*(1.-done)
-    td_error      = jax.lax.stop_gradient(td_target) - q_value_vec[action]
+def q_learning_loss(q_value_vec, target_q_value_vec, action, reward, done):
+    td_target = reward + gamma*jnp.amax(target_q_value_vec)*(1.-done)
+    td_error  = jax.lax.stop_gradient(td_target) - q_value_vec[action]
     return jnp.square(td_error)
 
 @jax.jit
@@ -154,14 +162,11 @@ def train_step(optimizer, target_model, batch):
     # batch[3] - next_states
     # batch[4] - dones
     def loss_fn(model):
-        # reference : https://mc.ai/introduction-to-double-deep-q-learning-ddqn/
-        predicted_q_values      = model(batch[0])
-        predicted_next_q_values = model(batch[3])
-        target_q_values         = target_model(batch[3])
+        predicted_q_values = model(batch[0])
+        target_q_values    = target_model(batch[3])
         return jnp.mean(
                 q_learning_loss(
                     predicted_q_values,
-                    predicted_next_q_values,
                     target_q_values,
                     batch[1],
                     batch[2],
