@@ -139,9 +139,9 @@ class DeepQNetwork(flax.nn.Module):
     def apply(self, x, noise_rng, n_actions):
         dense_layer_1      = flax.nn.Dense(x, 64)
         activation_layer_1 = flax.nn.relu(dense_layer_1)
-        dense_layer_2      = flax.nn.Dense(activation_layer_1, 32)
-        activation_layer_2 = flax.nn.relu(dense_layer_2)
-        output_layer       = flax.nn.Dense(activation_layer_2, n_actions)
+        noisy_dense_layer  = NoisyDense(activation_layer_1, noise_rng, 32)
+        activation_layer_2 = flax.nn.relu(noisy_dense_layer)
+        output_layer       = NoisyDense(activation_layer_2, noise_rng, n_actions)
         return output_layer
 
 
