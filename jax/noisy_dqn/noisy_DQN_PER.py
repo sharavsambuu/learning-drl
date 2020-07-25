@@ -73,7 +73,7 @@ class PERMemory:
         return (error+self.e)**self.a
     def add(self, error, sample):
         p = self._get_priority(error)
-        self.tree.add(p, sample) 
+        self.tree.add(p, sample)
     def sample(self, n):
         batch   = []
         segment = self.tree.total()/n
@@ -88,6 +88,20 @@ class PERMemory:
         p = self._get_priority(error)
         self.tree.update(idx, p)
 
+
+# References : 
+#    - https://github.com/keiohta/tf2rl/blob/master/tf2rl/networks/noisy_dense.py
+#    - https://flax.readthedocs.io/en/latest/notebooks/flax_guided_tour.html 
+#    - https://github.com/google/flax/blob/master/examples/vae/train.py
+class NoisyDense(flax.nn.Module):
+    def apply(self, x,
+            features,
+            sigma_init         = 0.017,
+            use_bias           = True,
+            kernel_initializer = jax.nn.initializers.orthogonal(),
+            bias_initializer   = jax.nn.initializers.zeros
+            ):
+        pass
 
 class DeepQNetwork(flax.nn.Module):
     def apply(self, x, n_actions):
