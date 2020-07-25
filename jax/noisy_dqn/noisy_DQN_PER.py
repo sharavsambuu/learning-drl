@@ -93,6 +93,12 @@ class PERMemory:
 #    - https://github.com/keiohta/tf2rl/blob/master/tf2rl/networks/noisy_dense.py
 #    - https://flax.readthedocs.io/en/latest/notebooks/flax_guided_tour.html 
 #    - https://github.com/google/flax/blob/master/examples/vae/train.py
+#    - https://jax.readthedocs.io/en/latest/_modules/jax/nn/initializers.html
+def constant_initializer(value, dtype=jnp.float32):
+    def init(key, shape, dtype=dtype):
+        return jnp.full(shape, value, dtype=dtype)
+    return init
+
 class NoisyDense(flax.nn.Module):
     def apply(self, x,
             features,
@@ -101,10 +107,16 @@ class NoisyDense(flax.nn.Module):
             kernel_initializer = jax.nn.initializers.orthogonal(),
             bias_initializer   = jax.nn.initializers.zeros
             ):
+        input_features = x.shape[-1]
+        kernel_shape   = (input_features, features)
+        kernel         = self.param('kernel'      , kernel_shape, kernel_initializer)
+        sigma_kernel   = self.param('sigma_kernel', kernel_shape,
+                constant_initializer(value=sigma_init))
+
         pass
 
 class DeepQNetwork(flax.nn.Module):
-    def apply(self, x, n_actions):
+    def apply(self, x, noise_rng, n_actions):
         dense_layer_1      = flax.nn.Dense(x, 64)
         activation_layer_1 = flax.nn.relu(dense_layer_1)
         dense_layer_2      = flax.nn.Dense(activation_layer_1, 32)
@@ -119,7 +131,10 @@ state = env.reset()
 n_actions        = env.action_space.n
 
 dqn_module       = DeepQNetwork.partial(n_actions=n_actions)
-_, params        = dqn_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
+_, params        = dqn_module.init_by_shape(
+        jax.random.PRNGKey(0),
+        [state.shape],
+        noise_rng=jax.random.PRNGKey(0))
 q_network        = flax.nn.Model(dqn_module, params)
 target_q_network = flax.nn.Model(dqn_module, params)
 
@@ -128,8 +143,8 @@ optimizer        = flax.optim.Adam(learning_rate).create(q_network)
 per_memory       = PERMemory(memory_length)
 
 @jax.jit
-def policy(model, x):
-    predicted_q_values = model(x)
+def policy(model, x, rng):
+    predicted_q_values = model(x, noise_rng=rng)
     max_q_action       = jnp.argmax(predicted_q_values)
     return max_q_action, predicted_q_values
 
@@ -141,13 +156,13 @@ def calculate_td_error(q_value_vec, target_q_value_vec, action, reward):
     return jnp.abs(td_error)
 
 @jax.jit
-def td_error(model, target_model, batch):
+def td_error(model, target_model, batch, rng):
     # batch[0] - states
     # batch[1] - actions
     # batch[2] - rewards
     # batch[3] - next_states
-    predicted_q_values = model(batch[0])
-    target_q_values    = target_model(batch[3])
+    predicted_q_values = model(batch[0], noise_rng=rng)
+    target_q_values    = target_model(batch[3], noise_rng=rng)
     return calculate_td_error(predicted_q_values, target_q_values, batch[1], batch[2])
 
 
@@ -158,15 +173,15 @@ def q_learning_loss(q_value_vec, target_q_value_vec, action, reward, done):
     return jnp.square(td_error)
 
 @jax.jit
-def train_step(optimizer, target_model, batch):
+def train_step(optimizer, target_model, batch, rng):
     # batch[0] - states
     # batch[1] - actions
     # batch[2] - rewards
     # batch[3] - next_states
     # batch[4] - dones
     def loss_fn(model):
-        predicted_q_values = model(batch[0])
-        target_q_values    = target_model(batch[3])
+        predicted_q_values = model(batch[0], noise_rng=rng)
+        target_q_values    = target_model(batch[3], noise_rng=rng)
         return jnp.mean(
                 q_learning_loss(
                     predicted_q_values,
@@ -178,8 +193,11 @@ def train_step(optimizer, target_model, batch):
                 )
     loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
     optimizer       = optimizer.apply_gradient(gradients)
-    return optimizer, loss, td_error(optimizer.target, target_model, batch)
+    return optimizer, loss, td_error(optimizer.target, target_model, batch, rng)
 
+
+rng      = jax.random.PRNGKey(0)
+rng, key = jax.random.split(rng)
 
 global_steps = 0
 try:
@@ -192,7 +210,7 @@ try:
             if np.random.rand() <= epsilon:
                 action = env.action_space.sample()
             else:
-                action, q_values = policy(optimizer.target, state)
+                action, q_values = policy(optimizer.target, state, rng=key)
                 if debug:
                     print("q утгууд :"       , q_values)
                     print("сонгосон action :", action  )
@@ -211,7 +229,7 @@ try:
                     jnp.asarray([action]),
                     jnp.asarray([reward]),
                     jnp.asarray([new_state])
-                ))[0])
+                ), key)[0])
             per_memory.add(temporal_difference, (state, action, reward, new_state, int(done)))
 
             # Prioritized Experience Replay санах ойгоос batch үүсгээд DQN сүлжээг сургах
@@ -224,6 +242,7 @@ try:
                 next_states.append(batch[i][1][3])
                 dones.append      (batch[i][1][4])
 
+            rng, key = jax.random.split(rng)
             optimizer, loss, new_td_errors = train_step(
                                         optimizer,
                                         target_q_network,
@@ -234,7 +253,8 @@ try:
                                             jnp.asarray(rewards),
                                             jnp.asarray(next_states),
                                             jnp.asarray(dones)
-                                        )
+                                        ),
+                                        key
                                     )
             # batch-аас бий болсон temporal difference error-ийн дагуу санах ойг шинэчлэх
             new_td_errors = np.array(new_td_errors)
