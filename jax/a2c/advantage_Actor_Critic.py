@@ -12,13 +12,14 @@ import numpy
 
 debug_render  = True
 debug         = False
-num_episodes  = 600
-learning_rate = 0.001
+num_episodes  = 3000
+learning_rate = 0.01
 gamma         = 0.99 # discount factor
 
 
 # References:
 #    - https://github.com/google/flax/blob/master/examples/vae/train.py
+#    - https://colab.research.google.com/drive/1UCdLb5TNlOu_H6v9Pdeh5V6bIW7SPEDu
 
 class ActorNetwork(flax.nn.Module):
     def apply(self, x, n_actions):
@@ -77,8 +78,13 @@ def actor_loss(log_probability, td_error):
     return -log_probability*td_error
 
 @jax.vmap
-def critic_loss(value, ret):
-    return jnp.square(ret-value)
+def critic_loss(y_true, y_pred):
+    # Huber loss
+    error = y_true - y_pred
+    is_small_error = jnp.abs(error) < 1
+    squared_loss   = jnp.square(error) / 2
+    linear_loss    = jnp.abs(error) - 0.5
+    return jnp.where(is_small_error, squared_loss, linear_loss)
 
 @jax.jit
 def train_a2c_step(optimizer, batch):
@@ -89,9 +95,9 @@ def train_a2c_step(optimizer, batch):
         action_probabilities_list, critic_value_list = model(batch[0])
         picked_action_probabilities = gather(action_probabilities_list, batch[1])
         log_probabilities           = jnp.log(picked_action_probabilities)
-        td_errors                   = jnp.subtract(batch[2], critic_value_list)
+        td_errors                   = batch[2] - critic_value_list
         actor_losses                = actor_loss(log_probabilities, td_errors)
-        critic_losses               = critic_loss(critic_value_list, batch[2])
+        critic_losses               = critic_loss(batch[2], critic_value_list)
         return jnp.sum(actor_losses) + jnp.sum(critic_losses)
     loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
     optimizer       = optimizer.apply_gradient(gradients)
@@ -128,19 +134,28 @@ try:
 
                 episode_length     = len(rewards)
 
-                discounted_rewards = np.zeros_like(rewards)
-                for t in range(0, episode_length):
-                    G_t = 0
-                    for idx, j in enumerate(range(t, episode_length)):
-                        G_t = G_t + (gamma**idx)*rewards[j]
-                    discounted_rewards[t] = G_t
-                discounted_rewards = discounted_rewards - np.mean(discounted_rewards)
-                discounted_rewards = discounted_rewards / (np.std(discounted_rewards)+1e-10)
+                #discounted_rewards = np.zeros_like(rewards)
+                #for t in range(0, episode_length):
+                #    G_t = 0
+                #    for idx, j in enumerate(range(t, episode_length)):
+                #        G_t = G_t + (gamma**idx)*rewards[j]
+                #    discounted_rewards[t] = G_t
+                #discounted_rewards = discounted_rewards - np.mean(discounted_rewards)
+                #discounted_rewards = discounted_rewards / (np.std(discounted_rewards)+1e-10)
 
-                a2c_optimizer, _ = train_a2c_step(a2c_optimizer, (
+                returns = []
+                discounted_sum = 0
+                for r in rewards[::-1]:
+                    discounted_sum = r + gamma * discounted_sum
+                    returns.insert(0, discounted_sum)
+                returns = np.array(returns)
+                returns = (returns - np.mean(returns)) / (np.std(returns) + 1e-10)
+                returns = returns.tolist()
+
+                a2c_optimizer, loss = train_a2c_step(a2c_optimizer, (
                         jnp.asarray(states),
                         jnp.asarray(actions),
-                        jnp.asarray(discounted_rewards)
+                        jnp.asarray(returns)
                     ))
 
                 break
