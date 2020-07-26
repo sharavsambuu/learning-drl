@@ -153,7 +153,7 @@ class NoisyDuelingQNetwork(flax.nn.Module):
         return q_values_layer
 
 
-env   = gym.make('CartPole-v0')
+env   = gym.make('CartPole-v1')
 state = env.reset()
 
 n_actions        = env.action_space.n

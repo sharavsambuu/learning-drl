@@ -99,7 +99,7 @@ class DeepQNetwork(flax.nn.Module):
         return output_layer
 
 
-env   = gym.make('CartPole-v0')
+env   = gym.make('CartPole-v1')
 state = env.reset()
 
 n_actions        = env.action_space.n
