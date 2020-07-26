@@ -13,7 +13,7 @@ numpy.set_printoptions(precision=15)
 
 debug_render  = True
 debug         = False
-num_episodes  = 200
+num_episodes  = 600
 learning_rate = 0.001
 gamma         = 0.99 # discount factor
 
@@ -55,7 +55,7 @@ def train_step(optimizer, batch):
     # batch[1] - actions
     # batch[2] - discounted rewards
     def loss_fn(model):
-        action_probabilities_list    = model(batch[0])
+        action_probabilities_list   = model(batch[0])
         picked_action_probabilities = gather(action_probabilities_list, batch[1])
         log_probabilities           = jnp.log(picked_action_probabilities)
         losses                      = jnp.multiply(log_probabilities, batch[2])
