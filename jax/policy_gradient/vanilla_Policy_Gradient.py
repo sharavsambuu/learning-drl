@@ -7,7 +7,9 @@ import flax
 import jax
 from jax import numpy as jnp
 import numpy as np
+import numpy
 
+numpy.set_printoptions(precision=15)
 
 debug_render  = True
 debug         = False
@@ -38,6 +40,10 @@ policy_network   = flax.nn.Model(pg_module, params)
 
 optimizer        = flax.optim.Adam(learning_rate).create(policy_network)
 
+@jax.jit
+def policy_inference(model, x):
+    action_probabilities = model(x)
+    return action_probabilities
 
 global_steps = 0
 try:
@@ -46,7 +52,11 @@ try:
         state = env.reset()
         while True:
             global_steps = global_steps+1
-            action       = env.action_space.sample()
+
+            action_probabilities  = policy_inference(optimizer.target, jnp.asarray([state]))[0]
+            action_probabilities  = np.array(action_probabilities)
+            action_probabilities /= action_probabilities.sum()
+            action                = np.random.choice(n_actions, p=action_probabilities)
 
             new_state, reward, done, _ = env.step(int(action))
 
