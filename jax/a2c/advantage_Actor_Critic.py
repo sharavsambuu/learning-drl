@@ -57,75 +57,48 @@ state = env.reset()
 
 n_actions        = env.action_space.n
 
-
 a2c_module       = A2C.partial(n_actions=n_actions)
 _, a2c_params    = a2c_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
 a2c_network      = flax.nn.Model(a2c_module, a2c_params)
 a2c_optimizer    = flax.optim.Adam(learning_rate).create(a2c_network)
 
 
-actor_module     = ActorNetwork.partial(n_actions=n_actions)
-_, actor_params  = actor_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
-actor_network    = flax.nn.Model(actor_module, actor_params)
-
-critic_module    = CriticNetwork.partial()
-_, critic_params = critic_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
-critic_network   = flax.nn.Model(critic_module, critic_params)
-
-actor_optimizer  = flax.optim.Adam(learning_rate).create(actor_network)
-critic_optimizer = flax.optim.Adam(learning_rate).create(critic_network)
-
-
-
 @jax.jit
-def actor_inference(model, x):
-    action_probabilities, critic_value = model(x)
-    return action_probabilities
+def a2c_inference(model, x):
+    action_probabilities_list, critic_value_list = model(x)
+    return action_probabilities_list, critic_value_list
 
 @jax.vmap
 def gather(action_probabilities, action_index):
     return action_probabilities[action_index]
 
+@jax.vmap
+def actor_loss(log_probability, td_error):
+    return -log_probability*td_error
+
+@jax.vmap
+def critic_loss(value, ret):
+    return jnp.square(ret-value)
+
 @jax.jit
-def train_actor_step(optimizer, batch):
+def train_a2c_step(optimizer, batch):
     # batch[0] - states
     # batch[1] - actions
-    # batch[2] - advantages
+    # batch[2] - discounted rewards
     def loss_fn(model):
-        action_probabilities_list   = model(batch[0])
+        action_probabilities_list, critic_value_list = model(batch[0])
         picked_action_probabilities = gather(action_probabilities_list, batch[1])
         log_probabilities           = jnp.log(picked_action_probabilities)
-        losses                      = jnp.multiply(log_probabilities, batch[2])
-        return -jnp.sum(losses)
+        td_errors                   = jnp.subtract(batch[2], critic_value_list)
+        actor_losses                = actor_loss(log_probabilities, td_errors)
+        critic_losses               = critic_loss(critic_value_list, batch[2])
+        return jnp.sum(actor_losses) + jnp.sum(critic_losses)
     loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
     optimizer       = optimizer.apply_gradient(gradients)
     return optimizer, loss
 
 
-@jax.vmap
-def critic_loss(value, next_value, reward):
-    td_target = reward + gamma*next_value
-    td_error  = jax.lax.stop_gradient(td_target)-value
-    return jnp.square(td_error)
-
-@jax.jit
-def train_critic_step(optimizer, batch):
-    # batch[0] - states
-    # batch[1] - rewards
-    # batch[2] - next states
-    def loss_fn(model):
-        values      = model(batch[0])
-        next_values = model(batch[2])
-        losses      = critic_loss(values, next_values, batch[1])
-        return jnp.mean(losses)
-    loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
-    optimizer       = optimizer.apply_gradient(gradients)
-    # Temporal Difference => (reward + gamma*V') - V 
-    td_errors       = ((optimizer.target(batch[2])*gamma)+batch[1])-optimizer.target(batch[0])
-    return optimizer, td_errors
-
-
-global_steps = 0
+global_steps    = 0
 try:
     for episode in range(num_episodes):
         states, actions, rewards, next_states = [], [], [], []
@@ -133,8 +106,8 @@ try:
         while True:
             global_steps = global_steps+1
 
-            action_probabilities  = actor_inference(a2c_optimizer.target, jnp.asarray([state]))[0]
-            action_probabilities  = np.array(action_probabilities)
+            action_probabilities, critic_values  = a2c_inference(a2c_optimizer.target, jnp.asarray([state]))
+            action_probabilities  = np.array(action_probabilities[0])
             action_probabilities /= action_probabilities.sum()
             action                = np.random.choice(n_actions, p=action_probabilities)
 
@@ -153,18 +126,24 @@ try:
             if done:
                 print("{} - нийт reward : {}".format(episode, sum(rewards)))
 
-                critic_optimizer, td_errors = train_critic_step(critic_optimizer, (
-                        jnp.asarray(states),
-                        jnp.asarray(rewards),
-                        jnp.asarray(next_states)
-                    ))
+                episode_length     = len(rewards)
 
-                actor_optimizer, loss = train_actor_step(actor_optimizer, (
+                discounted_rewards = np.zeros_like(rewards)
+                for t in range(0, episode_length):
+                    G_t = 0
+                    for idx, j in enumerate(range(t, episode_length)):
+                        G_t = G_t + (gamma**idx)*rewards[j]
+                    discounted_rewards[t] = G_t
+                discounted_rewards = discounted_rewards - np.mean(discounted_rewards)
+                discounted_rewards = discounted_rewards / (np.std(discounted_rewards)+1e-10)
+
+                a2c_optimizer, _ = train_a2c_step(a2c_optimizer, (
                         jnp.asarray(states),
                         jnp.asarray(actions),
-                        jnp.asarray(td_errors)
+                        jnp.asarray(discounted_rewards)
                     ))
 
                 break
+
 finally:
     env.close()
