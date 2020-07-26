@@ -17,30 +17,52 @@ learning_rate = 0.001
 gamma         = 0.99 # discount factor
 
 
+# References:
+#    - https://github.com/google/flax/blob/master/examples/vae/train.py
+
 class ActorNetwork(flax.nn.Module):
     def apply(self, x, n_actions):
-        dense_layer_1      = flax.nn.Dense(x, 64)
-        activation_layer_1 = flax.nn.relu(dense_layer_1)
-        dense_layer_2      = flax.nn.Dense(activation_layer_1, 32)
-        activation_layer_2 = flax.nn.relu(dense_layer_2)
-        output_dense_layer = flax.nn.Dense(activation_layer_2, n_actions)
+        dense_layer        = flax.nn.Dense(x, 32)
+        activation_layer   = flax.nn.relu(dense_layer)
+        output_dense_layer = flax.nn.Dense(activation_layer, n_actions)
         output_layer       = flax.nn.softmax(output_dense_layer)
         return output_layer
 
 class CriticNetwork(flax.nn.Module):
     def apply(self, x):
-        dense_layer_1      = flax.nn.Dense(x, 64)
-        activation_layer_1 = flax.nn.relu(dense_layer_1)
-        dense_layer_2      = flax.nn.Dense(activation_layer_1, 32)
-        activation_layer_2 = flax.nn.relu(dense_layer_2)
-        output_layer       = flax.nn.Dense(activation_layer_2, 1)
+        dense_layer        = flax.nn.Dense(x, 32)
+        activation_layer   = flax.nn.relu(dense_layer)
+        output_layer       = flax.nn.Dense(activation_layer, 1)
         return output_layer
+
+class A2C(flax.nn.Module):
+    def apply(self, x, n_actions):
+        common_dense_layer      = flax.nn.Dense(x, 64)
+        common_activation_layer = flax.nn.relu(common_dense_layer)
+        actor_layer             = ActorNetwork(
+                common_activation_layer,
+                n_actions=n_actions,
+                name='actor_layer'
+                )
+        critic_layer            = CriticNetwork(
+                common_activation_layer,
+                name='critic_layer'
+                )
+        return actor_layer, critic_layer
+
 
 
 env   = gym.make('CartPole-v1')
 state = env.reset()
 
 n_actions        = env.action_space.n
+
+
+a2c_module       = A2C.partial(n_actions=n_actions)
+_, a2c_params    = a2c_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
+a2c_network      = flax.nn.Model(a2c_module, a2c_params)
+a2c_optimizer    = flax.optim.Adam(learning_rate).create(a2c_network)
+
 
 actor_module     = ActorNetwork.partial(n_actions=n_actions)
 _, actor_params  = actor_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
@@ -54,9 +76,10 @@ actor_optimizer  = flax.optim.Adam(learning_rate).create(actor_network)
 critic_optimizer = flax.optim.Adam(learning_rate).create(critic_network)
 
 
+
 @jax.jit
 def actor_inference(model, x):
-    action_probabilities = model(x)
+    action_probabilities, critic_value = model(x)
     return action_probabilities
 
 @jax.vmap
@@ -97,8 +120,9 @@ def train_critic_step(optimizer, batch):
         return jnp.mean(losses)
     loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
     optimizer       = optimizer.apply_gradient(gradients)
-    td_errors       = optimizer.target(batch[2])-optimizer.target(batch[0])
-    return optimizer, jnp.absolute(td_errors)
+    # Temporal Difference => (reward + gamma*V') - V 
+    td_errors       = ((optimizer.target(batch[2])*gamma)+batch[1])-optimizer.target(batch[0])
+    return optimizer, td_errors
 
 
 global_steps = 0
@@ -109,7 +133,7 @@ try:
         while True:
             global_steps = global_steps+1
 
-            action_probabilities  = actor_inference(actor_optimizer.target, jnp.asarray([state]))[0]
+            action_probabilities  = actor_inference(a2c_optimizer.target, jnp.asarray([state]))[0]
             action_probabilities  = np.array(action_probabilities)
             action_probabilities /= action_probabilities.sum()
             action                = np.random.choice(n_actions, p=action_probabilities)
@@ -129,23 +153,11 @@ try:
             if done:
                 print("{} - нийт reward : {}".format(episode, sum(rewards)))
 
-                episode_length     = len(rewards)
-                discounted_rewards = np.zeros_like(rewards)
-                for t in range(0, episode_length):
-                    G_t = 0
-                    for idx, j in enumerate(range(t, episode_length)):
-                        G_t = G_t + (gamma**idx)*rewards[j]
-                    discounted_rewards[t] = G_t
-                discounted_rewards = discounted_rewards - np.mean(discounted_rewards)
-                discounted_rewards = discounted_rewards / (np.std(discounted_rewards)+1e-10)
-
-                critic_optimizer, _ = train_critic_step(critic_optimizer, (
+                critic_optimizer, td_errors = train_critic_step(critic_optimizer, (
                         jnp.asarray(states),
-                        jnp.asarray(discounted_rewards),
+                        jnp.asarray(rewards),
                         jnp.asarray(next_states)
                     ))
-
-                td_errors = discounted_rewards-critic_optimizer.target(jnp.asarray(states))
 
                 actor_optimizer, loss = train_actor_step(actor_optimizer, (
                         jnp.asarray(states),
