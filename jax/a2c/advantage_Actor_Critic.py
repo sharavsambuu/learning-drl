@@ -2,7 +2,7 @@ import os
 import random
 import math
 import gym
-
+from collections import deque
 import flax
 import jax
 from jax import numpy as jnp
@@ -15,6 +15,9 @@ debug         = False
 num_episodes  = 3000
 learning_rate = 0.01
 gamma         = 0.99 # discount factor
+memory_length = 4000
+replay_memory = deque(maxlen=memory_length)
+batch_size    = 64
 
 
 # References:
@@ -80,17 +83,19 @@ def actor_loss(log_probability, td_error):
 @jax.vmap
 def critic_loss(y_true, y_pred):
     # Huber loss
-    error = y_true - y_pred
+    error          = y_true - y_pred
     is_small_error = jnp.abs(error) < 1
     squared_loss   = jnp.square(error) / 2
     linear_loss    = jnp.abs(error) - 0.5
-    return jnp.where(is_small_error, squared_loss, linear_loss)
+    #return jnp.where(is_small_error, squared_loss, linear_loss)
+    return jnp.square(error)/2.
 
 @jax.jit
 def train_a2c_step(optimizer, batch):
     # batch[0] - states
     # batch[1] - actions
     # batch[2] - discounted rewards
+    # batch[3] - dones
     def loss_fn(model):
         action_probabilities_list, critic_value_list = model(batch[0])
         picked_action_probabilities = gather(action_probabilities_list, batch[1])
@@ -107,57 +112,66 @@ def train_a2c_step(optimizer, batch):
 global_steps    = 0
 try:
     for episode in range(num_episodes):
-        states, actions, rewards, next_states = [], [], [], []
-        state = env.reset()
+        state           = env.reset()
+        episode_rewards = []
         while True:
             global_steps = global_steps+1
 
             action_probabilities, critic_values  = a2c_inference(a2c_optimizer.target, jnp.asarray([state]))
+            print(1, action_probabilities)
             action_probabilities  = np.array(action_probabilities[0])
+            print(2, action_probabilities)
             action_probabilities /= action_probabilities.sum()
+            print(3, action_probabilities)
             action                = np.random.choice(n_actions, p=action_probabilities)
 
             new_state, reward, done, _ = env.step(int(action))
 
-            states.append(state)
-            actions.append(action)
-            rewards.append(reward)
-            next_states.append(new_state)
+            episode_rewards.append(reward)
+
+            if not done:
+                replay_memory.append((state, action, reward, new_state, int(done)))
 
             state = new_state
+
+            if (len(replay_memory)>batch_size):
+                batch = random.sample(replay_memory, batch_size)
+                states, actions, rewards, next_states, dones = zip(*batch)
+                discounted_rewards = np.zeros_like(rewards)
+                for t in range(0, batch_size):
+                    G_t = 0
+                    for idx, j in enumerate(range(t, batch_size)):
+                        G_t = G_t + (gamma**idx)*rewards[j]
+                    discounted_rewards[t] = G_t
+                discounted_rewards = discounted_rewards - np.mean(discounted_rewards)
+                discounted_rewards = discounted_rewards / (np.std(discounted_rewards)+1e-10)
+                
+
+                if np.isnan(discounted_rewards).any():
+                    print("Damn DISCOUNTED REWARDS!!! HAS A NAN")
+                if np.isnan(states).any():
+                    print("Damn STATES!!! HAS A NAN")
+                if np.isnan(actions).any():
+                    print("Damn ACTIONS!!! HAS A NAN")
+                if np.isnan(rewards).any():
+                    print("Damn REWARDS!!! HAS A NAN")
+                if np.isnan(dones).any():
+                    print("Damn DONES!!! HAS A NAN")
+
+
+                a2c_optimizer, loss = train_a2c_step(a2c_optimizer, (
+                        jnp.asarray(states),
+                        jnp.asarray(actions),
+                        jnp.asarray(discounted_rewards),
+                        jnp.asarray(dones)
+                    ))
+                print("Trained...")
 
             if debug_render:
                 env.render()
 
             if done:
-                print("{} - нийт reward : {}".format(episode, sum(rewards)))
-
-                episode_length     = len(rewards)
-
-                #discounted_rewards = np.zeros_like(rewards)
-                #for t in range(0, episode_length):
-                #    G_t = 0
-                #    for idx, j in enumerate(range(t, episode_length)):
-                #        G_t = G_t + (gamma**idx)*rewards[j]
-                #    discounted_rewards[t] = G_t
-                #discounted_rewards = discounted_rewards - np.mean(discounted_rewards)
-                #discounted_rewards = discounted_rewards / (np.std(discounted_rewards)+1e-10)
-
-                returns = []
-                discounted_sum = 0
-                for r in rewards[::-1]:
-                    discounted_sum = r + gamma * discounted_sum
-                    returns.insert(0, discounted_sum)
-                returns = np.array(returns)
-                returns = (returns - np.mean(returns)) / (np.std(returns) + 1e-10)
-                returns = returns.tolist()
-
-                a2c_optimizer, loss = train_a2c_step(a2c_optimizer, (
-                        jnp.asarray(states),
-                        jnp.asarray(actions),
-                        jnp.asarray(returns)
-                    ))
-
+                print("{} - нийт reward : {}".format(episode, sum(episode_rewards)))
                 break
 
 finally:
