@@ -45,6 +45,25 @@ def policy_inference(model, x):
     action_probabilities = model(x)
     return action_probabilities
 
+@jax.vmap
+def gather(action_probabilities, action_index):
+    return action_probabilities[action_index]
+
+@jax.jit
+def train_step(optimizer, batch):
+    # batch[0] - states
+    # batch[1] - actions
+    # batch[2] - discounted rewards
+    def loss_fn(model):
+        action_probabilities_list    = model(batch[0])
+        picked_action_probabilities = gather(action_probabilities_list, batch[1])
+        log_probabilities           = jnp.log(picked_action_probabilities)
+        losses                      = jnp.multiply(log_probabilities, batch[2])
+        return -jnp.sum(losses)
+    loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
+    optimizer       = optimizer.apply_gradient(gradients)
+    return optimizer, loss
+
 global_steps = 0
 try:
     for episode in range(num_episodes):
@@ -71,6 +90,23 @@ try:
 
             if done:
                 print("{} - нийт reward : {}".format(episode, sum(rewards)))
+                episode_length     = len(rewards)
+                discounted_rewards = np.zeros_like(rewards)
+                for t in range(0, episode_length):
+                    G_t = 0
+                    for idx, j in enumerate(range(t, episode_length)):
+                        G_t = G_t + (gamma**idx)*rewards[j]
+                    discounted_rewards[t] = G_t
+                discounted_rewards = discounted_rewards - np.mean(discounted_rewards)
+                discounted_rewards = discounted_rewards / (np.std(discounted_rewards)+1e-10)
+
+                print("Training...")
+                optimizer, loss = train_step(optimizer, (
+                        jnp.asarray(states),
+                        jnp.asarray(actions),
+                        jnp.asarray(discounted_rewards)
+                    ))
+
                 break
 finally:
     env.close()
