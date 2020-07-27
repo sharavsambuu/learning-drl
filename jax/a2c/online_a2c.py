@@ -65,9 +65,9 @@ def backpropagate_critic(optimizer, props):
     # props[1] - next_state
     # props[2] - reward
     # props[3] - done
+    next_value = jax.lax.stop_gradient(optimizer.target(jnp.asarray([props[1]]))[0][0])
     def loss_fn(model):
         value      = model(jnp.asarray([props[0]]))[0][0]
-        next_value = model(jnp.asarray([props[1]]))[0][0]
         advantage  = props[2]+(gamma*next_value)*(1-props[3]) - value
         return jnp.square(advantage)
     loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
@@ -81,8 +81,8 @@ def backpropagate_actor(optimizer, critic_model, props):
     # props[2] - reward
     # props[3] - done
     # props[4] - action
-    value      = critic_model(jnp.asarray([props[0]]))[0][0]
-    next_value = critic_model(jnp.asarray([props[1]]))[0][0]
+    value      = jax.lax.stop_gradient(critic_model(jnp.asarray([props[0]]))[0][0])
+    next_value = jax.lax.stop_gradient(critic_model(jnp.asarray([props[1]]))[0][0])
     advantage  = props[2]+(gamma*next_value)*(1-props[3]) - value
     def loss_fn(model, advantage):
         action_probabilities = model(jnp.asarray([props[0]]))[0]
