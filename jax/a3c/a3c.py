@@ -1,19 +1,22 @@
 import os
 import random
 import math
+import time
+import threading
 import gym
 import flax
 import jax
 from jax import numpy as jnp
 import numpy as np
-import numpy
 
 
-debug_render  = True
-debug         = False
+debug_render  = False
 num_episodes  = 1500
 learning_rate = 0.001
 gamma         = 0.99
+
+env_name      = "CartPole-v1"
+n_workers     = 8
 
 
 class ActorNetwork(flax.nn.Module):
@@ -36,11 +39,10 @@ class CriticNetwork(flax.nn.Module):
         return output_dense_layer
 
 
-env   = gym.make('CartPole-v1')
-state = env.reset()
-
-n_actions        = env.action_space.n
-
+env       = gym.make(env_name)
+state     = env.reset()
+n_actions = env.action_space.n
+env.close()
 
 actor_module     = ActorNetwork.partial(n_actions=n_actions)
 _, actor_params  = actor_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
@@ -96,14 +98,25 @@ def backpropagate_actor(optimizer, critic_model, props):
     return optimizer, loss
 
 
-global_step = 0
 
-try:
+episode_count = 0
+global_step   = 0
+
+lock = threading.Lock()
+
+def training_worker(env, thread_index):
+    global actor_optimizer
+    global critic_optimizer
+
+    global episode_count
+    global global_step
+
     for episode in range(num_episodes):
         state = env.reset()
         states, actions, rewards, dones = [], [], [], []
         while True:
-            global_step = global_step+1
+            with lock:
+                global_step  = global_step + 1
 
             action_probabilities  = actor_inference(actor_optimizer.target, jnp.asarray([state]))
             action_probabilities  = np.array(action_probabilities[0])
@@ -118,11 +131,12 @@ try:
 
             state = next_state
 
-            if debug_render:
+            if debug_render and thread_index==0:
                 env.render()
 
             if done:
-                print(episode, " - reward :", sum(rewards))
+                print("{} step, {} worker, {} episode, reward : {}".format(
+                    global_step, thread_index, episode, sum(rewards)))
 
                 episode_length = len(rewards)
 
@@ -135,24 +149,46 @@ try:
                 discounted_rewards = discounted_rewards - np.mean(discounted_rewards)
                 discounted_rewards = discounted_rewards / (np.std(discounted_rewards)+1e-10)
 
-                actor_optimizer, _  = backpropagate_actor(
-                    actor_optimizer,
-                    critic_optimizer.target,
-                    (
-                        jnp.asarray(states),
-                        jnp.asarray(discounted_rewards),
-                        jnp.asarray(actions)
+                with lock:
+                    actor_optimizer, _  = backpropagate_actor(
+                        actor_optimizer,
+                        critic_optimizer.target,
+                        (
+                            jnp.asarray(states),
+                            jnp.asarray(discounted_rewards),
+                            jnp.asarray(actions)
+                        )
                     )
-                )
-
-                critic_optimizer, _ = backpropagate_critic(
-                    critic_optimizer,
-                    (
-                        jnp.asarray(states),
-                        jnp.asarray(discounted_rewards),
+                    critic_optimizer, _ = backpropagate_critic(
+                        critic_optimizer,
+                        (
+                            jnp.asarray(states),
+                            jnp.asarray(discounted_rewards),
+                        )
                     )
-                )
+                    episode_count = episode_count + 1
 
                 break
+    print("{} id-тэй thread ажиллаж дууслаа.".format(thread_index))
+    pass
+
+
+envs = [gym.make(env_name) for i in range(n_workers)]
+
+try:
+    workers = [threading.Thread(
+        target = training_worker,
+        daemon = True,
+        args   = (envs[i], i))
+        for i in range(n_workers)
+        ]
+
+    for worker in workers:
+        time.sleep(1)
+        worker.start()
+
+    for worker in workers:
+        worker.join()
 finally:
-    env.close()
+    for env in envs: env.close()
+
