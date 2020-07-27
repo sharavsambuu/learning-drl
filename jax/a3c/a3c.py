@@ -114,6 +114,7 @@ def training_worker(env, thread_index):
     for episode in range(num_episodes):
         state = env.reset()
         states, actions, rewards, dones = [], [], [], []
+
         while True:
             with lock:
                 global_step  = global_step + 1
@@ -176,11 +177,12 @@ def training_worker(env, thread_index):
 envs = [gym.make(env_name) for i in range(n_workers)]
 
 try:
-    workers = [threading.Thread(
-        target = training_worker,
-        daemon = True,
-        args   = (envs[i], i))
-        for i in range(n_workers)
+    workers = [
+            threading.Thread(
+                target = training_worker,
+                daemon = True,
+                args   = (envs[i], i)
+            ) for i in range(n_workers)
         ]
 
     for worker in workers:
