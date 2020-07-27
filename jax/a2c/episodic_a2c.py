@@ -66,14 +66,10 @@ def critic_inference(model, x):
 @jax.jit
 def backpropagate_critic(optimizer, props):
     # props[0] - states
-    # props[1] - next_states
-    # props[2] - rewards
-    # props[3] - dones
-    next_values = jax.lax.stop_gradient(optimizer.target(props[1]))
-    terminals   = jnp.ones(len(props[3]))-props[3]
+    # props[1] - discounted_rewards
     def loss_fn(model):
         values      = model(props[0])
-        advantages  = props[2]+jnp.multiply(gamma*next_values, terminals) - values
+        advantages  = props[1] - values
         return jnp.mean(jnp.square(advantages))
     loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
     optimizer       = optimizer.apply_gradient(gradients)
@@ -84,15 +80,17 @@ def gather(probability_vec, action_index):
     return probability_vec[action_index]
 
 @jax.jit
-def backpropagate_actor(optimizer, props):
+def backpropagate_actor(optimizer, critic_model, props):
     # props[0] - states
-    # props[1] - actions
-    # props[2] - advantages
+    # props[1] - discounted_rewards
+    # props[2] - actions
+    values      = jax.lax.stop_gradient(critic_model(props[0]))
+    advantages  = props[1] - values
     def loss_fn(model):
         action_probabilities = model(props[0])
-        probabilities        = gather(action_probabilities, props[1])
+        probabilities        = gather(action_probabilities, props[2])
         log_probabilities    = -jnp.log(probabilities)
-        return jnp.mean(jnp.multiply(log_probabilities, props[2]))
+        return jnp.mean(jnp.multiply(log_probabilities, advantages))
     loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
     optimizer       = optimizer.apply_gradient(gradients)
     return optimizer, loss
@@ -129,22 +127,22 @@ try:
 
                 episode_length = len(rewards)
 
-                last_q_value = critic_inference(
-                        critic_optimizer.target,
-                        jnp.asarray([next_state])
-                        )[0][0]
-                q_values = np.zeros((episode_length, 1))
-                for idx, (reward, done) in enumerate(list(zip(rewards, dones))[::-1]):
-                    q_values[episode_length-1-idx] = reward + gamma*last_q_value*(1-done)
-                values     = critic_inference(critic_optimizer.target, jnp.asarray(states))
-                advantages = jnp.subtract(jnp.asarray(q_values), values)
+                discounted_rewards = np.zeros_like(rewards)
+                for t in range(0, episode_length):
+                    G_t = 0
+                    for idx, j in enumerate(range(t, episode_length)):
+                        G_t = G_t + (gamma**idx)*rewards[j]*(1-dones[j])
+                    discounted_rewards[t] = G_t
+                discounted_rewards = discounted_rewards - np.mean(discounted_rewards)
+                discounted_rewards = discounted_rewards / (np.std(discounted_rewards)+1e-10)
 
                 actor_optimizer, _  = backpropagate_actor(
                     actor_optimizer,
+                    critic_optimizer.target,
                     (
                         jnp.asarray(states),
-                        jnp.asarray(actions),
-                        jnp.asarray(advantages)
+                        jnp.asarray(discounted_rewards),
+                        jnp.asarray(actions)
                     )
                 )
 
@@ -152,9 +150,7 @@ try:
                     critic_optimizer,
                     (
                         jnp.asarray(states),
-                        jnp.asarray(next_states),
-                        jnp.asarray(rewards),
-                        jnp.asarray(dones)
+                        jnp.asarray(discounted_rewards),
                     )
                 )
 
