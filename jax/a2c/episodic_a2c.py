@@ -101,7 +101,7 @@ global_step = 0
 try:
     for episode in range(num_episodes):
         state = env.reset()
-        states, next_states, actions, rewards, dones = [], [], [], [], []
+        states, actions, rewards, dones = [], [], [], []
         while True:
             global_step = global_step+1
 
@@ -112,7 +112,6 @@ try:
             next_state, reward, done, _ = env.step(int(action))
 
             states.append(state)
-            next_states.append(next_state)
             actions.append(action)
             rewards.append(reward)
             dones.append(int(done))
