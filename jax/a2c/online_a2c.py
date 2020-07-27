@@ -2,7 +2,6 @@ import os
 import random
 import math
 import gym
-from collections import deque
 import flax
 import jax
 from jax import numpy as jnp
@@ -13,11 +12,8 @@ import numpy
 debug_render  = True
 debug         = False
 num_episodes  = 1500
-learning_rate = 0.01
+learning_rate = 0.001
 gamma         = 0.99
-memory_length = 4000
-replay_memory = deque(maxlen=memory_length)
-batch_size    = 64
 
 
 class ActorNetwork(flax.nn.Module):
@@ -64,21 +60,16 @@ def actor_inference(model, x):
     return model(x)
 
 @jax.jit
-def critic_inference(model, x):
-    return model(x)
-
-
-@jax.jit
 def backpropagate_critic(optimizer, props):
     # props[0] - state
     # props[1] - next_state
     # props[2] - reward
     # props[3] - done
     def loss_fn(model):
-        value      = model(jnp.asarray([props[0]]))
-        next_value = model(jnp.asarray([props[1]]))
-        advantage  = (props[2]+(gamma*next_value)*(1-props[3])) - value
-        return jnp.square(advantage).mean()
+        value      = model(jnp.asarray([props[0]]))[0][0]
+        next_value = model(jnp.asarray([props[1]]))[0][0]
+        advantage  = props[2]+(gamma*next_value)*(1-props[3]) - value
+        return jnp.square(advantage)
     loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
     optimizer       = optimizer.apply_gradient(gradients)
     return optimizer, loss
@@ -90,15 +81,15 @@ def backpropagate_actor(optimizer, critic_model, props):
     # props[2] - reward
     # props[3] - done
     # props[4] - action
-    value      = critic_model(jnp.asarray([props[0]]))[0]
-    next_value = critic_model(jnp.asarray([props[1]]))[0]
-    advantage  = (reward+(gamma*next_value)*(1-props[3]) - value)[0]
-    def loss_fn(model):
-        action_probabilities = model(jnp.asarray([state]))[0]
+    value      = critic_model(jnp.asarray([props[0]]))[0][0]
+    next_value = critic_model(jnp.asarray([props[1]]))[0][0]
+    advantage  = props[2]+(gamma*next_value)*(1-props[3]) - value
+    def loss_fn(model, advantage):
+        action_probabilities = model(jnp.asarray([props[0]]))[0]
         probability          = action_probabilities[props[4]]
         log_probability      = -jnp.log(probability)
         return log_probability*advantage
-    loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
+    loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target, advantage)
     optimizer       = optimizer.apply_gradient(gradients)
     return optimizer, loss
 
@@ -114,21 +105,20 @@ try:
 
             action_probabilities  = actor_inference(actor_optimizer.target, jnp.asarray([state]))
             action_probabilities  = np.array(action_probabilities[0])
-            action_probabilities /= action_probabilities.sum()
             action                = np.random.choice(n_actions, p=action_probabilities)
 
             next_state, reward, done, _ = env.step(int(action))
 
             episode_rewards.append(reward)
 
-            critic_optimizer, _ = backpropagate_critic(
-                    critic_optimizer,
-                    (state, next_state, reward, int(done))
-                    )
             actor_optimizer, _  = backpropagate_actor(
                     actor_optimizer,
                     critic_optimizer.target,
                     (state, next_state, reward, int(done), action)
+                    )
+            critic_optimizer, _ = backpropagate_critic(
+                    critic_optimizer,
+                    (state, next_state, reward, int(done))
                     )
 
             state = next_state
