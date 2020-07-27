@@ -98,8 +98,8 @@ global_step = 0
 
 try:
     for episode in range(num_episodes):
-        state           = env.reset()
-        episode_rewards = []
+        state                    = env.reset()
+        states, actions, rewards = [], [], []
         while True:
             global_step = global_step+1
 
@@ -109,17 +109,9 @@ try:
 
             next_state, reward, done, _ = env.step(int(action))
 
-            episode_rewards.append(reward)
-
-            actor_optimizer, _  = backpropagate_actor(
-                    actor_optimizer,
-                    critic_optimizer.target,
-                    (state, next_state, reward, int(done), action)
-                    )
-            critic_optimizer, _ = backpropagate_critic(
-                    critic_optimizer,
-                    (state, next_state, reward, int(done))
-                    )
+            states.append(state)
+            actions.append(action)
+            rewards.append(reward)
 
             state = next_state
 
@@ -127,7 +119,7 @@ try:
                 env.render()
 
             if done:
-                print(episode, " - reward :", sum(episode_rewards))
+                print(episode, " - reward :", sum(rewards))
                 break
 finally:
     env.close()
