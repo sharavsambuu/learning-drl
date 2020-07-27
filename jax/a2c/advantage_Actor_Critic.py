@@ -145,7 +145,6 @@ try:
                     discounted_rewards[t] = G_t
                 discounted_rewards = discounted_rewards - np.mean(discounted_rewards)
                 discounted_rewards = discounted_rewards / (np.std(discounted_rewards)+1e-10)
-                
 
                 if np.isnan(discounted_rewards).any():
                     print("Damn DISCOUNTED REWARDS!!! HAS A NAN")
