@@ -116,8 +116,7 @@ def training_worker(env, thread_index):
         states, actions, rewards, dones = [], [], [], []
 
         while True:
-            with lock:
-                global_step  = global_step + 1
+            global_step = global_step + 1
 
             action_probabilities  = actor_inference(actor_optimizer.target, jnp.asarray([state]))
             action_probabilities  = np.array(action_probabilities[0])
