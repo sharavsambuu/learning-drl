@@ -60,6 +60,10 @@ def actor_inference(model, x):
     return model(x)
 
 @jax.jit
+def critic_inference(model, x):
+    return model(x)
+
+@jax.jit
 def backpropagate_critic(optimizer, props):
     # props[0] - state
     # props[1] - next_state
@@ -98,8 +102,8 @@ global_step = 0
 
 try:
     for episode in range(num_episodes):
-        state                    = env.reset()
-        states, actions, rewards = [], [], []
+        state = env.reset()
+        states, actions, rewards, dones = [], [], [], []
         while True:
             global_step = global_step+1
 
@@ -112,6 +116,7 @@ try:
             states.append(state)
             actions.append(action)
             rewards.append(reward)
+            dones.append(int(done))
 
             state = next_state
 
@@ -120,6 +125,22 @@ try:
 
             if done:
                 print(episode, " - reward :", sum(rewards))
+
+                last_q_value = critic_inference(
+                        critic_optimizer.target,
+                        jnp.asarray([next_state])
+                        )[0][0]
+
+                episode_length = len(rewards)
+
+                q_values       = np.zeros((episode_length, 1))
+                for idx, (reward, done) in enumerate(list(zip(rewards, dones))[::-1]):
+                    q_values[episode_length-1-idx] = reward + gamma*last_q_value*(1-done)
+
+                values     = critic_inference(critic_optimizer.target, jnp.asarray(states))
+                advantages = jnp.subtract(jnp.asarray(q_values), values)
+
+
                 break
 finally:
     env.close()
