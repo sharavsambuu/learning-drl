@@ -12,7 +12,7 @@ import numpy
 
 debug_render  = True
 debug         = False
-num_episodes  = 300
+num_episodes  = 1500
 learning_rate = 0.01
 gamma         = 0.99
 memory_length = 4000
@@ -38,7 +38,6 @@ class CriticNetwork(flax.nn.Module):
         activation_layer_2 = flax.nn.relu(dense_layer_2)
         output_dense_layer = flax.nn.Dense(activation_layer_2, 1)
         return output_dense_layer
-
 
 
 env   = gym.make('CartPole-v1')
@@ -91,9 +90,9 @@ def backpropagate_actor(optimizer, critic_model, props):
     # props[2] - reward
     # props[3] - done
     # props[4] - action
-    value      = critic_model(jnp.asarray([props[0]]))
-    next_value = critic_model(jnp.asarray([props[1]]))
-    advantage  = jnp.mean((reward+(gamma*next_value)*(1-props[3])) - value)
+    value      = critic_model(jnp.asarray([props[0]]))[0]
+    next_value = critic_model(jnp.asarray([props[1]]))[0]
+    advantage  = (reward+(gamma*next_value)*(1-props[3]) - value)[0]
     def loss_fn(model):
         action_probabilities = model(jnp.asarray([state]))[0]
         probability          = action_probabilities[props[4]]
