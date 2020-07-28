@@ -1,13 +1,17 @@
 import os
+import sys
 import random
 import math
 import time
 import threading
+import multiprocessing
+import pickle
 import gym
 import flax
 import jax
 from jax import numpy as jnp
 import numpy as np
+import msgpack
 
 
 debug_render  = False
@@ -16,7 +20,7 @@ learning_rate = 0.001
 gamma         = 0.99
 
 env_name      = "CartPole-v1"
-n_workers     = 8
+n_workers     = 4
 
 
 class ActorNetwork(flax.nn.Module):
@@ -98,31 +102,26 @@ def backpropagate_actor(optimizer, critic_model, props):
     return optimizer, loss
 
 
+global_queue_in  = multiprocessing.Queue()
+global_queue_out = multiprocessing.Queue()
 
-episode_count = 0
-global_step   = 0
-
-lock = threading.Lock()
-
-def training_worker(env, thread_index):
-    global actor_optimizer
-    global critic_optimizer
-
-    global episode_count
-    global global_step
+def training_worker(env, process_index, queue_in, queue_out):
+    print("worker is started...")
+    #global actor_optimizer
+    #global critic_optimizer
+    actor_optimizer, critic_optimizer = queue_in.get()
 
     for episode in range(num_episodes):
         state = env.reset()
         states, actions, rewards, dones = [], [], [], []
 
         while True:
-            global_step  = global_step + 1
-
             action_probabilities  = actor_inference(actor_optimizer.target, jnp.asarray([state]))
             action_probabilities  = np.array(action_probabilities[0])
             action                = np.random.choice(n_actions, p=action_probabilities)
 
             next_state, reward, done, _ = env.step(int(action))
+            print(action_probabilities, action)
 
             states.append(state)
             actions.append(action)
@@ -131,12 +130,8 @@ def training_worker(env, thread_index):
 
             state = next_state
 
-            if debug_render and thread_index==0:
-                env.render()
-
             if done:
-                print("{} step, {} worker, {} episode, reward : {}".format(
-                    global_step, thread_index, episode, sum(rewards)))
+                print("episode {}, reward : {}".format(episode, sum(rewards)))
 
                 episode_length = len(rewards)
 
@@ -169,7 +164,7 @@ def training_worker(env, thread_index):
                     episode_count = episode_count + 1
 
                 break
-    print("{} id-тэй thread ажиллаж дууслаа.".format(thread_index))
+    print("process ажиллаж дууслаа.")
     pass
 
 
@@ -177,16 +172,23 @@ envs = [gym.make(env_name) for i in range(n_workers)]
 
 try:
     workers = [
-            threading.Thread(
+            multiprocessing.Process(
                 target = training_worker,
-                daemon = True,
-                args   = (envs[i], i)
+                args   = (envs[i], i, global_queue_in, global_queue_out)
             ) for i in range(n_workers)
         ]
 
     for worker in workers:
-        time.sleep(1)
         worker.start()
+
+    #serialized_optimizers = pickle.dumps((actor_optimizer, critic_optimizer), pickle.HIGHEST_PROTOCOL)
+    serialized = msgpack.packb((actor_model, critic_model), use_bin_type=True)
+    print("SERIALIZED!!!")
+    print(serialized)
+    #size_of_actor_opt  = sys.getsizeof(actor_optimizer)
+    #size_of_critic_opt = sys.getsizeof(critic_optimizer)
+    #print("size of opts", size_of_actor_opt, size_of_critic_opt)
+    #global_queue_in.put(serialized_optimizers)
 
     for worker in workers:
         worker.join()
