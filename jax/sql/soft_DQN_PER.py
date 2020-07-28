@@ -2,6 +2,7 @@
 # References : 
 #   - https://bair.berkeley.edu/blog/2017/10/06/soft-q-learning/
 #   - https://arxiv.org/pdf/1702.08165.pdf
+#   - https://zhuanlan.zhihu.com/p/150527098
 
 import os
 import random
