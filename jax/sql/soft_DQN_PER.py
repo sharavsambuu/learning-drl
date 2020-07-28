@@ -1,6 +1,7 @@
 # Soft Q-Learning
-# Reference : 
+# References : 
 #   - https://bair.berkeley.edu/blog/2017/10/06/soft-q-learning/
+#   - https://arxiv.org/pdf/1702.08165.pdf
 
 import os
 import random
@@ -195,7 +196,7 @@ try:
                 distribution, q_values = policy(optimizer.target, jnp.asarray([state]))
                 distribution  = np.array(distribution[0])
                 distribution /= np.sum(distribution)
-                action = np.random.choice(n_actions, p=distribution)
+                action        = np.random.choice(n_actions, p=distribution)
 
             if epsilon>epsilon_min:
                 epsilon = epsilon_min+(epsilon_max-epsilon_min)*math.exp(-epsilon_decay*global_steps)
