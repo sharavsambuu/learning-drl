@@ -77,7 +77,7 @@ class PERMemory:
         return (error+self.e)**self.a
     def add(self, error, sample):
         p = self._get_priority(error)
-        self.tree.add(p, sample) 
+        self.tree.add(p, sample)
     def sample(self, n):
         batch   = []
         segment = self.tree.total()/n
@@ -117,11 +117,14 @@ optimizer        = flax.optim.Adam(learning_rate).create(q_network)
 
 per_memory       = PERMemory(memory_length)
 
+
 @jax.jit
 def policy(model, x):
     predicted_q_values = model(x)
-    max_q_action       = jnp.argmax(predicted_q_values)
-    return max_q_action, predicted_q_values
+    values             = get_values(predicted_q_values)
+    alpha              = 4
+    distribution       = jnp.exp((predicted_q_values-values)/alpha)
+    return distribution, predicted_q_values
 
 
 @jax.vmap
@@ -141,9 +144,15 @@ def td_error(model, target_model, batch):
     return calculate_td_error(predicted_q_values, target_q_values, batch[1], batch[2])
 
 
+@jax.jit
+def get_values(q_value_batch):
+    alpha  = 4.
+    values = alpha*jnp.log(jnp.sum(jnp.exp(q_value_batch/alpha), axis=1, keepdims=True))
+    return values
+
 @jax.vmap
-def q_learning_loss(q_value_vec, target_q_value_vec, action, reward, done):
-    td_target = reward + gamma*jnp.amax(target_q_value_vec)*(1.-done)
+def q_learning_loss(q_value_vec, target_values, action, reward, done):
+    td_target = reward + gamma*target_values*(1.-done)
     td_error  = jax.lax.stop_gradient(td_target) - q_value_vec[action]
     return jnp.square(td_error)
 
@@ -157,10 +166,11 @@ def train_step(optimizer, target_model, batch):
     def loss_fn(model):
         predicted_q_values = model(batch[0])
         target_q_values    = target_model(batch[3])
+        target_values      = get_values(target_q_values)
         return jnp.mean(
                 q_learning_loss(
                     predicted_q_values,
-                    target_q_values,
+                    target_values,
                     batch[1],
                     batch[2],
                     batch[4]
@@ -182,16 +192,13 @@ try:
             if np.random.rand() <= epsilon:
                 action = env.action_space.sample()
             else:
-                action, q_values = policy(optimizer.target, state)
-                if debug:
-                    print("q утгууд :"       , q_values)
-                    print("сонгосон action :", action  )
+                distribution, q_values = policy(optimizer.target, jnp.asarray([state]))
+                distribution  = np.array(distribution[0])
+                distribution /= np.sum(distribution)
+                action = np.random.choice(n_actions, p=distribution)
 
             if epsilon>epsilon_min:
                 epsilon = epsilon_min+(epsilon_max-epsilon_min)*math.exp(-epsilon_decay*global_steps)
-                if debug:
-                    #print("epsilon :", epsilon)
-                    pass
 
             new_state, reward, done, _ = env.step(int(action))
 
