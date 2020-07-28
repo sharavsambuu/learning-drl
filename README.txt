@@ -26,5 +26,7 @@
 	pip install --upgrade $BASE_URL/$CUDA_VERSION/jaxlib-0.1.51-$PYTHON_VERSION-none-$PLATFORM.whl
 	pip install --upgrade jax  # install jax
 	pip install --upgrade flax
-	
 `
+
+# References
+  https://github.com/joaogui1/RL-JAX/tree/master/DQN
