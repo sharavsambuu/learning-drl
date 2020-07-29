@@ -60,6 +60,9 @@ def rollout_worker(brain_server):
             state = env.reset()
             states, actions, rewards, dones = [], [], [], []
 
+            new_actor_params  = ray.get(brain_server.get_actor_params.remote())
+            local_actor_model = local_actor_model.replace(params=new_actor_params)
+
             while True:
                 action_probabilities = act_local(local_actor_model, state)
                 action_probabilities = np.array(action_probabilities)
@@ -86,12 +89,14 @@ def rollout_worker(brain_server):
                     discounted_rewards  = discounted_rewards - np.mean(discounted_rewards)
                     discounted_rewards  = discounted_rewards / (np.std(discounted_rewards)+1e-10)
 
-                    new_actor_weights = ray.get(brain_server.learn.remote(
-                                ( states, discounted_rewards,actions),
-                                ( states, discounted_rewards)
-                            ))
-                    local_actor_model = local_actor_model.replace(params=new_actor_weights)
+                    ray.get(brain_server.learn.remote(
+                        ( states, discounted_rewards,actions),
+                        ( states, discounted_rewards)
+                    ))
+
                     break
+    except Exception as e:
+        print(e)
     finally:
         env.close()
         return 0
@@ -190,7 +195,10 @@ class BrainServer(object):
                 jnp.asarray(critic_batch[1]), # discounted_rewards
             )
         )
+
+    def get_actor_params(self,):
         return self.actor_optimizer.target.params
+
 
 
 brain_server = BrainServer.remote()
