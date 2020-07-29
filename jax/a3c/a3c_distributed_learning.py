@@ -17,7 +17,6 @@ import flax
 import jax
 from jax import numpy as jnp
 import numpy as np
-import uuid
 import ray
 
 ray.init(num_cpus=4, num_gpus=1)
@@ -142,7 +141,6 @@ def rollout_worker(parameter_server):
 
     brain     = Brain()
     env       = gym.make(env_name)
-    worker_id = str(uuid.uuid4())
 
     try:
         for episode in range(num_episodes):
@@ -165,7 +163,7 @@ def rollout_worker(parameter_server):
                 state = next_state
 
                 if done:
-                    print("worker {}, episode {}, reward : {}".format(worker_id, episode, sum(rewards)))
+                    print("episode {}, reward : {}".format(episode, sum(rewards)))
                     episode_length     = len(rewards)
                     discounted_rewards = np.zeros_like(rewards)
                     for t in range(0, episode_length):
