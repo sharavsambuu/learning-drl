@@ -31,5 +31,10 @@
 	pip install --upgrade flax
 `
 
+# When on-deman GPU resource utilization needed
+`
+    export XLA_PYTHON_CLIENT_ALLOCATOR=platform
+`
+
 # References
   https://github.com/joaogui1/RL-JAX/tree/master/DQN

@@ -1,5 +1,8 @@
 # References:
 #  - https://rise.cs.berkeley.edu/blog/ray-tips-for-first-time-users/
+#  - https://docs.ray.io/en/master/using-ray-with-gpus.html
+#  - https://jax.readthedocs.io/en/latest/gpu_memory_allocation.html
+#      export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 
 import os
 import sys
@@ -15,7 +18,9 @@ import jax
 from jax import numpy as jnp
 import numpy as np
 import uuid
-import ray; ray.init(num_cpus=4)
+import ray
+
+ray.init(num_cpus=4, num_gpus=1)
 
 
 debug_render  = False
@@ -35,7 +40,7 @@ env.close()
 def act_local(model, state):
     return model(jnp.asarray([state]))[0]
 
-@ray.remote
+@ray.remote(num_gpus=0.04)
 def rollout_worker(brain_server):
     class ActorNetwork(flax.nn.Module):
         def apply(self_, x, n_actions):
@@ -55,6 +60,7 @@ def rollout_worker(brain_server):
     env       = gym.make(env_name)
 
     worker_id = str(uuid.uuid4())
+    print(worker_id, "started...")
     try:
         for episode in range(num_episodes):
             state = env.reset()
@@ -139,7 +145,7 @@ def backpropagate_actor(optimizer, critic_model, props):
     optimizer       = optimizer.apply_gradient(gradients)
     return optimizer, loss
 
-@ray.remote
+@ray.remote(num_gpus=0.5)
 class BrainServer(object):
     def __init__(self,):
         class ActorNetwork(flax.nn.Module):
