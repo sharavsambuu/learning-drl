@@ -28,7 +28,7 @@ learning_rate = 0.001
 gamma         = 0.99
 
 env_name      = "CartPole-v1"
-n_workers     = 2
+n_workers     = 4
 
 env           = gym.make(env_name)
 state_shape   = env.reset().shape
