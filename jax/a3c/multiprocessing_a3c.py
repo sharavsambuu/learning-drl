@@ -12,6 +12,8 @@ import jax
 from jax import numpy as jnp
 import numpy as np
 import msgpack
+import cloudpickle
+
 
 
 debug_render  = False
@@ -105,19 +107,50 @@ def backpropagate_actor(optimizer, critic_model, props):
 global_queue_in  = multiprocessing.Queue()
 global_queue_out = multiprocessing.Queue()
 
+message = "Juice"
+
 def training_worker(env, process_index, queue_in, queue_out):
-    print("worker is started...")
+    print("waiting for to receive model params at process-{}".format(process_index))
+    pickled_actor_params, pickled_critic_params = queue_in.get()
+    print("models received from main process...")
+    actor_params  = pickle.loads(pickled_actor_params )
+    critic_params = pickle.loads(pickled_critic_params)
+    #print("got an actor_params in process-{}".format(process_index))
+    #print("got an critic_params in process-{}".format(process_index))
+    #print(actor_params)
+    #print(critic_params)
+
+    #global actor_model
+    #global critic_model
+    global state
+    global n_actions
+
+    actor_module     = ActorNetwork.partial(n_actions=n_actions)
+    _, actor_params  = actor_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
+    actor_model      = flax.nn.Model(actor_module, actor_params)
+    critic_module    = CriticNetwork.partial()
+    _, critic_params = critic_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
+    critic_model     = flax.nn.Model(critic_module, critic_params)
+
+    actor_model      = actor_model.replace(params=actor_params)
+    critic_model     = critic_model.replace(params=critic_params)
+    actor_optimizer  = flax.optim.Adam(learning_rate=learning_rate).create(actor_model)
+    critic_optimizer = flax.optim.Adam(learning_rate=learning_rate).create(critic_model)
+
+    print("created.")
     #global actor_optimizer
     #global critic_optimizer
-    actor_optimizer, critic_optimizer = queue_in.get()
 
     for episode in range(num_episodes):
         state = env.reset()
         states, actions, rewards, dones = [], [], [], []
 
         while True:
+            print("whaat", state.shape)
             action_probabilities  = actor_inference(actor_optimizer.target, jnp.asarray([state]))
+            print(action_probabilities)
             action_probabilities  = np.array(action_probabilities[0])
+            print(action_probabilities)
             action                = np.random.choice(n_actions, p=action_probabilities)
 
             next_state, reward, done, _ = env.step(int(action))
@@ -182,13 +215,18 @@ try:
         worker.start()
 
     #serialized_optimizers = pickle.dumps((actor_optimizer, critic_optimizer), pickle.HIGHEST_PROTOCOL)
-    serialized = msgpack.packb((actor_model, critic_model), use_bin_type=True)
-    print("SERIALIZED!!!")
-    print(serialized)
+    #serialized = msgpack.packb((actor_model, critic_model), use_bin_type=True)
+    #print("SERIALIZED!!!")
+    #print(serialized)
     #size_of_actor_opt  = sys.getsizeof(actor_optimizer)
     #size_of_critic_opt = sys.getsizeof(critic_optimizer)
     #print("size of opts", size_of_actor_opt, size_of_critic_opt)
-    #global_queue_in.put(serialized_optimizers)
+    #time.sleep(1)
+    #pickled_data = cloudpickle.dumps((actor_optimizer, critic_optimizer))
+    pickled_actor_params   = cloudpickle.dumps(actor_optimizer.target.params)
+    pickled_crictic_params = cloudpickle.dumps(critic_optimizer.target.params)
+    global_queue_in.put((pickled_actor_params, pickled_crictic_params))
+    print("pickle sent from main process to child processes...")
 
     for worker in workers:
         worker.join()
