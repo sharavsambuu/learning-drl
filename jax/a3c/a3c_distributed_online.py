@@ -28,7 +28,7 @@ learning_rate = 0.001
 gamma         = 0.99
 
 env_name      = "CartPole-v1"
-n_workers     = 4
+n_workers     = 2
 
 env           = gym.make(env_name)
 state_shape   = env.reset().shape
@@ -41,33 +41,35 @@ def actor_inference(model, x):
     return model(x)
 
 @jax.jit
-def backpropagate_critic(optimizer, props):
-    # props[0] - states
-    # props[1] - discounted_rewards
-    def loss_fn(model):
-        values      = model(props[0])
-        advantages  = props[1] - values
-        return jnp.mean(jnp.square(advantages))
-    loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
+def backpropagate_actor(optimizer, critic_model, props):
+    # props[0] - state
+    # props[1] - next_state
+    # props[2] - reward
+    # props[3] - done
+    # props[4] - action
+    value      = jax.lax.stop_gradient(critic_model(jnp.asarray([props[0]]))[0][0])
+    next_value = jax.lax.stop_gradient(critic_model(jnp.asarray([props[1]]))[0][0])
+    advantage  = props[2]+(gamma*next_value)*(1-props[3]) - value
+    def loss_fn(model, advantage):
+        action_probabilities = model(jnp.asarray([props[0]]))[0]
+        probability          = action_probabilities[props[4]]
+        log_probability      = -jnp.log(probability)
+        return log_probability*advantage
+    loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target, advantage)
     optimizer       = optimizer.apply_gradient(gradients)
     return optimizer, loss
 
-@jax.vmap
-def gather(probability_vec, action_index):
-    return probability_vec[action_index]
-
 @jax.jit
-def backpropagate_actor(optimizer, critic_model, props):
-    # props[0] - states
-    # props[1] - discounted_rewards
-    # props[2] - actions
-    values      = jax.lax.stop_gradient(critic_model(props[0]))
-    advantages  = props[1] - values
+def backpropagate_critic(optimizer, props):
+    # props[0] - state
+    # props[1] - next_state
+    # props[2] - reward
+    # props[3] - done
+    next_value = jax.lax.stop_gradient(optimizer.target(jnp.asarray([props[1]]))[0][0])
     def loss_fn(model):
-        action_probabilities = model(props[0])
-        probabilities        = gather(action_probabilities, props[2])
-        log_probabilities    = -jnp.log(probabilities)
-        return jnp.mean(jnp.multiply(log_probabilities, advantages))
+        value      = model(jnp.asarray([props[0]]))[0][0]
+        advantage  = props[2]+(gamma*next_value)*(1-props[3]) - value
+        return jnp.square(advantage)
     loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
     optimizer       = optimizer.apply_gradient(gradients)
     return optimizer, loss
@@ -118,16 +120,20 @@ def rollout_worker(parameter_server):
                 self.actor_optimizer,
                 self.critic_optimizer.target,
                 (
-                    jnp.asarray(actor_batch[0]), # states
-                    jnp.asarray(actor_batch[1]), # discounted_rewards
-                    jnp.asarray(actor_batch[2])  # actions
+                    jnp.asarray(actor_batch[0]),
+                    jnp.asarray(actor_batch[1]),
+                    jnp.asarray(actor_batch[2]),
+                    jnp.asarray(actor_batch[3]),
+                    jnp.asarray(actor_batch[4])
                 )
             )
             self.critic_optimizer, _ = backpropagate_critic(
                 self.critic_optimizer,
                 (
-                    jnp.asarray(critic_batch[0]), # states
-                    jnp.asarray(critic_batch[1]), # discounted_rewards
+                    jnp.asarray(critic_batch[0]),
+                    jnp.asarray(critic_batch[1]),
+                    jnp.asarray(critic_batch[2]),
+                    jnp.asarray(critic_batch[3]),
                 )
             )
 
@@ -144,45 +150,31 @@ def rollout_worker(parameter_server):
 
     try:
         for episode in range(num_episodes):
-            state = env.reset()
-            states, actions, rewards, dones = [], [], [], []
-
-            actor_params, critic_params = ray.get(parameter_server.get.remote(['actor_params', 'critic_params']))
-            brain.update_params(actor_params, critic_params)
-
+            state   = env.reset()
+            rewards = []
             while True:
+                actor_params, critic_params = ray.get(parameter_server.get.remote(['actor_params', 'critic_params']))
+                brain.update_params(actor_params, critic_params)
+
                 action = brain.act(state)
 
                 next_state, reward, done, _ = env.step(int(action))
 
-                states.append(state)
-                actions.append(action)
                 rewards.append(reward)
-                dones.append(int(done))
+
+                brain.learn(
+                        (state, next_state, reward, int(done), action),
+                        (state, next_state, reward, int(done))
+                    )
+                actor_params, critic_params = brain.get_params()
+                parameter_server.update.remote(
+                    ['actor_params', 'critic_params'], 
+                    [actor_params, critic_params])
 
                 state = next_state
 
                 if done:
                     print("episode {}, reward : {}".format(episode, sum(rewards)))
-                    episode_length     = len(rewards)
-                    discounted_rewards = np.zeros_like(rewards)
-                    for t in range(0, episode_length):
-                        G_t = 0
-                        for idx, j in enumerate(range(t, episode_length)):
-                            G_t = G_t + (gamma**idx)*rewards[j]*(1-dones[j])
-                        discounted_rewards[t] = G_t
-                    discounted_rewards  = discounted_rewards - np.mean(discounted_rewards)
-                    discounted_rewards  = discounted_rewards / (np.std(discounted_rewards)+1e-10)
-
-                    brain.learn(
-                        ( states, discounted_rewards, actions),
-                        ( states, discounted_rewards)
-                    )
-                    actor_params, critic_params = brain.get_params()
-                    parameter_server.update.remote(
-                        ['actor_params', 'critic_params'], 
-                        [actor_params, critic_params])
-
                     break
     except Exception as e:
         print(e)
