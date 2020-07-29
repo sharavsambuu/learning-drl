@@ -21,10 +21,11 @@ class ParameterServer(object):
 
 parameter_server = ParameterServer.remote(['hello_key'], [1])
 
+some_global_key  = "hello_key"
 @ray.remote
 def worker_task(parameter_server):
     for i in range(10):
-        keys       = ['hello_key']
+        keys       = [some_global_key]
         values     = ray.get(parameter_server.get.remote(keys))
         values[0] += 1
         parameter_server.update.remote(keys, values)

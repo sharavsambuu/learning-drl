@@ -49,17 +49,16 @@ state     = env.reset()
 n_actions = env.action_space.n
 env.close()
 
-actor_module     = ActorNetwork.partial(n_actions=n_actions)
-_, actor_params  = actor_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
-actor_model      = flax.nn.Model(actor_module, actor_params)
+#actor_module     = ActorNetwork.partial(n_actions=n_actions)
+#_, actor_params  = actor_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
+#actor_model      = flax.nn.Model(actor_module, actor_params)
 
-critic_module    = CriticNetwork.partial()
-_, critic_params = critic_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
-critic_model     = flax.nn.Model(critic_module, critic_params)
+#critic_module    = CriticNetwork.partial()
+#_, critic_params = critic_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
+#critic_model     = flax.nn.Model(critic_module, critic_params)
 
-
-actor_optimizer  = flax.optim.Adam(learning_rate).create(actor_model)
-critic_optimizer = flax.optim.Adam(learning_rate).create(critic_model)
+#actor_optimizer  = flax.optim.Adam(learning_rate).create(actor_model)
+#critic_optimizer = flax.optim.Adam(learning_rate).create(critic_model)
 
 
 @jax.jit
@@ -103,8 +102,24 @@ def backpropagate_actor(optimizer, critic_model, props):
     return optimizer, loss
 
 
+
+actor_module     = ActorNetwork.partial(n_actions=n_actions)
+_, actor_params  = actor_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
+critic_module    = CriticNetwork.partial()
+_, critic_params = critic_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
+
+
 @ray.remote
 def training_worker(parameter_server):
+    actor_params, critic_params = parameter_server.get.remote(
+                        ['actor_params', 'critic_params'])
+    actor_module     = ActorNetwork.partial(n_actions=n_actions)
+    critic_module    = CriticNetwork.partial()
+    actor_model      = flax.nn.Model(actor_module, actor_params)
+    critic_model     = flax.nn.Model(critic_module, critic_params)
+    actor_optimizer  = flax.optim.Adam(learning_rate).create(actor_model)
+    critic_optimizer = flax.optim.Adam(learning_rate).create(critic_model)
+
     env = gym.make(env_name)
 
     try:
@@ -112,8 +127,11 @@ def training_worker(parameter_server):
             state = env.reset()
             states, actions, rewards, dones = [], [], [], []
             while True:
-                actor_optimizer, critic_optimizer = parameter_server.get.remote(
-                        ['actor_optimizer', 'critic_optimizer'])
+                actor_params, critic_params = parameter_server.get.remote(
+                        ['actor_params', 'critic_params'])
+                actor_model  = actor_model.replace(params=actor_params)
+                critic_model = critic_model.replace(params=critic_params)
+
                 action_probabilities  = actor_inference(actor_optimizer.target, jnp.asarray([state]))
                 action_probabilities  = np.array(action_probabilities[0])
                 action                = np.random.choice(n_actions, p=action_probabilities)
@@ -151,8 +169,11 @@ def training_worker(parameter_server):
                         )
                     )
                     parameter_server.update.remote(
-                            ['actor_optimizer', 'critic_optimizer'], 
-                            [actor_optimizer, critic_optimizer])
+                            ['actor_params', 'critic_params'],
+                            [
+                                actor_optimizer.target.params,
+                                critic_optimizer.target.params
+                            ])
                     episode_count = episode_count + 1
                     break
     finally:
@@ -164,14 +185,28 @@ class ParameterServer(object):
     def __init__(self, keys, values):
         self.parameters = dict(zip(keys, values))
     def get(self, keys):
-        return (self.parameters[key] for key in keys)
+        return [self.parameters[key] for key in keys]
     def update(self, keys, values):
-        for key, value in zip(key, values):
+        for key, value in zip(keys, values):
             self.parameters[key] = value
 
 parameter_server = ParameterServer.remote(
-        ['actor_optimizer', 'critic_optimizer'], 
-        [actor_optimizer, critic_optimizer])
+        ['actor_params', 'critic_params'],
+        [actor_params, critic_params])
+result = parameter_server.get.remote(
+        ['actor_params', 'critic_params'])
+print("got initial result")
+parameter_server.update.remote(
+        ['actor_params', 'critic_params'],
+        [actor_params, critic_params])
+print("parameter updated...")
+result = parameter_server.get.remote(
+        ['actor_params', 'critic_params'])
+ray.get(result)
+print("got updated parameters")
+print(ray.get(result))
+exit(0)
+
 
 for _ in range(n_workers):
     ray.get(training_worker.remote(parameter_server))
