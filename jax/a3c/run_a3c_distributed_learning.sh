@@ -1,2 +1,2 @@
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
-python ray_multiprocessing_a3c.py
+python a3c_distributed_learning.py
