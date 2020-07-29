@@ -27,22 +27,43 @@ env_name      = "CartPole-v1"
 n_workers     = 8
 
 env           = gym.make(env_name)
-state         = env.reset()
+state_shape   = env.reset().shape
 n_actions     = env.action_space.n
 env.close()
 
+@jax.jit
+def act_local(model, state):
+    return model(jnp.asarray([state]))[0]
 
 @ray.remote
 def rollout_worker(brain_server):
+    class ActorNetwork(flax.nn.Module):
+        def apply(self_, x, n_actions):
+            dense_layer_1      = flax.nn.Dense(x, 64)
+            activation_layer_1 = flax.nn.relu(dense_layer_1)
+            dense_layer_2      = flax.nn.Dense(activation_layer_1, 32)
+            activation_layer_2 = flax.nn.relu(dense_layer_2)
+            output_dense_layer = flax.nn.Dense(activation_layer_2, n_actions)
+            output_layer       = flax.nn.softmax(output_dense_layer)
+            return output_layer
+
+    actor_module      = ActorNetwork.partial(n_actions=n_actions)
+    _, actor_params   = actor_module.init_by_shape(jax.random.PRNGKey(0), [state_shape])
+
+    local_actor_model = flax.nn.Model(actor_module, actor_params)
+
     env       = gym.make(env_name)
+
     worker_id = str(uuid.uuid4())
-    print(worker_id, "is started...")
     try:
         for episode in range(num_episodes):
             state = env.reset()
             states, actions, rewards, dones = [], [], [], []
+
             while True:
-                action = ray.get(brain_server.act.remote(state))
+                action_probabilities = act_local(local_actor_model, state)
+                action_probabilities = np.array(action_probabilities)
+                action               = np.random.choice(n_actions, p=action_probabilities)
 
                 next_state, reward, done, _ = env.step(int(action))
 
@@ -65,10 +86,11 @@ def rollout_worker(brain_server):
                     discounted_rewards  = discounted_rewards - np.mean(discounted_rewards)
                     discounted_rewards  = discounted_rewards / (np.std(discounted_rewards)+1e-10)
 
-                    ray.get(brain_server.learn.remote(
+                    new_actor_weights = ray.get(brain_server.learn.remote(
                                 ( states, discounted_rewards,actions),
                                 ( states, discounted_rewards)
                             ))
+                    local_actor_model = local_actor_model.replace(params=new_actor_weights)
                     break
     finally:
         env.close()
@@ -134,11 +156,11 @@ class BrainServer(object):
                 return output_dense_layer
 
         self.actor_module     = ActorNetwork.partial(n_actions=n_actions)
-        _, self.actor_params  = self.actor_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
+        _, self.actor_params  = self.actor_module.init_by_shape(jax.random.PRNGKey(0), [state_shape])
         self.actor_model      = flax.nn.Model(self.actor_module, self.actor_params)
 
         self.critic_module    = CriticNetwork.partial()
-        _, self.critic_params = self.critic_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
+        _, self.critic_params = self.critic_module.init_by_shape(jax.random.PRNGKey(0), [state_shape])
         self.critic_model     = flax.nn.Model(self.critic_module, self.critic_params)
 
         self.actor_optimizer  = flax.optim.Adam(learning_rate).create(self.actor_model)
@@ -168,6 +190,8 @@ class BrainServer(object):
                 jnp.asarray(critic_batch[1]), # discounted_rewards
             )
         )
+        return self.actor_optimizer.target.params
+
 
 brain_server = BrainServer.remote()
 
