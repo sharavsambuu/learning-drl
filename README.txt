@@ -1,3 +1,6 @@
+# About
+  This repos is just my learning journey and don't expect much from it.
+
 # Dependencies
   sudo apt install libsdl2-dev swig python3-tk
   sudo apt install python-numpy cmake zlib1g-dev libjpeg-dev libboost-all-dev gcc libsdl2-dev wget unzip
