@@ -1,0 +1,2 @@
+export XLA_PYTHON_CLIENT_ALLOCATOR=platform
+python ray_multiprocessing_a3c.py
