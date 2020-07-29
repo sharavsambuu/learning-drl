@@ -11,8 +11,7 @@ import flax
 import jax
 from jax import numpy as jnp
 import numpy as np
-import msgpack
-import cloudpickle
+import ray; ray.init()
 
 
 
@@ -104,80 +103,37 @@ def backpropagate_actor(optimizer, critic_model, props):
     return optimizer, loss
 
 
-global_queue_in  = multiprocessing.Queue()
-global_queue_out = multiprocessing.Queue()
+@ray.remote
+def training_worker(parameter_server):
+    env = gym.make(env_name)
 
-message = "Juice"
-
-def training_worker(env, process_index, queue_in, queue_out):
-    print("waiting for to receive model params at process-{}".format(process_index))
-    pickled_actor_params, pickled_critic_params = queue_in.get()
-    print("models received from main process...")
-    actor_params  = pickle.loads(pickled_actor_params )
-    critic_params = pickle.loads(pickled_critic_params)
-    #print("got an actor_params in process-{}".format(process_index))
-    #print("got an critic_params in process-{}".format(process_index))
-    #print(actor_params)
-    #print(critic_params)
-
-    #global actor_model
-    #global critic_model
-    global state
-    global n_actions
-
-    actor_module     = ActorNetwork.partial(n_actions=n_actions)
-    _, actor_params  = actor_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
-    actor_model      = flax.nn.Model(actor_module, actor_params)
-    critic_module    = CriticNetwork.partial()
-    _, critic_params = critic_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
-    critic_model     = flax.nn.Model(critic_module, critic_params)
-
-    actor_model      = actor_model.replace(params=actor_params)
-    critic_model     = critic_model.replace(params=critic_params)
-    actor_optimizer  = flax.optim.Adam(learning_rate=learning_rate).create(actor_model)
-    critic_optimizer = flax.optim.Adam(learning_rate=learning_rate).create(critic_model)
-
-    print("created.")
-    #global actor_optimizer
-    #global critic_optimizer
-
-    for episode in range(num_episodes):
-        state = env.reset()
-        states, actions, rewards, dones = [], [], [], []
-
-        while True:
-            print("whaat", state.shape)
-            action_probabilities  = actor_inference(actor_optimizer.target, jnp.asarray([state]))
-            print(action_probabilities)
-            action_probabilities  = np.array(action_probabilities[0])
-            print(action_probabilities)
-            action                = np.random.choice(n_actions, p=action_probabilities)
-
-            next_state, reward, done, _ = env.step(int(action))
-            print(action_probabilities, action)
-
-            states.append(state)
-            actions.append(action)
-            rewards.append(reward)
-            dones.append(int(done))
-
-            state = next_state
-
-            if done:
-                print("episode {}, reward : {}".format(episode, sum(rewards)))
-
-                episode_length = len(rewards)
-
-                discounted_rewards = np.zeros_like(rewards)
-                for t in range(0, episode_length):
-                    G_t = 0
-                    for idx, j in enumerate(range(t, episode_length)):
-                        G_t = G_t + (gamma**idx)*rewards[j]*(1-dones[j])
-                    discounted_rewards[t] = G_t
-                discounted_rewards = discounted_rewards - np.mean(discounted_rewards)
-                discounted_rewards = discounted_rewards / (np.std(discounted_rewards)+1e-10)
-
-                with lock:
+    try:
+        for episode in range(num_episodes):
+            state = env.reset()
+            states, actions, rewards, dones = [], [], [], []
+            while True:
+                actor_optimizer, critic_optimizer = parameter_server.get.remote(
+                        ['actor_optimizer', 'critic_optimizer'])
+                action_probabilities  = actor_inference(actor_optimizer.target, jnp.asarray([state]))
+                action_probabilities  = np.array(action_probabilities[0])
+                action                = np.random.choice(n_actions, p=action_probabilities)
+                next_state, reward, done, _ = env.step(int(action))
+                states.append(state)
+                actions.append(action)
+                rewards.append(reward)
+                dones.append(int(done))
+                state = next_state
+                if done:
+                    print("episode {}, reward : {}".format(episode, sum(rewards)))
+                    episode_length = len(rewards)
+                    discounted_rewards = np.zeros_like(rewards)
+                    for t in range(0, episode_length):
+                        G_t = 0
+                        for idx, j in enumerate(range(t, episode_length)):
+                            G_t = G_t + (gamma**idx)*rewards[j]*(1-dones[j])
+                        discounted_rewards[t] = G_t
+                    discounted_rewards = discounted_rewards - np.mean(discounted_rewards)
+                    discounted_rewards = discounted_rewards / (np.std(discounted_rewards)+1e-10)
                     actor_optimizer, _  = backpropagate_actor(
                         actor_optimizer,
                         critic_optimizer.target,
@@ -194,42 +150,29 @@ def training_worker(env, process_index, queue_in, queue_out):
                             jnp.asarray(discounted_rewards),
                         )
                     )
+                    parameter_server.update.remote(
+                            ['actor_optimizer', 'critic_optimizer'], 
+                            [actor_optimizer, critic_optimizer])
                     episode_count = episode_count + 1
+                    break
+    finally:
+        env.close()
 
-                break
-    print("process ажиллаж дууслаа.")
-    pass
 
+@ray.remote
+class ParameterServer(object):
+    def __init__(self, keys, values):
+        self.parameters = dict(zip(keys, values))
+    def get(self, keys):
+        return (self.parameters[key] for key in keys)
+    def update(self, keys, values):
+        for key, value in zip(key, values):
+            self.parameters[key] = value
 
-envs = [gym.make(env_name) for i in range(n_workers)]
+parameter_server = ParameterServer.remote(
+        ['actor_optimizer', 'critic_optimizer'], 
+        [actor_optimizer, critic_optimizer])
 
-try:
-    workers = [
-            multiprocessing.Process(
-                target = training_worker,
-                args   = (envs[i], i, global_queue_in, global_queue_out)
-            ) for i in range(n_workers)
-        ]
-
-    for worker in workers:
-        worker.start()
-
-    #serialized_optimizers = pickle.dumps((actor_optimizer, critic_optimizer), pickle.HIGHEST_PROTOCOL)
-    #serialized = msgpack.packb((actor_model, critic_model), use_bin_type=True)
-    #print("SERIALIZED!!!")
-    #print(serialized)
-    #size_of_actor_opt  = sys.getsizeof(actor_optimizer)
-    #size_of_critic_opt = sys.getsizeof(critic_optimizer)
-    #print("size of opts", size_of_actor_opt, size_of_critic_opt)
-    #time.sleep(1)
-    #pickled_data = cloudpickle.dumps((actor_optimizer, critic_optimizer))
-    pickled_actor_params   = cloudpickle.dumps(actor_optimizer.target.params)
-    pickled_crictic_params = cloudpickle.dumps(critic_optimizer.target.params)
-    global_queue_in.put((pickled_actor_params, pickled_crictic_params))
-    print("pickle sent from main process to child processes...")
-
-    for worker in workers:
-        worker.join()
-finally:
-    for env in envs: env.close()
+for _ in range(n_workers):
+    ray.get(training_worker.remote(parameter_server))
 
