@@ -1,2 +1,2 @@
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
-python a3c_distributed_learning.py
+python a3c_distributed_online.py
