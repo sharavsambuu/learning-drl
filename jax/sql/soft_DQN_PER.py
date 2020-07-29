@@ -3,6 +3,7 @@
 #   - https://bair.berkeley.edu/blog/2017/10/06/soft-q-learning/
 #   - https://arxiv.org/pdf/1702.08165.pdf
 #   - https://zhuanlan.zhihu.com/p/150527098
+#   - https://en.wikipedia.org/wiki/LogSumExp
 
 import os
 import random
@@ -153,8 +154,8 @@ def get_values(q_value_batch):
     return values
 
 @jax.vmap
-def q_learning_loss(q_value_vec, target_values, action, reward, done):
-    td_target = reward + gamma*target_values*(1.-done)
+def q_learning_loss(q_value_vec, target_value, action, reward, done):
+    td_target = reward + gamma*target_value*(1.-done)
     td_error  = jax.lax.stop_gradient(td_target) - q_value_vec[action]
     return jnp.square(td_error)
 
