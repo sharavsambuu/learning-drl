@@ -108,7 +108,7 @@ class GaussianActor(flax.nn.Module):
             exp_std   = jnp.exp(log_std)
             sample    = mean + jax.random.normal(key, mean.shape)*exp_std
             log_probs = jnp.sum(
-                -0.5 * (((sample - mean) / (jnp.exp(log_std) + 1e-6)) ** 2 + 2 * log_std + jnp.log(2 * np.pi))
+                -0.5 * (((sample - mean) / (jnp.exp(log_std) + 1e-6)) ** 2 + 2 * log_std + jnp.log(2 * np.pi)),
                 axis=1
             )
             actions   = flax.nn.tanh(log_probs)
@@ -118,7 +118,7 @@ class GaussianActor(flax.nn.Module):
 
 class DoubleCritic(flax.nn.Module):
     def apply(self, state, action):
-        state_action = jnp.concatenate([state, action], axis=1)
+        state_action = jnp.concatenate([state, action])
 
         q1 = flax.nn.Dense(state_action, 64)
         q1 = flax.nn.relu(q1)
@@ -135,11 +135,29 @@ class DoubleCritic(flax.nn.Module):
         return q1, q2
 
 
-env         = gym.make('CartPole-v1')
-state       = env.reset()
-n_actions   = env.action_space.n
-per_memory  = PERMemory(memory_length)
-global_step = 0
+env          = gym.make('CartPole-v1')
+state        = env.reset()
+
+n_actions    = env.action_space.n
+state_shape  = state.shape
+action_shape = (n_actions,)
+
+per_memory   = PERMemory(memory_length)
+global_step  = 0
+
+
+actor_module        = GaussianActor.partial(n_actions=n_actions)
+_, actor_params     = actor_module.init_by_shape(jax.random.PRNGKey(0), [state_shape])
+actor_model         = flax.nn.Model(actor_module, actor_params)
+
+critic_module       = DoubleCritic.partial()
+_, critic_params    = critic_module.init_by_shape(jax.random.PRNGKey(0), [state_shape, action_shape])
+critic_model        = flax.nn.Model(critic_module, critic_params)
+target_critic_model = flax.nn.Model(critic_module, critic_params)
+
+actor_optimizer  = flax.optim.Adam(learning_rate).create(actor_model)
+critic_optimizer = flax.optim.Adam(learning_rate).create(critic_model)
+
 
 try:
     for episode in range(num_episodes):
