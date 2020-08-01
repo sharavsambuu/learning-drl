@@ -1,4 +1,6 @@
 # Soft Actor-Critic
+# References:
+#  - https://github.com/henry-prior/jax-rl
 
 import os
 import random
@@ -86,6 +88,39 @@ class PERMemory:
     def update(self, idx, error):
         p = self._get_priority(error)
         self.tree.update(idx, p)
+
+
+
+@jax.jit
+def gaussian_likelihood(sample, mu, log_sig):
+    pre_sum = -0.5 * (((sample - mu) / (jnp.exp(log_sig) + 1e-6)) ** 2 + 2 * log_sig + jnp.log(2 * onp.pi))
+    return jnp.sum(pre_sum, axis=1) 
+
+class GaussianActor(flax.nn.Module):
+    def apply(self, x, n_actions, key=None, sample=False, clip_min=-20, clip_max=2):
+        dense_layer_1      = flax.nn.Dense(x, 64)
+        activation_layer_1 = flax.nn.relu(dense_layer_1)
+        dense_layer_2      = flax.nn.Dense(activation_layer_1, 32)
+        activation_layer_2 = flax.nn.relu(dense_layer_2)
+        dense_layer_3      = flax.nn.Dense(activation_layer_2, n_actions*2)
+
+        mean, log_std = jnp.split(dense_layer_3, 2, axis=-1)
+        log_std       = jnp.clip(log_std, clip_min, clip_max)
+
+        if not sample:
+            return mean, log_std
+        else:
+            exp_std   = jnp.exp(log_std)
+            sample    = mean + jax.random.normal(key, mean.shape)*exp_std
+            log_probs = jnp.sum(
+                -0.5 * (((sample - mean) / (jnp.exp(log_std) + 1e-6)) ** 2 + 2 * log_std + jnp.log(2 * np.pi))
+                axis=1
+            )
+            actions   = flax.nn.tanh(log_probs)
+            log_probs = log_probs - jnp.log(1 - jnp.square(actions) + 1e-6)
+            entropies = -jnp.sum(log_probs, axis=1)
+            return actions, entropies, flax.nn.tanh(mean)
+
 
 
 env         = gym.make('CartPole-v1')
