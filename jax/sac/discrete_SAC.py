@@ -91,30 +91,16 @@ class PERMemory:
 
 
 
-class GaussianActor(flax.nn.Module):
-    def apply(self, x, key, n_actions, sample=False, clip_min=-20, clip_max=2):
+class Actor(flax.nn.Module):
+    def apply(self, x, n_actions):
         dense_layer_1      = flax.nn.Dense(x, 64)
         activation_layer_1 = flax.nn.relu(dense_layer_1)
         dense_layer_2      = flax.nn.Dense(activation_layer_1, 32)
         activation_layer_2 = flax.nn.relu(dense_layer_2)
-        dense_layer_3      = flax.nn.Dense(activation_layer_2, n_actions*2)
+        dense_layer_3      = flax.nn.Dense(activation_layer_2, n_actions)
+        action_logits      = flax.nn.softmax(dense_layer_3)
+        return action_logits
 
-        mean, log_std = jnp.split(dense_layer_3, 2, axis=-1)
-        log_std       = jnp.clip(log_std, clip_min, clip_max)
-
-        if not sample:
-            return mean, log_std
-        else:
-            exp_std   = jnp.exp(log_std)
-            sample    = mean + jax.random.normal(key, mean.shape)*exp_std
-            log_probs = jnp.sum(
-                -0.5 * (((sample - mean) / (jnp.exp(log_std) + 1e-6)) ** 2 + 2 * log_std + jnp.log(2 * np.pi)),
-                axis=1
-            )
-            actions   = flax.nn.tanh(log_probs)
-            log_probs = log_probs - jnp.log(1 - actions**2 + 1e-6)
-            entropies = -jnp.sum(log_probs)
-            return actions, entropies, flax.nn.tanh(mean)
 
 class DoubleCritic(flax.nn.Module):
     def apply(self, state, action):
@@ -136,9 +122,9 @@ class DoubleCritic(flax.nn.Module):
 
 
 @jax.jit
-def inference_actor(model, x, key):
-    actions, entropies, means = model([x], key=key, sample=True)
-    return actions, entropies, means
+def inference_actor(model, x):
+    action_logits = model(jnp.asarray([x]))[0]
+    return action_logits
 
 
 env          = gym.make('CartPole-v1')
@@ -155,8 +141,8 @@ global_step  = 0
 rng      = jax.random.PRNGKey(0)
 rng, key = jax.random.split(rng)
 
-actor_module        = GaussianActor.partial(n_actions=n_actions)
-_, actor_params     = actor_module.init_by_shape(jax.random.PRNGKey(0), [state_shape], key=key)
+actor_module        = Actor.partial(n_actions=n_actions)
+_, actor_params     = actor_module.init_by_shape(jax.random.PRNGKey(0), [state_shape])
 actor_model         = flax.nn.Model(actor_module, actor_params)
 
 critic_module       = DoubleCritic.partial()
@@ -179,15 +165,10 @@ try:
             if np.random.rand() <= epsilon:
                 action = env.action_space.sample()
             else:
-                rng, key      = jax.random.split(rng)
-                actions, _, _ = inference_actor(actor_optimizer.target, state, key=key)
-                print(actions)
-                #means         = np.array(actions[0])
-                #means         = means/np.sum(means)
-                #print(means)
-                #action         = np.random.choice(n_actions, p=means)
-                #print(action)
-                action = env.action_space.sample()
+                action_logits = inference_actor(actor_optimizer.target, state)
+                probabilies   = np.array(action_logits)
+                probabilies  /= np.sum(probabilies)
+                action        = np.random.choice(n_actions, p=probabilies)
 
             if epsilon>epsilon_min:
                 epsilon = epsilon_min+(epsilon_max-epsilon_min)*math.exp(-epsilon_decay*global_step)
