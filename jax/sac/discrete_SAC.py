@@ -1,4 +1,4 @@
-# Soft Actor-Critic
+# Soft Actor-Critic, discrete action space
 # References:
 #  - https://github.com/henry-prior/jax-rl
 
@@ -92,7 +92,7 @@ class PERMemory:
 
 
 class GaussianActor(flax.nn.Module):
-    def apply(self, x, n_actions, key=None, sample=False, clip_min=-20, clip_max=2):
+    def apply(self, x, key, n_actions, sample=False, clip_min=-20, clip_max=2):
         dense_layer_1      = flax.nn.Dense(x, 64)
         activation_layer_1 = flax.nn.relu(dense_layer_1)
         dense_layer_2      = flax.nn.Dense(activation_layer_1, 32)
@@ -113,7 +113,7 @@ class GaussianActor(flax.nn.Module):
             )
             actions   = flax.nn.tanh(log_probs)
             log_probs = log_probs - jnp.log(1 - actions**2 + 1e-6)
-            entropies = -jnp.sum(log_probs, axis=1)
+            entropies = -jnp.sum(log_probs)
             return actions, entropies, flax.nn.tanh(mean)
 
 class DoubleCritic(flax.nn.Module):
@@ -135,6 +135,12 @@ class DoubleCritic(flax.nn.Module):
         return q1, q2
 
 
+@jax.jit
+def inference_actor(model, x, key):
+    actions, entropies, means = model([x], key=key, sample=True)
+    return actions, entropies, means
+
+
 env          = gym.make('CartPole-v1')
 state        = env.reset()
 
@@ -146,8 +152,11 @@ per_memory   = PERMemory(memory_length)
 global_step  = 0
 
 
+rng      = jax.random.PRNGKey(0)
+rng, key = jax.random.split(rng)
+
 actor_module        = GaussianActor.partial(n_actions=n_actions)
-_, actor_params     = actor_module.init_by_shape(jax.random.PRNGKey(0), [state_shape])
+_, actor_params     = actor_module.init_by_shape(jax.random.PRNGKey(0), [state_shape], key=key)
 actor_model         = flax.nn.Model(actor_module, actor_params)
 
 critic_module       = DoubleCritic.partial()
@@ -155,8 +164,9 @@ _, critic_params    = critic_module.init_by_shape(jax.random.PRNGKey(0), [state_
 critic_model        = flax.nn.Model(critic_module, critic_params)
 target_critic_model = flax.nn.Model(critic_module, critic_params)
 
-actor_optimizer  = flax.optim.Adam(learning_rate).create(actor_model)
-critic_optimizer = flax.optim.Adam(learning_rate).create(critic_model)
+actor_optimizer     = flax.optim.Adam(learning_rate).create(actor_model)
+critic_optimizer    = flax.optim.Adam(learning_rate).create(critic_model)
+
 
 
 try:
@@ -169,6 +179,14 @@ try:
             if np.random.rand() <= epsilon:
                 action = env.action_space.sample()
             else:
+                rng, key      = jax.random.split(rng)
+                actions, _, _ = inference_actor(actor_optimizer.target, state, key=key)
+                print(actions)
+                #means         = np.array(actions[0])
+                #means         = means/np.sum(means)
+                #print(means)
+                #action         = np.random.choice(n_actions, p=means)
+                #print(action)
                 action = env.action_space.sample()
 
             if epsilon>epsilon_min:
