@@ -91,11 +91,6 @@ class PERMemory:
 
 
 
-@jax.jit
-def gaussian_likelihood(sample, mu, log_sig):
-    pre_sum = -0.5 * (((sample - mu) / (jnp.exp(log_sig) + 1e-6)) ** 2 + 2 * log_sig + jnp.log(2 * onp.pi))
-    return jnp.sum(pre_sum, axis=1) 
-
 class GaussianActor(flax.nn.Module):
     def apply(self, x, n_actions, key=None, sample=False, clip_min=-20, clip_max=2):
         dense_layer_1      = flax.nn.Dense(x, 64)
@@ -117,10 +112,27 @@ class GaussianActor(flax.nn.Module):
                 axis=1
             )
             actions   = flax.nn.tanh(log_probs)
-            log_probs = log_probs - jnp.log(1 - jnp.square(actions) + 1e-6)
+            log_probs = log_probs - jnp.log(1 - actions**2 + 1e-6)
             entropies = -jnp.sum(log_probs, axis=1)
             return actions, entropies, flax.nn.tanh(mean)
 
+class DoubleCritic(flax.nn.Module):
+    def apply(self, state, action):
+        state_action = jnp.concatenate([state, action], axis=1)
+
+        q1 = flax.nn.Dense(state_action, 64)
+        q1 = flax.nn.relu(q1)
+        q1 = flax.nn.Dense(q1, 32)
+        q1 = flax.nn.relu(q1)
+        q1 = flax.nn.Dense(q1, 1)
+
+        q2 = flax.nn.Dense(state_action, 64)
+        q2 = flax.nn.relu(q2)
+        q2 = flax.nn.Dense(q2, 32)
+        q2 = flax.nn.relu(q2)
+        q2 = flax.nn.Dense(q2, 1)
+
+        return q1, q2
 
 
 env         = gym.make('CartPole-v1')
