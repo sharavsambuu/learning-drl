@@ -149,6 +149,9 @@ def td_error(model, target_model, batch):
 
 @jax.jit
 def get_values(q_value_batch):
+    # https://en.wikipedia.org/wiki/Normal_distribution#Maximum_entropy
+    # https://bair.berkeley.edu/blog/2017/10/06/soft-q-learning/ Soft Bellman equation
+    # https://arxiv.org/pdf/1805.00909.pdf
     alpha  = 4.
     values = alpha*jnp.log(jnp.sum(jnp.exp(q_value_batch/alpha), axis=1, keepdims=True))
     return values
