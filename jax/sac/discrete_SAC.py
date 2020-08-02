@@ -1,6 +1,9 @@
 # Soft Actor-Critic, discrete action space
 # References:
+#  - SOFT ACTOR-CRITIC FOR DISCRETE ACTION SETTINGS
+#    https://arxiv.org/pdf/1910.07207.pdf
 #  - https://github.com/henry-prior/jax-rl
+#  - https://github.com/ku2482/sac-discrete.pytorch
 
 import os
 import random
@@ -19,6 +22,7 @@ learning_rate = 0.001
 gamma         = 0.99
 batch_size    = 64
 sync_steps    = 100
+learn_steps   = 10
 memory_length = 4000
 
 epsilon       = 1.0
@@ -90,7 +94,6 @@ class PERMemory:
         self.tree.update(idx, p)
 
 
-
 class Actor(flax.nn.Module):
     def apply(self, x, n_actions):
         dense_layer_1      = flax.nn.Dense(x, 64)
@@ -100,7 +103,6 @@ class Actor(flax.nn.Module):
         dense_layer_3      = flax.nn.Dense(activation_layer_2, n_actions)
         action_logits      = flax.nn.softmax(dense_layer_3)
         return action_logits
-
 
 class DoubleCritic(flax.nn.Module):
     def apply(self, state, action):
@@ -125,6 +127,11 @@ class DoubleCritic(flax.nn.Module):
 def inference_actor(model, x):
     action_logits = model(jnp.asarray([x]))[0]
     return action_logits
+
+@jax.jit
+def act_greedy(model, x):
+    action_logits = model(jnp.asarray([x]))[0]
+    return jnp.argmax(action_logits)
 
 
 env          = gym.make('CartPole-v1')
@@ -154,7 +161,6 @@ actor_optimizer     = flax.optim.Adam(learning_rate).create(actor_model)
 critic_optimizer    = flax.optim.Adam(learning_rate).create(critic_model)
 
 
-
 try:
     for episode in range(num_episodes):
         state           = env.reset()
@@ -165,15 +171,18 @@ try:
             if np.random.rand() <= epsilon:
                 action = env.action_space.sample()
             else:
-                action_logits = inference_actor(actor_optimizer.target, state)
-                probabilies   = np.array(action_logits)
-                probabilies  /= np.sum(probabilies)
-                action        = np.random.choice(n_actions, p=probabilies)
+                action_logits  = inference_actor(actor_optimizer.target, state)
+                probabilities  = np.array(action_logits)
+                probabilities /= np.sum(probabilities)
+                action         = np.random.choice(n_actions, p=probabilities)
 
             if epsilon>epsilon_min:
                 epsilon = epsilon_min+(epsilon_max-epsilon_min)*math.exp(-epsilon_decay*global_step)
 
             next_state, reward, done, _ = env.step(int(action))
+
+            sampling_weight = 1
+            per_memory.add(sampling_weight, (state, action, reward, next_state, int(done)))
 
             episode_rewards.append(reward)
 
