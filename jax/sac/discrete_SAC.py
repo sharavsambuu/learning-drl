@@ -99,7 +99,8 @@ def backpropagate_actor(optimizer, critic_model, props):
         action_probabilities      = model(props[0])
         probabilities             = gather(action_probabilities, props[2])
         log_probabilities         = -jnp.log(probabilities)
-        entropies                 = -jnp.log(probabilities)
+        alpha                     = 4. # Entropy temperature
+        entropies                 = -jnp.log(probabilities)*alpha
         advantages_with_entropies = jnp.add(advantages, entropies)
         return jnp.mean(jnp.multiply(log_probabilities, advantages_with_entropies))
     loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
