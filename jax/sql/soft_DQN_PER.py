@@ -152,12 +152,18 @@ def get_values(q_value_batch):
     # https://en.wikipedia.org/wiki/Normal_distribution#Maximum_entropy
     # https://bair.berkeley.edu/blog/2017/10/06/soft-q-learning/ Soft Bellman equation
     # https://arxiv.org/pdf/1805.00909.pdf
+    # Тайлбар :
+    # alpha - энтропиний темпертур
     alpha  = 4.
     values = alpha*jnp.log(jnp.sum(jnp.exp(q_value_batch/alpha), axis=1, keepdims=True))
     return values
 
 @jax.vmap
 def q_learning_loss(q_value_vec, target_value, action, reward, done):
+    # Soft Bellman
+    # Q(s,a)          = r + gamma*sofmax(Q(s',a'))
+    # softmax(Q(s,a)) = log∫exp(Q(s,a))da
+    # Q(s,a)          = r + log(sum(exp(Q(s',a')))
     td_target = reward + gamma*target_value*(1.-done)
     td_error  = jax.lax.stop_gradient(td_target) - q_value_vec[action]
     return jnp.square(td_error)
