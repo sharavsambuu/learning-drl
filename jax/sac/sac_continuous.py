@@ -1,6 +1,7 @@
 import os
 import random
 import math
+import time
 import gym
 from collections import deque
 
@@ -8,6 +9,8 @@ import flax
 import jax
 from jax import numpy as jnp
 import numpy as np
+
+import pybullet_envs
 
 
 debug_render  = True
@@ -89,8 +92,22 @@ class PERMemory:
         self.tree.update(idx, p)
 
 
-env   = gym.make('MountainCarContinuous-v0')
+env   = gym.make('HumanoidFlagrunHarderBulletEnv-v0')
+env.render(mode="human")
 state = env.reset()
+
+# (44,)
+print("observation space :")
+print(env.observation_space.shape)
+# (17,)
+print("Action space :")
+print(env.action_space.shape)
+# 1
+print("Action space high :")
+print(env.action_space.high)
+# -1
+print("Action space low :")
+print(env.action_space.low)
 
 
 per_memory = PERMemory(memory_length)
@@ -111,7 +128,7 @@ try:
             if epsilon>epsilon_min:
                 epsilon = epsilon_min+(epsilon_max-epsilon_min)*math.exp(-epsilon_decay*global_steps)
 
-            print("action", action)
+            #print("action", action)
             new_state, reward, done, _ = env.step(action)
 
             episode_rewards.append(reward)
@@ -119,10 +136,11 @@ try:
 
             
             if debug_render:
-                env.render()
+                time.sleep(1. / 60)
+                env.render(mode="human")
 
             if done:
-                print("{} - нийт reward : {}".format(episode, sum(episode_rewards)))
+                #print("{} - нийт reward : {}".format(episode, sum(episode_rewards)))
                 break
 finally:
     env.close()
