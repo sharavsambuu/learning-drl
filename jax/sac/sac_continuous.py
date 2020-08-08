@@ -92,8 +92,24 @@ class PERMemory:
         self.tree.update(idx, p)
 
 
+class DeepQNetwork(flax.nn.Module):
+    def apply(self, x, n_actions):
+        dense_layer_1      = flax.nn.Dense(x, 64)
+        activation_layer_1 = flax.nn.relu(dense_layer_1)
+        dense_layer_2      = flax.nn.Dense(activation_layer_1, 32)
+        activation_layer_2 = flax.nn.relu(dense_layer_2)
+        output_layer       = flax.nn.Dense(activation_layer_2, n_actions)
+        return output_layer
+
+class TwinQNetwork(flax.nn.Module):
+    def apply(self, x):
+        q1 = DeepQNetwork(x, 1)
+        q2 = DeepQNetwork(x, 1)
+        return q1, q2
+
+
 env   = gym.make('HumanoidFlagrunHarderBulletEnv-v0')
-env.render(mode="human")
+#env.render(mode="human")
 state = env.reset()
 
 # (44,)
@@ -108,6 +124,46 @@ print(env.action_space.high)
 # -1
 print("Action space low :")
 print(env.action_space.low)
+
+state_action_shape = (env.observation_space.shape[0]+env.action_space.shape[0],)
+print("StateAction shape")
+print(state_action_shape)
+
+
+
+critic_module = TwinQNetwork.partial()
+_, params     = critic_module.init_by_shape(
+    jax.random.PRNGKey(0), 
+    [(env.observation_space.shape[0]+env.action_space.shape[0],)])
+
+
+critic        = flax.nn.Model(critic_module, params)
+target_critic = flax.nn.Model(critic_module, params)
+
+
+# series of tests for neural network module development 
+test_state  = env.reset()
+test_action = env.action_space.sample()
+print("test state shape :")
+print(test_state.shape)
+print("test action shape :")
+print(test_action.shape)
+
+test_input  = jnp.concatenate((test_state, test_action))
+print("test input shape :")
+print(test_input.shape)
+
+print("critic inference test :")
+q1, q2 = critic(test_input)
+print(q1.shape)
+print(q2.shape)
+print(q1)
+
+
+print("DONE.")
+exit(0)
+
+
 
 
 per_memory = PERMemory(memory_length)
@@ -134,7 +190,6 @@ try:
             episode_rewards.append(reward)
             state = new_state
 
-            
             if debug_render:
                 time.sleep(1. / 60)
                 env.render(mode="human")

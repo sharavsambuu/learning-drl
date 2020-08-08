@@ -1,5 +1,5 @@
 # About
-  This repos is just my learning journey and may contains a buggy naive implementations.
+  This repo is just my learning journey and may contain a buggy naive implementations.
 
 # Dependencies
   sudo apt install libsdl2-dev swig python3-tk
