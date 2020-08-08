@@ -141,7 +141,7 @@ critic        = flax.nn.Model(critic_module, params)
 target_critic = flax.nn.Model(critic_module, params)
 
 
-# series of tests for neural network module development 
+# неорон сүлжээ үүсч байгаа эсэхийг шалгах туршилтууд
 test_state  = env.reset()
 test_action = env.action_space.sample()
 print("test state shape :")
