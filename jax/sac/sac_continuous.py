@@ -92,20 +92,50 @@ class PERMemory:
         self.tree.update(idx, p)
 
 
-class DeepQNetwork(flax.nn.Module):
-    def apply(self, x, n_actions):
+class CommonNetwork(flax.nn.Module):
+    def apply(self, x, n_outputs):
         dense_layer_1      = flax.nn.Dense(x, 64)
         activation_layer_1 = flax.nn.relu(dense_layer_1)
         dense_layer_2      = flax.nn.Dense(activation_layer_1, 32)
         activation_layer_2 = flax.nn.relu(dense_layer_2)
-        output_layer       = flax.nn.Dense(activation_layer_2, n_actions)
+        output_layer       = flax.nn.Dense(activation_layer_2, n_outputs)
         return output_layer
 
 class TwinQNetwork(flax.nn.Module):
     def apply(self, x):
-        q1 = DeepQNetwork(x, 1)
-        q2 = DeepQNetwork(x, 1)
+        q1 = CommonNetwork(x, 1)
+        q2 = CommonNetwork(x, 1)
         return q1, q2
+
+# https://github.com/google/jax/issues/2173
+@jax.jit
+def gaussian_normal(key, mu, sigma):
+    normals = mu + jax.random.normal(key, mu.shape)*sigma
+    return normals
+
+# https://github.com/henry-prior/jax-rl/blob/master/utils.py
+@jax.jit
+def gaussian_likelihood(sample, mu, log_sig):
+    pre_sum = -0.5 * (((sample - mu) / (jnp.exp(log_sig) + 1e-6)) ** 2 + 2 * log_sig + jnp.log(2 * jnp.pi))
+    return jnp.sum(pre_sum, axis=-1)    
+
+# https://github.com/henry-prior/jax-rl/blob/master/models.py
+class GaussianPolicy(flax.nn.Module):
+    def apply(self, x, n_actions, max_action, key=None, sample=False, clip_min=-1., clip_max=1.):
+        policy_layer = CommonNetwork(x, n_actions*2)
+        mu, log_sig  = jnp.split(policy_layer, 2, axis=-1)
+        log_sig      = flax.nn.softplus(log_sig)
+        log_sig      = jnp.clip(log_sig, clip_min, clip_max)
+        if sample:
+            sig    = jnp.exp(log_sig)
+            pi     = gaussian_normal(key, mu, sig)
+            log_pi = gaussian_likelihood(pi, mu, log_sig)
+            pi     = flax.nn.tanh(pi)
+            log_pi = log_pi - jnp.sum(jnp.log(flax.nn.relu(1-pi**2)+1e-6), axis=-1)
+            return max_action*pi, log_pi
+        else:
+            return max_action*flax.nn.tanh(mu), log_sig
+
 
 
 env   = gym.make('HumanoidFlagrunHarderBulletEnv-v0')
@@ -136,9 +166,14 @@ _, params     = critic_module.init_by_shape(
     jax.random.PRNGKey(0), 
     [(env.observation_space.shape[0]+env.action_space.shape[0],)])
 
-
 critic        = flax.nn.Model(critic_module, params)
 target_critic = flax.nn.Model(critic_module, params)
+
+actor_module    = GaussianPolicy.partial(n_actions=env.action_space.shape[0], max_action=1., key=jax.random.PRNGKey(0))
+_, actor_params = actor_module.init_by_shape(
+    jax.random.PRNGKey(0),
+    [env.observation_space.shape])
+actor           = flax.nn.Model(actor_module, actor_params)
 
 
 # неорон сүлжээ үүсч байгаа эсэхийг шалгах туршилтууд
@@ -153,11 +188,25 @@ test_input  = jnp.concatenate((test_state, test_action))
 print("test input shape :")
 print(test_input.shape)
 
-print("critic inference test :")
+print("####### critic inference test :")
 q1, q2 = critic(test_input)
 print(q1.shape)
 print(q2.shape)
 print(q1)
+
+print("####### actor inference test :")
+actions, log_sig = actor(test_state)
+print("actions :")
+print(actions)
+print("log_sig :")
+print(log_sig)
+
+print("####### actor sampling test :")
+actions, log_pi = actor(test_state, key=jax.random.PRNGKey(0), sample=True)
+print("sampling actions :")
+print(actions)
+print("log_pi :")
+print(log_pi)
 
 
 print("DONE.")
