@@ -318,6 +318,37 @@ def backpropagate_critic(
     return q1_optimizer, q2_optimizer, td_errors
 
 
+@jax.jit
+def backpropagate_actor(optimizer, critic, batch, alpha, key):
+    # batch[0] - states
+    # batch[1] - weights
+    def loss_fn(actor_model):
+        sampled_actions, entropies, _ = actor_inference(
+            optimizer.target, 
+            batch[0], 
+            key
+            )
+        q1, q2 = critic_inference(
+            critic, 
+            batch[0],
+            sampled_actions
+            )
+        #q1          = jnp.reshape(q1, (1, q1.shape[1]))
+        #q2          = jnp.reshape(q2, (1, q2.shape[1]))
+        q_values   = jnp.min([q1, q2], axis=0)
+        actor_loss = jnp.mean(
+            jnp.multiply(
+                (-q_values - entropies*alpha),
+                batch[1]
+            )
+        )
+        return actor_loss
+
+    loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
+    optimizer       = optimizer.apply_gradient(gradients)
+
+    return optimizer, loss
+
 
 
 per_memory   = PERMemory(memory_length)
@@ -380,7 +411,7 @@ try:
                 dones.append      (batch[i][1][4])
                 weights.append    (batch[i][0])
             
-            # critic loss тооцооллох
+            # critic неорон сүлжээг сургах
             rng, new_key = jax.random.split(rng)
             q1_optimizer, q2_optimizer, td_errors = backpropagate_critic(
                 q1_optimizer, q2_optimizer, actor_optimizer,
@@ -401,35 +432,22 @@ try:
             print(td_errors)
 
 
-            # policy loss тооцооллох
-            rng, new_key                  = jax.random.split(rng)
-            sampled_actions, entropies, _ = actor_inference(
-                actor, 
-                jnp.asarray(states), 
+            # actor неорон сүлжээг сургах
+            rng, new_key = jax.random.split(rng)
+            actor_optimizer, actor_loss = backpropagate_actor(
+                actor_optimizer,
+                q1_optimizer.target,
+                (
+                    jnp.asarray(states),
+                    jnp.asarray(weights)
+                ), 
+                alpha, 
                 new_key
                 )
-            q1, q2 = critic_inference(
-                critic, 
-                jnp.asarray([states         ]),
-                jnp.asarray([sampled_actions])
-                )
-            q1 = jnp.reshape(q1, (1, q1.shape[1]))
-            q2 = jnp.reshape(q2, (1, q2.shape[1]))
-            print("q1 values")
-            print(q1)
-            print("q2 values")
-            print(q2)
-            q_values = jnp.min([q1, q2], axis=0)
-            print("q values for actor")
-            print(q_values)
-            policy_loss = jnp.mean(
-                jnp.multiply(
-                    (-q_values - entropies*alpha),
-                    jnp.asarray(weights)
-                )
-            )
-            print("policy loss:")
-            print(policy_loss)
+            print("backpropagated actor")
+            print("actor loss :")
+            print(actor_loss)
+            
 
 
             state = next_state
