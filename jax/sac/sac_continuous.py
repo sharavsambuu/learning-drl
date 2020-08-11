@@ -208,16 +208,13 @@ print(actions)
 print("log_pi :")
 print(log_pi)
 
-
 #print("DONE.")
 #exit(0)
 
-
 @jax.jit
 def actor_inference(model, state, key):
-    actions, _ = model(test_state, key=key, sample=True)
-    return actions
-
+    actions, entropies = model(test_state, key=key, sample=True)
+    return actions, entropies
 
 @jax.jit
 def critic_inference(model, state, action):
@@ -249,7 +246,7 @@ try:
                 action = env.action_space.sample()
             else:
                 rng, new_key = jax.random.split(rng)
-                action = actor_inference(actor, state, new_key)
+                actions, _ = actor_inference(actor, state, new_key)
 
             if epsilon>epsilon_min:
                 epsilon = epsilon_min+(epsilon_max-epsilon_min)*math.exp(-epsilon_decay*global_steps)
@@ -277,20 +274,24 @@ try:
             
             per_memory.add(td_error, (state, action, reward, next_state, int(done)))
 
-            # сургах 
+            # сургах batch бэлтгэх
             batch = per_memory.sample(batch_size)
-            states, actions, rewards, next_states, dones = [], [], [], [], []
+            states, actions, rewards, next_states, dones, weights = [], [], [], [], [], []
             for i in range(batch_size):
                 states.append     (batch[i][1][0])
                 actions.append    (batch[i][1][1])
                 rewards.append    (batch[i][1][2])
                 next_states.append(batch[i][1][3])
                 dones.append      (batch[i][1][4])
+                weights.append    (batch[i][0])
+            # critic loss тооцооллох
             q1, q2 = critic_inference(
                 critic, 
                 jnp.asarray([states ]),
                 jnp.asarray([actions])
                 )
+            q1 = jnp.reshape(q1, (1, q1.shape[1]))
+            q2 = jnp.reshape(q2, (1, q2.shape[1]))
             rng, new_key = jax.random.split(rng)
             target_q     = target_critic_inference(
                 actor, 
@@ -300,10 +301,32 @@ try:
                 jnp.asarray([dones      ]), 
                 1.0, 
                 new_key)
-            q1        = jnp.reshape(q1, (1, q1.shape[1]))
             td_errors = jnp.abs(q1[0]-target_q[0])
-            print("td errors shape", td_errors.shape)
-            print(td_errors)
+            q1_loss   = jnp.mean(
+                jnp.multiply(
+                    jnp.square(q1[0]-target_q[0]),
+                    jnp.asarray(weights)
+                )
+            )
+            q2_loss   = jnp.mean(
+                jnp.multiply(
+                    jnp.square(q2[0]-target_q[0]),
+                    jnp.asarray(weights)
+                )
+            )
+            print("q1 loss:", q1_loss)
+            print("q2 loss:", q2_loss)
+            # policy loss тооцооллох
+            rng, new_key       = jax.random.split(rng)
+            actions, entropies = actor_inference(
+                actor, 
+                jnp.asarray(state), 
+                new_key
+                )
+            print("action shape  :", actions.shape)
+            print("entropy shape :", entropies.shape)
+            print("entropies :")
+            print(entropies)
 
 
             state = next_state
