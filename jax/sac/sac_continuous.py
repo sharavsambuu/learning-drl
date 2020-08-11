@@ -179,6 +179,11 @@ _, actor_params = actor_module.init_by_shape(
 actor           = flax.nn.Model(actor_module, actor_params)
 
 
+critic_optimizer = flax.optim.Adam(learning_rate).create(critic)
+target_optimizer = flax.optim.Adam(learning_rate).create(target_critic)
+actor_optimizer  = flax.optim.Adam(learning_rate).create(actor)
+
+
 # неорон сүлжээ үүсч байгаа эсэхийг шалгах туршилтууд
 test_state  = env.reset()
 test_action = env.action_space.sample()
