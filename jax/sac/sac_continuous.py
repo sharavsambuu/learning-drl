@@ -27,7 +27,7 @@ epsilon_max   = 1.0
 epsilon_min   = 0.01
 
 gamma         = 0.99 # discount factor
-alpha         = 2.5  # entropy tradeoff factor
+alpha         = 0.25 # entropy tradeoff factor
 
 class SumTree:
     write = 0
