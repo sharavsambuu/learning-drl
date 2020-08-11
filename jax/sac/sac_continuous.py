@@ -14,9 +14,8 @@ import pybullet_envs
 
 
 debug_render  = True
-debug         = False
 num_episodes  = 500
-batch_size    = 4
+batch_size    = 128
 learning_rate = 0.001
 sync_steps    = 1
 memory_length = 4000
@@ -27,7 +26,7 @@ epsilon_max   = 1.0
 epsilon_min   = 0.01
 
 gamma         = 0.99 # discount factor
-alpha         = 0.25 # entropy tradeoff factor
+alpha         = 0.6 # entropy tradeoff factor
 
 class SumTree:
     write = 0
@@ -142,7 +141,8 @@ class GaussianPolicy(flax.nn.Module):
 
 
 env   = gym.make('HumanoidFlagrunHarderBulletEnv-v0')
-env.render(mode="human")
+if debug_render:
+    env.render(mode="human")
 state = env.reset()
 
 # (44,)
