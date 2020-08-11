@@ -243,6 +243,82 @@ def target_critic_inference(actor_model, target_critic_model, next_state, reward
 
 
 
+@jax.jit
+def backpropagate_critic(
+    q1_optimizer, q2_optimizer, actor_optimizer,
+    target_critic,
+    batch,
+    alpha,
+    key
+    ):
+    # batch[0] - states
+    # batch[1] - actions
+    # batch[2] - rewards
+    # batch[3] - next_states
+    # batch[4] - dones
+    # batch[5] - weights
+
+    target_q = jax.lax.stop_gradient(
+        target_critic_inference(
+            actor_optimizer.target, 
+            target_critic, 
+            batch[3],
+            batch[2],
+            batch[4], 
+            alpha, 
+            key
+        )
+    )
+    
+    def q1_loss_fn(critic_model):
+        q1, _ = critic_inference(
+            critic_model, 
+            batch[0],
+            batch[1]
+        )
+        #q1      = jnp.reshape(q1, (1, q1.shape[1]))
+        q1_loss = jnp.mean(
+            jnp.multiply(
+                jnp.square(q1[0]-target_q[0]),
+                batch[5]
+            )
+        )
+        return q1_loss
+    loss, gradients = jax.value_and_grad(q1_loss_fn)(q1_optimizer.target)
+    q1_optimizer    = q1_optimizer.apply_gradient(gradients)
+
+
+    def q2_loss_fn(critic_model):
+        _, q2 = critic_inference(
+            critic_model, 
+            batch[0],
+            batch[1]
+        )
+        #q2      = jnp.reshape(q2, (1, q2.shape[1]))
+        q2_loss = jnp.mean(
+            jnp.multiply(
+                jnp.square(q2[0]-target_q[0]),
+                batch[5]
+            )
+        )
+        return q2_loss
+    loss, gradients = jax.value_and_grad(q2_loss_fn)(q2_optimizer.target)
+    q2_optimizer    = q2_optimizer.apply_gradient(gradients)
+
+    q1, _ = jax.lax.stop_gradient(
+        critic_inference(
+            q1_optimizer.target, 
+            batch[0],
+            batch[1]
+        )
+    )
+    #q1        = jnp.reshape(q1, (1, q1.shape[1]))
+    td_errors = jnp.abs(q1[0]-target_q[0])
+    
+    return q1_optimizer, q2_optimizer, td_errors
+
+
+
 
 per_memory   = PERMemory(memory_length)
 rng          = jax.random.PRNGKey(0)
@@ -303,41 +379,28 @@ try:
                 next_states.append(batch[i][1][3])
                 dones.append      (batch[i][1][4])
                 weights.append    (batch[i][0])
+            
             # critic loss тооцооллох
-            q1, q2 = critic_inference(
-                critic, 
-                jnp.asarray([states ]),
-                jnp.asarray([actions])
-                )
-            q1 = jnp.reshape(q1, (1, q1.shape[1]))
-            q2 = jnp.reshape(q2, (1, q2.shape[1]))
             rng, new_key = jax.random.split(rng)
-            target_q     = jax.lax.stop_gradient(
-                target_critic_inference(
-                    actor, 
-                    target_critic, 
-                    jnp.asarray(next_states), 
-                    jnp.asarray(rewards    ), 
-                    jnp.asarray(dones      ), 
-                    1.0, 
-                    new_key
-                )
-            )
-            td_errors = jnp.abs(q1[0]-target_q[0])
-            q1_loss   = jnp.mean(
-                jnp.multiply(
-                    jnp.square(q1[0]-target_q[0]),
+            q1_optimizer, q2_optimizer, td_errors = backpropagate_critic(
+                q1_optimizer, q2_optimizer, actor_optimizer,
+                target_critic,
+                (
+                    jnp.asarray(states),
+                    jnp.asarray(actions),
+                    jnp.asarray(rewards),
+                    jnp.asarray(next_states),
+                    jnp.asarray(dones),
                     jnp.asarray(weights)
+                ),
+                alpha,
+                new_key
                 )
-            )
-            q2_loss   = jnp.mean(
-                jnp.multiply(
-                    jnp.square(q2[0]-target_q[0]),
-                    jnp.asarray(weights)
-                )
-            )
-            print("q1 loss:", q1_loss)
-            print("q2 loss:", q2_loss)
+            print("backpropagated critic...")
+            print("td errors :")
+            print(td_errors)
+
+
             # policy loss тооцооллох
             rng, new_key                  = jax.random.split(rng)
             sampled_actions, entropies, _ = actor_inference(
