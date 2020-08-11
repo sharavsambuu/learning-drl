@@ -18,7 +18,7 @@ debug         = False
 num_episodes  = 500
 batch_size    = 4
 learning_rate = 0.001
-sync_steps    = 100
+sync_steps    = 1
 memory_length = 4000
 
 epsilon       = 1.0
@@ -346,9 +346,9 @@ def backpropagate_actor(optimizer, critic, batch, alpha, key):
     return optimizer, loss
 
 
-
 per_memory   = PERMemory(memory_length)
 rng          = jax.random.PRNGKey(0)
+
 global_steps = 0
 try:
     for episode in range(num_episodes):
@@ -372,9 +372,7 @@ try:
 
             next_state, reward, done, _ = env.step(action)
 
-            episode_rewards.append(reward)
-
-            
+            # sample цуглуулж жинг тооцон PER санах ойруу хийх
             q1, q2 = critic_inference(
                 critic, 
                 jnp.asarray([state]),
@@ -393,7 +391,6 @@ try:
                 )
             )
             td_error = jnp.abs(q1[0]-target_q)[0]
-            
             per_memory.add(td_error, (state, action, reward, next_state, int(done)))
 
             # сургах batch бэлтгэх
@@ -423,10 +420,12 @@ try:
                 alpha,
                 new_key
                 )
-            print("backpropagated critic...")
-            print("td errors :")
-            print(td_errors)
-
+            
+            # PER санах ойны жинг шинэчлэх
+            new_td_errors = np.array(td_errors)
+            for i in range(batch_size):
+                idx = batch[i][0]
+                per_memory.update(idx, new_td_errors[i])
 
             # actor неорон сүлжээг сургах
             rng, new_key = jax.random.split(rng)
@@ -440,16 +439,17 @@ try:
                 alpha, 
                 new_key
                 )
-            print("backpropagated actor")
-            print("actor loss :")
-            print(actor_loss)
-            
+
+            # сайжирсэн жингүүдээр target_critic неорон сүлжээг шинэчлэх
+            if global_steps%sync_steps==0:
+                target_critic = target_critic.replace(params=q1_optimizer.target.params)
 
 
+            episode_rewards.append(reward)
             state = next_state
 
             if debug_render:
-                time.sleep(1. / 60)
+                #time.sleep(1. / 60)
                 env.render(mode="human")
 
             if done:
