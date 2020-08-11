@@ -279,7 +279,7 @@ try:
             td_error = jnp.abs(q1[0]-target_q)[0]
             print("td error :")
             print(td_error)
-            
+            per_memory.add(td_error, (state, action, reward, next_state, int(done)))
 
 
             state = next_state
