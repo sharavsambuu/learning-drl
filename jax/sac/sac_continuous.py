@@ -276,7 +276,6 @@ def backpropagate_critic(
             batch[0],
             batch[1]
         )
-        #q1      = jnp.reshape(q1, (1, q1.shape[1]))
         q1_loss = jnp.mean(
             jnp.multiply(
                 jnp.square(q1[0]-target_q[0]),
@@ -294,7 +293,6 @@ def backpropagate_critic(
             batch[0],
             batch[1]
         )
-        #q2      = jnp.reshape(q2, (1, q2.shape[1]))
         q2_loss = jnp.mean(
             jnp.multiply(
                 jnp.square(q2[0]-target_q[0]),
@@ -333,8 +331,6 @@ def backpropagate_actor(optimizer, critic, batch, alpha, key):
             batch[0],
             sampled_actions
             )
-        #q1          = jnp.reshape(q1, (1, q1.shape[1]))
-        #q2          = jnp.reshape(q2, (1, q2.shape[1]))
         q_values   = jnp.min([q1, q2], axis=0)
         actor_loss = jnp.mean(
             jnp.multiply(
