@@ -179,9 +179,9 @@ _, actor_params = actor_module.init_by_shape(
 actor           = flax.nn.Model(actor_module, actor_params)
 
 
-critic_optimizer = flax.optim.Adam(learning_rate).create(critic)
-target_optimizer = flax.optim.Adam(learning_rate).create(target_critic)
-actor_optimizer  = flax.optim.Adam(learning_rate).create(actor)
+q1_optimizer    = flax.optim.Adam(learning_rate).create(critic)
+q2_optimizer    = flax.optim.Adam(learning_rate).create(critic)
+actor_optimizer = flax.optim.Adam(learning_rate).create(actor)
 
 
 # неорон сүлжээ үүсч байгаа эсэхийг шалгах туршилтууд
@@ -240,6 +240,8 @@ def target_critic_inference(actor_model, target_critic_model, next_state, reward
     next_q                          = jnp.min([next_q1, next_q2])+alpha*next_entropies
     target_q                        = reward+(1.0-done)*gamma*next_q
     return target_q
+
+
 
 
 per_memory   = PERMemory(memory_length)
