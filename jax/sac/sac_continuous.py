@@ -16,7 +16,7 @@ import pybullet_envs
 debug_render  = True
 debug         = False
 num_episodes  = 500
-batch_size    = 8
+batch_size    = 4
 learning_rate = 0.001
 sync_steps    = 100
 memory_length = 4000
@@ -27,7 +27,7 @@ epsilon_max   = 1.0
 epsilon_min   = 0.01
 
 gamma         = 0.99 # discount factor
-
+alpha         = 2.5  # entropy tradeoff factor
 
 class SumTree:
     write = 0
@@ -142,7 +142,7 @@ class GaussianPolicy(flax.nn.Module):
 
 
 env   = gym.make('HumanoidFlagrunHarderBulletEnv-v0')
-#env.render(mode="human")
+env.render(mode="human")
 state = env.reset()
 
 # (44,)
@@ -278,7 +278,7 @@ try:
                     jnp.asarray([next_state]), 
                     jnp.asarray([reward]), 
                     jnp.asarray([int(done)]), 
-                    1.0, 
+                    alpha, 
                     new_key
                 )
             )
@@ -332,16 +332,34 @@ try:
             print("q1 loss:", q1_loss)
             print("q2 loss:", q2_loss)
             # policy loss тооцооллох
-            rng, new_key          = jax.random.split(rng)
-            actions, entropies, _ = actor_inference(
+            rng, new_key                  = jax.random.split(rng)
+            sampled_actions, entropies, _ = actor_inference(
                 actor, 
-                jnp.asarray([state]), 
+                jnp.asarray(states), 
                 new_key
                 )
-            print("action shape  :", actions.shape)
-            print("entropy shape :", entropies.shape)
-            print("entropies :")
-            print(entropies)
+            q1, q2 = critic_inference(
+                critic, 
+                jnp.asarray([states         ]),
+                jnp.asarray([sampled_actions])
+                )
+            q1 = jnp.reshape(q1, (1, q1.shape[1]))
+            q2 = jnp.reshape(q2, (1, q2.shape[1]))
+            print("q1 values")
+            print(q1)
+            print("q2 values")
+            print(q2)
+            q_values = jnp.min([q1, q2], axis=0)
+            print("q values for actor")
+            print(q_values)
+            policy_loss = jnp.mean(
+                jnp.multiply(
+                    (-q_values - entropies*alpha),
+                    jnp.asarray(weights)
+                )
+            )
+            print("policy loss:")
+            print(policy_loss)
 
 
             state = next_state
