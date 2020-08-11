@@ -16,7 +16,7 @@ import pybullet_envs
 debug_render  = True
 debug         = False
 num_episodes  = 500
-batch_size    = 64
+batch_size    = 8
 learning_rate = 0.001
 sync_steps    = 100
 memory_length = 4000
@@ -258,6 +258,7 @@ try:
 
             episode_rewards.append(reward)
 
+            
             q1, q2 = critic_inference(
                 critic, 
                 jnp.asarray([state]),
@@ -272,14 +273,37 @@ try:
                 jnp.asarray([int(done)]), 
                 1.0, 
                 new_key)
-            print("q1 value :")
-            print(q1)
-            print("target q value :")
-            print(target_q)
             td_error = jnp.abs(q1[0]-target_q)[0]
-            print("td error :")
-            print(td_error)
+            
             per_memory.add(td_error, (state, action, reward, next_state, int(done)))
+
+            # сургах 
+            batch = per_memory.sample(batch_size)
+            states, actions, rewards, next_states, dones = [], [], [], [], []
+            for i in range(batch_size):
+                states.append     (batch[i][1][0])
+                actions.append    (batch[i][1][1])
+                rewards.append    (batch[i][1][2])
+                next_states.append(batch[i][1][3])
+                dones.append      (batch[i][1][4])
+            q1, q2 = critic_inference(
+                critic, 
+                jnp.asarray([states ]),
+                jnp.asarray([actions])
+                )
+            rng, new_key = jax.random.split(rng)
+            target_q     = target_critic_inference(
+                actor, 
+                target_critic, 
+                jnp.asarray([next_states]), 
+                jnp.asarray([rewards    ]), 
+                jnp.asarray([dones      ]), 
+                1.0, 
+                new_key)
+            q1        = jnp.reshape(q1, (1, q1.shape[1]))
+            td_errors = jnp.abs(q1[0]-target_q[0])
+            print("td errors shape", td_errors.shape)
+            print(td_errors)
 
 
             state = next_state
