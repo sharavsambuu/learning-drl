@@ -138,8 +138,9 @@ class GaussianPolicy(flax.nn.Module):
 
 
 
-#env   = gym.make('HumanoidFlagrunHarderBulletEnv-v0')
-env   = gym.make('MountainCarContinuous-v0')
+#environment_name = 'HumanoidFlagrunHarderBulletEnv-v0' 
+environment_name = 'MountainCarContinuous-v0' 
+env              = gym.make(environment_name)
 
 if debug_render:
     env.render(mode="human")
@@ -148,8 +149,6 @@ state = env.reset()
 
 clip_min=min(np.array([env.action_space.high, env.action_space.low]).flatten())
 clip_max=max(np.array([env.action_space.high, env.action_space.low]).flatten())
-
-print(clip_min, clip_max)
 
 
 critic_module = TwinQNetwork.partial()
@@ -193,8 +192,12 @@ def target_critic_inference(actor_model, target_critic_model, next_state, reward
     next_actions, next_entropies, _ = actor_model(next_state, key=key, sample=True)
     next_state_action               = jnp.concatenate((next_state, next_actions), axis=-1)
     next_q1, next_q2                = target_critic_model(next_state_action)
-    next_q                          = jnp.min([next_q1, next_q2])+alpha*next_entropies
-    target_q                        = reward+(1.0-done)*gamma*next_q
+    min_q                           = jnp.min([next_q1, next_q2], axis=0)
+    next_q                          = min_q+alpha*next_entropies
+    rewards                         = jnp.reshape(reward, (reward.shape[0], 1))
+    dones                           = jnp.subtract(1.0, done)
+    dones                           = jnp.reshape(dones, (dones.shape[0], 1))
+    target_q                        = rewards+gamma*next_q*dones
     return target_q
 
 @jax.jit
@@ -230,12 +233,8 @@ def backpropagate_critic(
             batch[0],
             batch[1]
         )
-        q1_loss = jnp.mean(
-            jnp.multiply(
-                jnp.square(q1[0]-target_q[0]),
-                batch[5]
-            )
-        )
+        element_wise_mult = jnp.multiply(jnp.square(q1-target_q), jnp.reshape(batch[5], (batch[5].shape[0], 1)))
+        q1_loss           = jnp.mean(element_wise_mult)
         return q1_loss
     loss, gradients = jax.value_and_grad(q1_loss_fn)(q1_optimizer.target)
     q1_optimizer    = q1_optimizer.apply_gradient(gradients)
@@ -247,12 +246,8 @@ def backpropagate_critic(
             batch[0],
             batch[1]
         )
-        q2_loss = jnp.mean(
-            jnp.multiply(
-                jnp.square(q2[0]-target_q[0]),
-                batch[5]
-            )
-        )
+        element_wise_mult = jnp.multiply(jnp.square(q2-target_q), jnp.reshape(batch[5], (batch[5].shape[0], 1)))
+        q2_loss           = jnp.mean(element_wise_mult)
         return q2_loss
     loss, gradients = jax.value_and_grad(q2_loss_fn)(q2_optimizer.target)
     q2_optimizer    = q2_optimizer.apply_gradient(gradients)
@@ -263,9 +258,8 @@ def backpropagate_critic(
             batch[0],
             batch[1]
         )
-    )
-
-    td_errors = jnp.abs(q1[0]-target_q[0])
+    )    
+    td_errors = jnp.abs(q1-target_q)
     
     return q1_optimizer, q2_optimizer, td_errors
 
@@ -355,7 +349,8 @@ try:
                     new_key
                 )
             )
-            td_error = jnp.abs(q1[0]-target_q)[0]
+            td_error = jnp.abs(q1-target_q)
+            td_error = td_error[0][0]
             per_memory.add(td_error, (state, action, reward, next_state, int(done)))
 
             # сургах batch бэлтгэх
@@ -387,7 +382,7 @@ try:
                 )
             
             # PER санах ойны жинг шинэчлэх
-            new_td_errors = np.array(td_errors)
+            new_td_errors = np.array(td_errors).flatten()
             for i in range(batch_size):
                 idx = batch[i][0]
                 per_memory.update(idx, new_td_errors[i])
