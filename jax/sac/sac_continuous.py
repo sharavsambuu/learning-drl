@@ -10,7 +10,7 @@ import numpy as np
 import pybullet_envs
 
 
-debug_render  = False
+debug_render  = True
 num_episodes  = 500
 batch_size    = 128
 learning_rate = 0.001
@@ -122,7 +122,7 @@ def log_prob(mean, scale, value):
     return -((value - mean) ** 2) / (2 * var) - log_scale - jnp.log(jnp.sqrt(2 * jnp.pi))
 
 class GaussianPolicy(flax.nn.Module):
-    def apply(self, x, n_actions, max_action, key=None, sample=False, clip_min=-1., clip_max=1.):
+    def apply(self, x, n_actions, key=None, sample=False, clip_min=-1., clip_max=1.):
         policy_layer  = CommonNetwork(x, n_actions*2)
         mean, log_std = jnp.split(policy_layer, 2, axis=-1)
         log_std       = jnp.clip(log_std, clip_min, clip_max)
@@ -138,10 +138,18 @@ class GaussianPolicy(flax.nn.Module):
 
 
 
-env   = gym.make('HumanoidFlagrunHarderBulletEnv-v0')
+#env   = gym.make('HumanoidFlagrunHarderBulletEnv-v0')
+env   = gym.make('MountainCarContinuous-v0')
+
 if debug_render:
     env.render(mode="human")
 state = env.reset()
+
+
+clip_min=min(np.array([env.action_space.high, env.action_space.low]).flatten())
+clip_max=max(np.array([env.action_space.high, env.action_space.low]).flatten())
+
+print(clip_min, clip_max)
 
 
 critic_module = TwinQNetwork.partial()
@@ -152,7 +160,12 @@ _, params     = critic_module.init_by_shape(
 critic        = flax.nn.Model(critic_module, params)
 target_critic = flax.nn.Model(critic_module, params)
 
-actor_module    = GaussianPolicy.partial(n_actions=env.action_space.shape[0], max_action=1., key=jax.random.PRNGKey(0))
+actor_module    = GaussianPolicy.partial(
+    n_actions   = env.action_space.shape[0], 
+    key         = jax.random.PRNGKey(0),
+    clip_min    = clip_min,
+    clip_max    = clip_max
+    )
 _, actor_params = actor_module.init_by_shape(
     jax.random.PRNGKey(0),
     [env.observation_space.shape])
@@ -293,6 +306,9 @@ def soft_update(model, target_model, tau):
         model.params, target_model.params
         )
     return target_model.replace(params=update_params)
+
+
+
 
 
 per_memory   = PERMemory(memory_length)
