@@ -92,6 +92,7 @@ class PERMemory:
         self.tree.update(idx, p)
 
 
+
 class CommonNetwork(flax.nn.Module):
     def apply(self, x, n_outputs):
         dense_layer_1      = flax.nn.Dense(x, 64)
@@ -101,40 +102,42 @@ class CommonNetwork(flax.nn.Module):
         output_layer       = flax.nn.Dense(activation_layer_2, n_outputs)
         return output_layer
 
+
 class TwinQNetwork(flax.nn.Module):
     def apply(self, x):
         q1 = CommonNetwork(x, 1)
         q2 = CommonNetwork(x, 1)
         return q1, q2
 
+
 # https://github.com/google/jax/issues/2173
+# https://github.com/pytorch/pytorch/blob/master/torch/distributions/normal.py#L65
 @jax.jit
 def gaussian_normal(key, mu, sigma):
     normals = mu + jax.random.normal(key, mu.shape)*sigma
     return normals
 
-# https://github.com/henry-prior/jax-rl/blob/master/utils.py
+#https://github.com/pytorch/pytorch/blob/master/torch/distributions/normal.py#L70
 @jax.jit
-def gaussian_likelihood(sample, mu, log_sig):
-    pre_sum = -0.5 * (((sample - mu) / (jnp.exp(log_sig) + 1e-6)) ** 2 + 2 * log_sig + jnp.log(2 * jnp.pi))
-    return jnp.sum(pre_sum, axis=-1)    
+def log_prob(mean, scale, value):
+    var       = (jnp.square(scale))
+    log_scale = jnp.log(scale)
+    return -((value - mean) ** 2) / (2 * var) - log_scale - jnp.log(jnp.sqrt(2 * jnp.pi))
 
-# https://github.com/henry-prior/jax-rl/blob/master/models.py
 class GaussianPolicy(flax.nn.Module):
     def apply(self, x, n_actions, max_action, key=None, sample=False, clip_min=-1., clip_max=1.):
-        policy_layer = CommonNetwork(x, n_actions*2)
-        mu, log_sig  = jnp.split(policy_layer, 2, axis=-1)
-        log_sig      = flax.nn.softplus(log_sig)
-        log_sig      = jnp.clip(log_sig, clip_min, clip_max)
+        policy_layer  = CommonNetwork(x, n_actions*2)
+        mean, log_std = jnp.split(policy_layer, 2, axis=-1)
+        log_std       = jnp.clip(log_std, clip_min, clip_max)
         if sample:
-            sig    = jnp.exp(log_sig)
-            pi     = gaussian_normal(key, mu, sig)
-            log_pi = gaussian_likelihood(pi, mu, log_sig)
-            pi     = flax.nn.tanh(pi)
-            log_pi = log_pi - jnp.sum(jnp.log(flax.nn.relu(1-pi**2)+1e-6), axis=-1)
-            return max_action*pi, log_pi
+            stds      = jnp.exp(log_std)
+            xs        = gaussian_normal(key, mean, stds)
+            actions   = flax.nn.tanh(xs)
+            log_probs = log_prob(mean, stds, xs) - jnp.log(1-jnp.square(actions)+1e-6)
+            entropies = -jnp.sum(log_probs, axis=1, keepdims=True)
+            return actions, entropies, flax.nn.tanh(mean)
         else:
-            return max_action*flax.nn.tanh(mu), log_sig
+            return mean, log_std
 
 
 
@@ -195,26 +198,28 @@ print(q2.shape)
 print(q1)
 
 print("####### actor inference test :")
-actions, log_sig = actor(test_state)
-print("actions :")
-print(actions)
-print("log_sig :")
-print(log_sig)
+mean, log_std = actor(jnp.asarray([test_state]))
+print("mean :")
+print(mean)
+print("log_std :")
+print(log_std)
 
 print("####### actor sampling test :")
-actions, log_pi = actor(test_state, key=jax.random.PRNGKey(0), sample=True)
+actions, entropies, tanh_means= actor(jnp.asarray([test_state]), key=jax.random.PRNGKey(0), sample=True)
 print("sampling actions :")
 print(actions)
-print("log_pi :")
-print(log_pi)
+print("entropies :")
+print(entropies)
+print("tanh_means :")
+print(tanh_means)
 
-#print("DONE.")
+#print("TESTS ARE DONE.")
 #exit(0)
 
 @jax.jit
 def actor_inference(model, state, key):
-    actions, entropies = model(test_state, key=key, sample=True)
-    return actions, entropies
+    actions, entropies, tanh_means = model(state, key=key, sample=True)
+    return actions, entropies, tanh_means
 
 @jax.jit
 def critic_inference(model, state, action):
@@ -224,11 +229,11 @@ def critic_inference(model, state, action):
 
 @jax.jit
 def target_critic_inference(actor_model, target_critic_model, next_state, reward, done, alpha, key):
-    next_actions, next_entropies = actor_model(next_state, key=key, sample=True)
-    next_state_action            = jnp.concatenate((next_state, next_actions), axis=-1)
-    next_q1, next_q2             = target_critic_model(next_state_action)
-    next_q                       = jnp.min([next_q1, next_q2])+alpha*next_entropies
-    target_q                     = reward+(1.0-done)*gamma*next_q
+    next_actions, next_entropies, _ = actor_model(next_state, key=key, sample=True)
+    next_state_action               = jnp.concatenate((next_state, next_actions), axis=-1)
+    next_q1, next_q2                = target_critic_model(next_state_action)
+    next_q                          = jnp.min([next_q1, next_q2])+alpha*next_entropies
+    target_q                        = reward+(1.0-done)*gamma*next_q
     return target_q
 
 
@@ -245,8 +250,12 @@ try:
             if np.random.rand() <= epsilon:
                 action = env.action_space.sample()
             else:
-                rng, new_key = jax.random.split(rng)
-                actions, _ = actor_inference(actor, state, new_key)
+                rng, new_key  = jax.random.split(rng)
+                actions, _, _ = actor_inference(
+                    actor, 
+                    jnp.asarray([state]), 
+                    new_key)
+                action = actions[0]
 
             if epsilon>epsilon_min:
                 epsilon = epsilon_min+(epsilon_max-epsilon_min)*math.exp(-epsilon_decay*global_steps)
@@ -262,14 +271,17 @@ try:
                 jnp.asarray([action])
                 )
             rng, new_key = jax.random.split(rng)
-            target_q     = target_critic_inference(
-                actor, 
-                target_critic, 
-                jnp.asarray([next_state]), 
-                jnp.asarray([reward]), 
-                jnp.asarray([int(done)]), 
-                1.0, 
-                new_key)
+            target_q     = jax.lax.stop_gradient(
+                target_critic_inference(
+                    actor, 
+                    target_critic, 
+                    jnp.asarray([next_state]), 
+                    jnp.asarray([reward]), 
+                    jnp.asarray([int(done)]), 
+                    1.0, 
+                    new_key
+                )
+            )
             td_error = jnp.abs(q1[0]-target_q)[0]
             
             per_memory.add(td_error, (state, action, reward, next_state, int(done)))
@@ -293,14 +305,17 @@ try:
             q1 = jnp.reshape(q1, (1, q1.shape[1]))
             q2 = jnp.reshape(q2, (1, q2.shape[1]))
             rng, new_key = jax.random.split(rng)
-            target_q     = target_critic_inference(
-                actor, 
-                target_critic, 
-                jnp.asarray([next_states]), 
-                jnp.asarray([rewards    ]), 
-                jnp.asarray([dones      ]), 
-                1.0, 
-                new_key)
+            target_q     = jax.lax.stop_gradient(
+                target_critic_inference(
+                    actor, 
+                    target_critic, 
+                    jnp.asarray(next_states), 
+                    jnp.asarray(rewards    ), 
+                    jnp.asarray(dones      ), 
+                    1.0, 
+                    new_key
+                )
+            )
             td_errors = jnp.abs(q1[0]-target_q[0])
             q1_loss   = jnp.mean(
                 jnp.multiply(
@@ -317,10 +332,10 @@ try:
             print("q1 loss:", q1_loss)
             print("q2 loss:", q2_loss)
             # policy loss тооцооллох
-            rng, new_key       = jax.random.split(rng)
-            actions, entropies = actor_inference(
+            rng, new_key          = jax.random.split(rng)
+            actions, entropies, _ = actor_inference(
                 actor, 
-                jnp.asarray(state), 
+                jnp.asarray([state]), 
                 new_key
                 )
             print("action shape  :", actions.shape)
