@@ -139,7 +139,7 @@ class GaussianPolicy(flax.nn.Module):
 
 
 env   = gym.make('HumanoidFlagrunHarderBulletEnv-v0')
-#env.render(mode="human")
+env.render(mode="human")
 state = env.reset()
 
 # (44,)
@@ -209,10 +209,15 @@ print("log_pi :")
 print(log_pi)
 
 
-print("DONE.")
-exit(0)
+#print("DONE.")
+#exit(0)
 
 
+
+@jax.jit
+def actor_inference(state):
+    actions, _ = actor(test_state, key=jax.random.PRNGKey(0), sample=True)
+    return actions
 
 
 per_memory = PERMemory(memory_length)
@@ -228,7 +233,7 @@ try:
             if np.random.rand() <= epsilon:
                 action = env.action_space.sample()
             else:
-                action = env.action_space.sample()
+                action = actor_inference(state)
 
             if epsilon>epsilon_min:
                 epsilon = epsilon_min+(epsilon_max-epsilon_min)*math.exp(-epsilon_decay*global_steps)
@@ -237,6 +242,7 @@ try:
             new_state, reward, done, _ = env.step(action)
 
             episode_rewards.append(reward)
+
             state = new_state
 
             if debug_render:
