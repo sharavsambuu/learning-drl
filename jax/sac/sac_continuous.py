@@ -3,13 +3,10 @@ import random
 import math
 import time
 import gym
-from collections import deque
-
 import flax
 import jax
 from jax import numpy as jnp
 import numpy as np
-
 import pybullet_envs
 
 
@@ -25,8 +22,9 @@ epsilon_decay = 0.001
 epsilon_max   = 1.0
 epsilon_min   = 0.01
 
-gamma         = 0.99 # discount factor
-alpha         = 0.6  # entropy tradeoff factor
+gamma         = 0.99  # discount factor
+alpha         = 0.6   # entropy tradeoff factor
+tau           = 0.005 # soft update
 
 class SumTree:
     write = 0
@@ -253,7 +251,7 @@ def backpropagate_critic(
             batch[1]
         )
     )
-    #q1        = jnp.reshape(q1, (1, q1.shape[1]))
+
     td_errors = jnp.abs(q1[0]-target_q[0])
     
     return q1_optimizer, q2_optimizer, td_errors
@@ -286,6 +284,15 @@ def backpropagate_actor(optimizer, critic, batch, alpha, key):
     optimizer       = optimizer.apply_gradient(gradients)
 
     return optimizer, loss
+
+# https://github.com/henry-prior/jax-rl/blob/436b009cd97475b75be3b192a0ba761152950f41/utils.py#L43
+@jax.jit
+def soft_update(model, target_model, tau):
+    update_params = jax.tree_multimap(
+        lambda m1, mt: tau*m1 + (1-tau)*mt,
+        model.params, target_model.params
+        )
+    return target_model.replace(params=update_params)
 
 
 per_memory   = PERMemory(memory_length)
@@ -384,7 +391,7 @@ try:
 
             # сайжирсэн жингүүдээр target_critic неорон сүлжээг шинэчлэх
             if global_steps%sync_steps==0:
-                target_critic = target_critic.replace(params=q1_optimizer.target.params)
+                target_critic = soft_update(q1_optimizer.target, target_critic, tau)
 
 
             episode_rewards.append(reward)
