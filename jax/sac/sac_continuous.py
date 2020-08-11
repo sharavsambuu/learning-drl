@@ -139,7 +139,7 @@ class GaussianPolicy(flax.nn.Module):
 
 
 env   = gym.make('HumanoidFlagrunHarderBulletEnv-v0')
-env.render(mode="human")
+#env.render(mode="human")
 state = env.reset()
 
 # (44,)
@@ -213,15 +213,30 @@ print(log_pi)
 #exit(0)
 
 
-
 @jax.jit
-def actor_inference(state):
-    actions, _ = actor(test_state, key=jax.random.PRNGKey(0), sample=True)
+def actor_inference(model, state, key):
+    actions, _ = model(test_state, key=key, sample=True)
     return actions
 
 
-per_memory = PERMemory(memory_length)
+@jax.jit
+def critic_inference(model, state, action):
+    state_action = jnp.concatenate((state, action), axis=-1)
+    q1, q2       = model(state_action)
+    return q1, q2
 
+@jax.jit
+def target_critic_inference(actor_model, target_critic_model, next_state, reward, done, alpha, key):
+    next_actions, next_entropies = actor_model(next_state, key=key, sample=True)
+    next_state_action            = jnp.concatenate((next_state, next_actions), axis=-1)
+    next_q1, next_q2             = target_critic_model(next_state_action)
+    next_q                       = jnp.min([next_q1, next_q2])+alpha*next_entropies
+    target_q                     = reward+(1.0-done)*gamma*next_q
+    return target_q
+
+
+per_memory   = PERMemory(memory_length)
+rng          = jax.random.PRNGKey(0)
 global_steps = 0
 try:
     for episode in range(num_episodes):
@@ -233,24 +248,48 @@ try:
             if np.random.rand() <= epsilon:
                 action = env.action_space.sample()
             else:
-                action = actor_inference(state)
+                rng, new_key = jax.random.split(rng)
+                action = actor_inference(actor, state, new_key)
 
             if epsilon>epsilon_min:
                 epsilon = epsilon_min+(epsilon_max-epsilon_min)*math.exp(-epsilon_decay*global_steps)
 
-            #print("action", action)
-            new_state, reward, done, _ = env.step(action)
+            next_state, reward, done, _ = env.step(action)
 
             episode_rewards.append(reward)
 
-            state = new_state
+            q1, q2 = critic_inference(
+                critic, 
+                jnp.asarray([state]),
+                jnp.asarray([action])
+                )
+            rng, new_key = jax.random.split(rng)
+            target_q     = target_critic_inference(
+                actor, 
+                target_critic, 
+                jnp.asarray([next_state]), 
+                jnp.asarray([reward]), 
+                jnp.asarray([int(done)]), 
+                1.0, 
+                new_key)
+            print("q1 value :")
+            print(q1)
+            print("target q value :")
+            print(target_q)
+            td_error = jnp.abs(q1[0]-target_q)[0]
+            print("td error :")
+            print(td_error)
+            
+
+
+            state = next_state
 
             if debug_render:
                 time.sleep(1. / 60)
                 env.render(mode="human")
 
             if done:
-                #print("{} - нийт reward : {}".format(episode, sum(episode_rewards)))
+                print("{} - нийт reward : {}".format(episode, sum(episode_rewards)))
                 break
 finally:
     env.close()
