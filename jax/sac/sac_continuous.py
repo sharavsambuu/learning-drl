@@ -13,7 +13,7 @@ import numpy as np
 import pybullet_envs
 
 
-debug_render  = True
+debug_render  = False
 num_episodes  = 500
 batch_size    = 128
 learning_rate = 0.001
@@ -26,7 +26,7 @@ epsilon_max   = 1.0
 epsilon_min   = 0.01
 
 gamma         = 0.99 # discount factor
-alpha         = 0.6 # entropy tradeoff factor
+alpha         = 0.6  # entropy tradeoff factor
 
 class SumTree:
     write = 0
@@ -145,24 +145,6 @@ if debug_render:
     env.render(mode="human")
 state = env.reset()
 
-# (44,)
-print("observation space :")
-print(env.observation_space.shape)
-# (17,)
-print("Action space :")
-print(env.action_space.shape)
-# 1
-print("Action space high :")
-print(env.action_space.high)
-# -1
-print("Action space low :")
-print(env.action_space.low)
-
-state_action_shape = (env.observation_space.shape[0]+env.action_space.shape[0],)
-print("StateAction shape")
-print(state_action_shape)
-
-
 
 critic_module = TwinQNetwork.partial()
 _, params     = critic_module.init_by_shape(
@@ -184,43 +166,6 @@ q2_optimizer    = flax.optim.Adam(learning_rate).create(critic)
 actor_optimizer = flax.optim.Adam(learning_rate).create(actor)
 
 
-# неорон сүлжээ үүсч байгаа эсэхийг шалгах туршилтууд
-test_state  = env.reset()
-test_action = env.action_space.sample()
-print("test state shape :")
-print(test_state.shape)
-print("test action shape :")
-print(test_action.shape)
-
-test_input  = jnp.concatenate((test_state, test_action))
-print("test input shape :")
-print(test_input.shape)
-
-print("####### critic inference test :")
-q1, q2 = critic(test_input)
-print(q1.shape)
-print(q2.shape)
-print(q1)
-
-print("####### actor inference test :")
-mean, log_std = actor(jnp.asarray([test_state]))
-print("mean :")
-print(mean)
-print("log_std :")
-print(log_std)
-
-print("####### actor sampling test :")
-actions, entropies, tanh_means= actor(jnp.asarray([test_state]), key=jax.random.PRNGKey(0), sample=True)
-print("sampling actions :")
-print(actions)
-print("entropies :")
-print(entropies)
-print("tanh_means :")
-print(tanh_means)
-
-#print("TESTS ARE DONE.")
-#exit(0)
-
 @jax.jit
 def actor_inference(model, state, key):
     actions, entropies, tanh_means = model(state, key=key, sample=True)
@@ -240,8 +185,6 @@ def target_critic_inference(actor_model, target_critic_model, next_state, reward
     next_q                          = jnp.min([next_q1, next_q2])+alpha*next_entropies
     target_q                        = reward+(1.0-done)*gamma*next_q
     return target_q
-
-
 
 @jax.jit
 def backpropagate_critic(
@@ -314,7 +257,6 @@ def backpropagate_critic(
     td_errors = jnp.abs(q1[0]-target_q[0])
     
     return q1_optimizer, q2_optimizer, td_errors
-
 
 @jax.jit
 def backpropagate_actor(optimizer, critic, batch, alpha, key):
