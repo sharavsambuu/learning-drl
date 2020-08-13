@@ -171,9 +171,8 @@ _, actor_params = actor_module.init_by_shape(
 actor           = flax.nn.Model(actor_module, actor_params)
 
 
-q1_optimizer    = flax.optim.Adam(learning_rate).create(critic)
-q2_optimizer    = flax.optim.Adam(learning_rate).create(critic)
-actor_optimizer = flax.optim.Adam(learning_rate).create(actor)
+critic_optimizer = flax.optim.Adam(learning_rate).create(critic)
+actor_optimizer  = flax.optim.Adam(learning_rate).create(actor)
 
 
 @jax.jit
@@ -200,9 +199,15 @@ def target_critic_inference(actor_model, target_critic_model, next_state, reward
     target_q                        = rewards+gamma*next_q*dones
     return target_q
 
+
+# https://github.com/henry-prior/jax-rl/blob/436b009cd97475b75be3b192a0ba761152950f41/utils.py#L52
+@jax.vmap
+def double_mse(q1, q2, qt):
+    return jnp.square(qt-q1).mean() + jnp.square(qt-q2).mean()
+
 @jax.jit
 def backpropagate_critic(
-    q1_optimizer, q2_optimizer, actor_optimizer,
+    critic_optimizer, actor_optimizer,
     target_critic,
     batch,
     alpha,
@@ -226,42 +231,31 @@ def backpropagate_critic(
             key
         )
     )
-    
-    def q1_loss_fn(critic_model):
-        q1, _ = critic_inference(
-            critic_model, 
-            batch[0],
-            batch[1]
-        )
-        element_wise_mult = jnp.multiply(jnp.square(q1-target_q), jnp.reshape(batch[5], (batch[5].shape[0], 1)))
-        q1_loss           = jnp.mean(element_wise_mult)
-        return q1_loss
-    loss, gradients = jax.value_and_grad(q1_loss_fn)(q1_optimizer.target)
-    q1_optimizer    = q1_optimizer.apply_gradient(gradients)
 
-
-    def q2_loss_fn(critic_model):
-        _, q2 = critic_inference(
-            critic_model, 
-            batch[0],
-            batch[1]
-        )
-        element_wise_mult = jnp.multiply(jnp.square(q2-target_q), jnp.reshape(batch[5], (batch[5].shape[0], 1)))
-        q2_loss           = jnp.mean(element_wise_mult)
-        return q2_loss
-    loss, gradients = jax.value_and_grad(q2_loss_fn)(q2_optimizer.target)
-    q2_optimizer    = q2_optimizer.apply_gradient(gradients)
+    def loss_fn(critic_model):
+        state_action = jnp.concatenate((batch[0], batch[1]), axis=-1)
+        print("state_action :", state_action.shape)
+        q1, q2       = critic_model(state_action)
+        print("q1 shape :", q1.shape)
+        print("q2 shape :", q2.shape)
+        print("target q :", target_q.shape)
+        critic_loss  = double_mse(q1, q2, target_q)
+        print("critic loss shape :", critic_loss.shape)
+        return jnp.mean(critic_loss)
+    loss, gradients  = jax.value_and_grad(loss_fn)(critic_optimizer.target)
+    critic_optimizer = critic_optimizer.apply_gradient(gradients) 
 
     q1, _ = jax.lax.stop_gradient(
         critic_inference(
-            q1_optimizer.target, 
+            critic_optimizer.target, 
             batch[0],
             batch[1]
         )
     )    
     td_errors = jnp.abs(q1-target_q)
     
-    return q1_optimizer, q2_optimizer, td_errors
+    return critic_optimizer, td_errors
+
 
 @jax.jit
 def backpropagate_actor(optimizer, critic, batch, alpha, key):
@@ -366,8 +360,8 @@ try:
             
             # critic неорон сүлжээг сургах
             rng, new_key = jax.random.split(rng)
-            q1_optimizer, q2_optimizer, td_errors = backpropagate_critic(
-                q1_optimizer, q2_optimizer, actor_optimizer,
+            critic_optimizer, td_errors = backpropagate_critic(
+                critic_optimizer, actor_optimizer,
                 target_critic,
                 (
                     jnp.asarray(states),
@@ -391,7 +385,7 @@ try:
             rng, new_key = jax.random.split(rng)
             actor_optimizer, actor_loss = backpropagate_actor(
                 actor_optimizer,
-                q1_optimizer.target,
+                critic_optimizer.target,
                 (
                     jnp.asarray(states),
                     jnp.asarray(weights)
@@ -402,7 +396,7 @@ try:
 
             # сайжирсэн жингүүдээр target_critic неорон сүлжээг шинэчлэх
             if global_steps%sync_steps==0:
-                target_critic = soft_update(q1_optimizer.target, target_critic, tau)
+                target_critic = soft_update(critic_optimizer.target, target_critic, tau)
 
 
             episode_rewards.append(reward)

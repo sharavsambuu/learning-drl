@@ -73,6 +73,10 @@ _, actor_params = actor_module.init_by_shape(
 actor           = flax.nn.Model(actor_module, actor_params)
 
 
+#q1_optimizer    = flax.optim.Adam(learning_rate).create(critic)
+#q2_optimizer    = flax.optim.Adam(learning_rate).create(critic)
+#actor_optimizer = flax.optim.Adam(learning_rate).create(actor)
+
 print("tests done.")
 sys.exit(0)
 
