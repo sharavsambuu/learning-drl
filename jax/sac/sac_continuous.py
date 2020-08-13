@@ -234,13 +234,8 @@ def backpropagate_critic(
 
     def loss_fn(critic_model):
         state_action = jnp.concatenate((batch[0], batch[1]), axis=-1)
-        print("state_action :", state_action.shape)
         q1, q2       = critic_model(state_action)
-        print("q1 shape :", q1.shape)
-        print("q2 shape :", q2.shape)
-        print("target q :", target_q.shape)
         critic_loss  = double_mse(q1, q2, target_q)
-        print("critic loss shape :", critic_loss.shape)
         return jnp.mean(critic_loss)
     loss, gradients  = jax.value_and_grad(loss_fn)(critic_optimizer.target)
     critic_optimizer = critic_optimizer.apply_gradient(gradients) 
