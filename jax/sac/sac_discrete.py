@@ -1,4 +1,5 @@
 import os
+import sys
 import random
 import math
 import time
@@ -36,33 +37,44 @@ class CommonNetwork(flax.nn.Module):
         output_layer       = flax.nn.Dense(activation_layer_2, n_outputs)
         return output_layer
 
-
 class TwinQNetwork(flax.nn.Module):
-    def apply(self, x):
-        q1 = CommonNetwork(x, 1)
-        q2 = CommonNetwork(x, 1)
+    def apply(self, x, n_actions):
+        q1 = CommonNetwork(x, n_actions)
+        q2 = CommonNetwork(x, n_actions)
         return q1, q2
 
-
-class GaussianPolicy(flax.nn.Module):
-    def apply(self, x, n_actions, key=None, sample=False, clip_min=-1., clip_max=1.):
-        policy_layer  = CommonNetwork(x, n_actions*2)
-        mean, log_std = jnp.split(policy_layer, 2, axis=-1)
-        log_std       = jnp.clip(log_std, clip_min, clip_max)
-        if sample:
-            stds      = jnp.exp(log_std)
-            xs        = gaussian_normal(key, mean, stds)
-            actions   = flax.nn.tanh(xs)
-            log_probs = log_prob(mean, stds, xs) - jnp.log(1-jnp.square(actions)+1e-6)
-            entropies = -jnp.sum(log_probs, axis=1, keepdims=True)
-            return actions, entropies, flax.nn.tanh(mean)
-        else:
-            return mean, log_std
+class Policy(flax.nn.Module):
+    def apply(self, x, n_actions):
+        action_logits = CommonNetwork(x, n_actions)
+        output_layer  = flax.nn.softmax(action_logits)
+        return output_layer
 
 
-
-environment_name = 'CartPole-v1' 
+environment_name = 'CartPole-v1'
 env              = gym.make(environment_name)
+state            = env.reset()
+
+
+# неорон сүлжээнүүдийг үүсгэх инференс хийж харах тестүүд
+critic_module = TwinQNetwork.partial(n_actions=env.action_space.n)
+_, params     = critic_module.init_by_shape(
+        jax.random.PRNGKey(0),
+        [state.shape]
+        )
+
+critic        = flax.nn.Model(critic_module, params)
+target_critic = flax.nn.Model(critic_module, params)
+
+actor_module    = Policy.partial(n_actions=env.action_space.n)
+_, actor_params = actor_module.init_by_shape(
+        jax.random.PRNGKey(0),
+        [state.shape]
+        )
+actor           = flax.nn.Model(actor_module, actor_params)
+
+
+print("tests done.")
+sys.exit(0)
 
 if debug_render:
     env.render(mode="human")
