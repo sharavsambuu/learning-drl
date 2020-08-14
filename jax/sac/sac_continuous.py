@@ -179,6 +179,7 @@ actor           = flax.nn.Model(actor_module, actor_params)
 constant_module    = Constant.partial(start_value=alpha)
 _, constant_params = constant_module.init(jax.random.PRNGKey(0))
 constant_model     = flax.nn.Model(constant_module, constant_params)
+target_entropy     = -env.action_space.shape[0]
 
 
 critic_optimizer = flax.optim.Adam(learning_rate).create(critic)
@@ -303,7 +304,23 @@ def soft_update(model, target_model, tau):
     return target_model.replace(params=update_params)
 
 
+@jax.jit
+def backpropagate_alpha(optimizer, entropies, weights, target_entropy):
+    entropies = jax.lax.stop_gradient(entropies)
+    weights   = jnp.reshape(weights, (weights.shape[0], 1))
+    # entopy нь target entropy-ээс бага байвал alpha-г нэмнэ
+    # эсрэгээрээ их байвал alpha-г бууруулна
+    def loss_fn(constant_model):
+        log_alpha   = constant_model()
+        diff        = (target_entropy-entropies)*log_alpha
+        elwise_mult = jnp.multiply(diff, weights)
+        alpha_loss  = -jnp.mean(elwise_mult)
+        return alpha_loss, log_alpha
 
+    gradients, log_alpha = jax.grad(loss_fn, has_aux=True)(optimizer.target)
+    optimizer = optimizer.apply_gradient(gradients)
+    return optimizer, log_alpha
+    
 
 
 per_memory   = PERMemory(memory_length)
@@ -403,8 +420,18 @@ try:
                 alpha, 
                 new_key
                 )
-            print("entropies:")
-            print(entropies)
+
+            # alpha утгыг сургах
+            rng, new_key = jax.random.split(rng)
+            alpha_optimizer, log_alpha = backpropagate_alpha(
+                alpha_optimizer,
+                entropies,
+                jnp.asarray(weights),
+                target_entropy
+                )
+            alpha = jnp.exp(log_alpha)[0]
+            print("new_alpha", alpha)
+
 
             # сайжирсэн жингүүдээр target_critic неорон сүлжээг шинэчлэх
             if global_steps%sync_steps==0:
