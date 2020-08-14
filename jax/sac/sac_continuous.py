@@ -137,6 +137,12 @@ class GaussianPolicy(flax.nn.Module):
             return mean, log_std
 
 
+# https://github.com/henry-prior/jax-rl/blob/436b009cd97475b75be3b192a0ba761152950f41/models.py#L98
+class Constant(flax.nn.Module):
+    def apply(self, start_value, dtype=jnp.float32):
+        value = self.param('value', (1,), flax.nn.initializers.ones)
+        return start_value * jnp.asarray(value, dtype)
+
 
 #environment_name = 'HumanoidFlagrunHarderBulletEnv-v0' 
 environment_name = 'LunarLanderContinuous-v2' 
@@ -170,9 +176,15 @@ _, actor_params = actor_module.init_by_shape(
     [env.observation_space.shape])
 actor           = flax.nn.Model(actor_module, actor_params)
 
+constant_module    = Constant.partial(start_value=alpha)
+_, constant_params = constant_module.init(jax.random.PRNGKey(0))
+constant_model     = flax.nn.Model(constant_module, constant_params)
+
 
 critic_optimizer = flax.optim.Adam(learning_rate).create(critic)
 actor_optimizer  = flax.optim.Adam(learning_rate).create(actor)
+alpha_optimizer  = flax.optim.Adam(learning_rate).create(constant_model)
+
 
 
 @jax.jit
