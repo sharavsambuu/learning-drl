@@ -145,7 +145,8 @@ class Constant(flax.nn.Module):
 
 
 #environment_name = 'HumanoidFlagrunHarderBulletEnv-v0' 
-environment_name = 'LunarLanderContinuous-v2' 
+#environment_name = 'LunarLanderContinuous-v2' 
+environment_name = 'MountainCarContinuous-v0' 
 env              = gym.make(environment_name)
 
 if debug_render:
