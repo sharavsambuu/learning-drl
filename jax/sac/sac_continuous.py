@@ -139,7 +139,7 @@ class GaussianPolicy(flax.nn.Module):
 
 
 #environment_name = 'HumanoidFlagrunHarderBulletEnv-v0' 
-environment_name = 'MountainCarContinuous-v0' 
+environment_name = 'LunarLanderContinuous-v2' 
 env              = gym.make(environment_name)
 
 if debug_render:
