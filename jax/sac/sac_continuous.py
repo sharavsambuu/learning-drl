@@ -15,7 +15,7 @@ num_episodes  = 500
 batch_size    = 128
 learning_rate = 0.001
 sync_steps    = 1
-memory_length = 4000
+memory_length = 10000
 
 epsilon       = 1.0
 epsilon_decay = 0.001
@@ -346,12 +346,15 @@ try:
             batch = per_memory.sample(batch_size)
             states, actions, rewards, next_states, dones, weights = [], [], [], [], [], []
             for i in range(batch_size):
-                states.append     (batch[i][1][0])
-                actions.append    (batch[i][1][1])
-                rewards.append    (batch[i][1][2])
-                next_states.append(batch[i][1][3])
-                dones.append      (batch[i][1][4])
-                weights.append    (batch[i][0])
+                try:
+                    states.append     (batch[i][1][0])
+                    actions.append    (batch[i][1][1])
+                    rewards.append    (batch[i][1][2])
+                    next_states.append(batch[i][1][3])
+                    dones.append      (batch[i][1][4])
+                    weights.append    (batch[i][0])
+                except Exception as e:
+                    continue
             
             # critic неорон сүлжээг сургах
             rng, new_key = jax.random.split(rng)
