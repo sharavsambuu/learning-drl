@@ -286,12 +286,12 @@ def backpropagate_actor(optimizer, critic, batch, alpha, key):
                 batch[1]
             )
         )
-        return actor_loss
+        return actor_loss, entropies
 
-    loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
-    optimizer       = optimizer.apply_gradient(gradients)
+    gradients, entropies = jax.grad(loss_fn, has_aux=True)(optimizer.target)
+    optimizer            = optimizer.apply_gradient(gradients)
 
-    return optimizer, loss
+    return optimizer, entropies
 
 # https://github.com/henry-prior/jax-rl/blob/436b009cd97475b75be3b192a0ba761152950f41/utils.py#L43
 @jax.jit
@@ -393,7 +393,7 @@ try:
 
             # actor неорон сүлжээг сургах
             rng, new_key = jax.random.split(rng)
-            actor_optimizer, actor_loss = backpropagate_actor(
+            actor_optimizer, entropies = backpropagate_actor(
                 actor_optimizer,
                 critic_optimizer.target,
                 (
@@ -403,6 +403,8 @@ try:
                 alpha, 
                 new_key
                 )
+            print("entropies:")
+            print(entropies)
 
             # сайжирсэн жингүүдээр target_critic неорон сүлжээг шинэчлэх
             if global_steps%sync_steps==0:
