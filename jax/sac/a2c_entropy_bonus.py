@@ -78,6 +78,7 @@ def backpropagate_critic(optimizer, props):
     # props[1] - discounted_rewards
     def loss_fn(model):
         values      = model(props[0])
+        values      = jnp.reshape(values,(values.shape[0],))
         advantages  = props[1] - values
         return jnp.mean(jnp.square(advantages))
     loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
@@ -95,21 +96,12 @@ def backpropagate_actor(optimizer, critic_model, props):
     # props[2] - actions
     values      = jax.lax.stop_gradient(critic_model(props[0]))
     values      = jnp.reshape(values, (values.shape[0],))
-    print("critic values shape:", values.shape)
-    print("discounted rewards shape:", props[1].shape)
-    advantages  = jnp.subtract(discounted_rewards, values)
+    advantages  = jnp.subtract(props[1], values)
     def loss_fn(model):
         action_probabilities      = model(props[0])
-        # should be (batch, action_dim)
-        print("action probabilities shape:", action_probabilities.shape)
         probabilities             = gather(action_probabilities, props[2])
-        # should be (batch,)
-        print("probabilities gather by action shape:", probabilities.shape)
         log_probabilities         = -jnp.log(probabilities)
-        # should be (batch)
-        print("log probabilities shape:", log_probabilities.shape)
         alpha                     = 0.4 # Entropy temperature
-
         entropies                 = -jnp.sum(
                     jnp.multiply(
                         action_probabilities,
@@ -117,10 +109,7 @@ def backpropagate_actor(optimizer, critic_model, props):
                     ),
                     axis = 1
                 )*alpha
-        print("advantages shape:", advantages.shape)
-        print("entropies shape:", entropies.shape)
         advantages_with_entropies = jnp.add(advantages, entropies)
-        print("advantages with entropies shape:", advantages_with_entropies.shape)
         return jnp.mean(jnp.multiply(log_probabilities, advantages_with_entropies))
     loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
     optimizer       = optimizer.apply_gradient(gradients)
@@ -165,7 +154,6 @@ try:
                     discounted_rewards[t] = G_t
                 discounted_rewards = discounted_rewards - np.mean(discounted_rewards)
                 discounted_rewards = discounted_rewards / (np.std(discounted_rewards)+1e-10)
-                print("pre discounted rewards shape:::", discounted_rewards.shape)
 
                 actor_optimizer, _  = backpropagate_actor(
                     actor_optimizer,
