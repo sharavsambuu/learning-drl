@@ -114,9 +114,10 @@ def actor_inference(model, x):
 def backpropagate_critic(optimizer, props):
     # props[0] - states
     # props[1] - discounted_rewards
+    discounted_rewards = jnp.reshape(props[1], (props[1].shape[0], 1))
     def loss_fn(model):
         values      = model(props[0])
-        advantages  = props[1] - values
+        advantages  = discounted_rewards - values
         return jnp.mean(jnp.square(advantages))
     loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
     optimizer       = optimizer.apply_gradient(gradients)
@@ -132,6 +133,7 @@ def backpropagate_actor(optimizer, critic_model, props):
     # props[1] - discounted_rewards
     # props[2] - actions
     values      = jax.lax.stop_gradient(critic_model(props[0]))
+    values      = jnp.reshape(values, (values.shape[0],))
     advantages  = props[1] - values
     def loss_fn(model):
         action_probabilities = model(props[0])
