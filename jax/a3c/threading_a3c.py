@@ -71,6 +71,7 @@ def backpropagate_critic(optimizer, props):
     # props[1] - discounted_rewards
     def loss_fn(model):
         values      = model(props[0])
+        values      = jnp.reshape(values, (values.shape[0],))
         advantages  = props[1] - values
         return jnp.mean(jnp.square(advantages))
     loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
@@ -87,6 +88,7 @@ def backpropagate_actor(optimizer, critic_model, props):
     # props[1] - discounted_rewards
     # props[2] - actions
     values      = jax.lax.stop_gradient(critic_model(props[0]))
+    values      = jnp.reshape(values, (values.shape[0],))
     advantages  = props[1] - values
     def loss_fn(model):
         action_probabilities = model(props[0])
