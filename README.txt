@@ -7,11 +7,13 @@
   On Going - Implement Categorical DQN with Jax
   - Implement discrete Soft Actor Critics with Jax
   - Implement N-step DQN with Jax
+  - Implement Hierarchical DQN
   - Implement DDPG aka Deep Deterministic Policy Gradient with Jax
   - Implement TD3 aka Twin Delayed Deep Deterministic Policy Gradient with Jax
   - Implement PPO aka Proximal Policy Optimization
   - Implement TRPO aka Trust Region Policy Optimization
-
+  - Implement SimCLRv2 with Jax
+  - Implement CURL with and compare results
   DONE - Implement SQL with Jax, aka Soft Q-Learning
   DONE - Implement A3C with Multiprocessing and Jax
   DONE - Implement A3C with Jax
@@ -26,6 +28,18 @@
   DONE - Implement Dueling DQN with Jax + PER
   DONE - Implement Dueling Double DQN with PER in jax
   DONE - Implement eGreedy Noisy Dueling Double DQN + PER
+
+
+# Other things I will learn in the near future
+
+  - What is SimCLRv2?
+  - What is CURL?
+  - What is MARL aka Multi-Agent RL?
+  - What is Concurrent Experience Replay Trajectories?
+  - What is Dec-HDRQN, Decentralized Hysteretic DQN?
+  - What is PPO-RNN?
+  - What is DQN-RNN?
+  - What is General Advantage Estimation (GAE) Buffer?
 
 
 # Dependencies
