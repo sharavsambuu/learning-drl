@@ -1,6 +1,33 @@
 # About
   This repo is just my learning journey and may contain a buggy naive implementations.
 
+# Tasks
+
+  On Going - Implement continuous Soft Actor Critics with Jax
+  On Going - Implement Categorical DQN with Jax
+  - Implement discrete Soft Actor Critics with Jax
+  - Implement N-step DQN with Jax
+  - Implement DDPG aka Deep Deterministic Policy Gradient with Jax
+  - Implement TD3 aka Twin Delayed Deep Deterministic Policy Gradient with Jax
+  - Implement PPO aka Proximal Policy Optimization
+  - Implement TRPO aka Trust Region Policy Optimization
+
+  DONE - Implement SQL with Jax, aka Soft Q-Learning
+  DONE - Implement A3C with Multiprocessing and Jax
+  DONE - Implement A3C with Jax
+  DONE - Implement online Advantage Actor Critics A2C with Jax
+  DONE - Implement episodic Advantage Actor Critics A2C with Jax
+  DONE - Implement Policy Gradient with Jax
+  DONE - Implement vanilla DQN with Jax
+  DONE - Implement vanilla DQN with Jax + PER
+  DONE - Implement Double DQN with Jax
+  DONE - Implement Double DQN with Jax + PER
+  DONE - Implement Dueling DQN with Jax
+  DONE - Implement Dueling DQN with Jax + PER
+  DONE - Implement Dueling Double DQN with PER in jax
+  DONE - Implement eGreedy Noisy Dueling Double DQN + PER
+
+
 # Dependencies
   sudo apt install libsdl2-dev swig python3-tk
   sudo apt install python-numpy cmake zlib1g-dev libjpeg-dev libboost-all-dev gcc libsdl2-dev wget unzip
