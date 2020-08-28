@@ -14,6 +14,7 @@
   - Implement TRPO aka Trust Region Policy Optimization
   - Implement SimCLRv2 with Jax
   - Implement CURL with and compare results
+  DONE - Implement A2C plus entropy bonus with Jax
   DONE - Implement SQL with Jax, aka Soft Q-Learning
   DONE - Implement A3C with Multiprocessing and Jax
   DONE - Implement A3C with Jax
