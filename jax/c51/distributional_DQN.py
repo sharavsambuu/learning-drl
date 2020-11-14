@@ -110,11 +110,11 @@ state      = env.reset()
 n_actions  = env.action_space.n
 
 
-v_min   = -10.0
-v_max   = 10.0
-n_atoms = 51
-dz      = float(v_max-v_min)/(n_atoms-1)
-z       = [v_min + i*dz for i in range(n_atoms)]
+v_min    = -10.0
+v_max    = 10.0
+n_atoms  = 51
+dz       = float(v_max-v_min)/(n_atoms-1)
+z_holder = [v_min + i*dz for i in range(n_atoms)]
 
 nn_module = DistributionalDQN.partial(n_actions=n_actions, n_atoms=n_atoms)
 _, params = nn_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
@@ -158,10 +158,16 @@ try:
                 next_states.append(batch[i][1][3])
                 dones.append      (batch[i][1][4])
 
-            z  = inference(nn       , jnp.array(next_states))
-            z_ = inference(target_nn, jnp.array(next_states))
-            print(z)
-            print(z_)
+            z            = inference(nn       , jnp.array(next_states))
+            z_           = inference(target_nn, jnp.array(next_states))
+            z_concat     = jnp.vstack(z)
+            q            = jnp.sum(jnp.multiply(z_concat, jnp.array(z_holder)), axis=1)
+            q            = q.reshape((batch_size, n_actions), order='F')
+            next_actions = np.argmax(q, axis=1)
+            print(next_actions)
+
+            #print(z)
+            #print(z_)
 
 
             episode_rewards.append(reward)
