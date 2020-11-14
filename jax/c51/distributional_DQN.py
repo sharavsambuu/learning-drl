@@ -9,6 +9,7 @@ import jax
 from jax import numpy as jnp
 import numpy as np
 
+
 debug_render  = True
 num_episodes  = 500
 batch_size    = 64
@@ -126,7 +127,7 @@ first_out = outputs[0]
 print(first_out)
 print(first_out.shape)
 
-sys.exit(0)
+#sys.exit(0)
 
 
 
@@ -145,6 +146,19 @@ try:
             if epsilon>epsilon_min:
                 epsilon = epsilon_min+(epsilon_max-epsilon_min)*math.exp(-epsilon_decay*global_steps)
             new_state, reward, done, _ = env.step(int(action))
+
+            temporal_difference = 1.0
+            per_memory.add(temporal_difference, (state, action, reward, new_state, int(done)))
+
+            batch = per_memory.sample(batch_size)
+            states, actions, rewards, next_states, dones = [], [], [], [], []
+            for i in range(batch_size):
+                states.append     (batch[i][1][0])
+                actions.append    (batch[i][1][1])
+                rewards.append    (batch[i][1][2])
+                next_states.append(batch[i][1][3])
+                dones.append      (batch[i][1][4])
+
 
             episode_rewards.append(reward)
             state = new_state
