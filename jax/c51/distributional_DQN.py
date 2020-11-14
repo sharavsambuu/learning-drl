@@ -2,16 +2,17 @@ import os
 import random
 import math
 import gym
-from collection import deque
+from collections import deque
 import flax
 import jax
 from jax import numpy as jnp
 import numpy as np
 
+debug_render  = True
 num_episodes  = 500
 batch_size    = 64
 learning_rate = 0.01
-syn_steps     = 100
+sync_steps    = 100
 memory_length = 5000
 
 epsilon       = 1.0
@@ -85,4 +86,41 @@ class PERMemory:
         self.tree.update(idx, p)
 
 
+per_memory = PERMemory(memory_length)
 
+env        = gym.make('CartPole-v1')
+state      = env.reset()
+n_actions  = env.action_space.n
+
+
+global_steps = 0
+try:
+    for episode in range(num_episodes):
+        episode_rewards = []
+        state = env.reset()
+        while True:
+            global_steps = global_steps+1
+            if np.random.rand() <= epsilon:
+                action = env.action_space.sample()
+            else:
+                action = env.action_space.sample()
+                pass
+            if epsilon>epsilon_min:
+                epsilon = epsilon_min+(epsilon_max-epsilon_min)*math.exp(-epsilon_decay*global_steps)
+            new_state, reward, done, _ = env.step(int(action))
+
+            episode_rewards.append(reward)
+            state = new_state
+
+            if global_steps%sync_steps==0:
+                pass
+
+            if debug_render:
+                env.render()
+
+            if done:
+                print("{} episode, reward : {}".format(episode, sum(episode_rewards)))
+                break
+
+finally:
+    env.close()
