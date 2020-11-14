@@ -122,12 +122,38 @@ _, params = nn_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
 nn        = flax.nn.Model(nn_module, params)
 target_nn = flax.nn.Model(nn_module, params)
 
+optimizer = flax.optim.Adam(learning_rate).create(nn)
 
 
 @jax.jit
 def inference(model, input_batch):
     return model(input_batch)
 
+
+@jax.vmap
+def categorical_cross_entropy(predicted_atoms, label_atoms):
+    # (,n_atoms)
+    # Reference : https://peltarion.com/knowledge-center/documentation/modeling-view/build-an-ai-model/loss-functions/categorical-crossentropy
+    return -jnp.sum(jnp.multiply(label_atoms, jnp.log(predicted_atoms)))
+
+@jax.vmap
+def custom_loss(predicted, label):
+    # (batch_size, n_atoms)
+    return jnp.mean(categorical_cross_entropy(predicted, label))
+
+@jax.jit
+def backpropagate(optimizer, model, states, labels):
+    def loss_fn(model):
+        predicted = model(states)
+        return jnp.mean(
+                custom_loss(
+                    jnp.vstack(predicted),
+                    jnp.vstack(labels)
+                    )
+                )
+    loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
+    optimizer       = optimizer.apply_gradient(gradients)
+    return optimizer, loss
 
 
 global_steps = 0
@@ -189,6 +215,8 @@ try:
                         labels[actions[i]][i][int(upper)] += z_[next_actions[i]][i][j]*(bj-lower)
                     pass
 
+            optimizer, loss = backpropagate(optimizer, nn, states, jnp.array(labels))
+            print("loss : ", loss)
 
 
             episode_rewards.append(reward)
