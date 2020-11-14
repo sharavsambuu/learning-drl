@@ -166,7 +166,11 @@ try:
             if np.random.rand() <= epsilon:
                 action = env.action_space.sample()
             else:
-                action = env.action_space.sample()
+                outputs  = inference(nn, jnp.array([state]))
+                z_concat = jnp.vstack(outputs)
+                q        = jnp.sum(jnp.multiply(z_concat, jnp.array(z_holder)), axis=1)
+                q        = q.reshape((1, n_actions), order='F')
+                action   = jnp.argmax(q, axis=1)[0]
                 pass
             if epsilon>epsilon_min:
                 epsilon = epsilon_min+(epsilon_max-epsilon_min)*math.exp(-epsilon_decay*global_steps)
@@ -216,13 +220,15 @@ try:
                     pass
 
             optimizer, loss = backpropagate(optimizer, nn, states, jnp.array(labels))
-            print("loss : ", loss)
+            #print("loss : ", loss)
 
 
             episode_rewards.append(reward)
             state = new_state
 
             if global_steps%sync_steps==0:
+                target_nn = target_nn.replace(params=optimizer.target.params)
+                print("Copied online weights to the target neural network.")
                 pass
 
             if debug_render:
