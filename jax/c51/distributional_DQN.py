@@ -110,24 +110,23 @@ state      = env.reset()
 n_actions  = env.action_space.n
 
 
-nn_module = DistributionalDQN.partial(n_actions=n_actions, n_atoms=51)
+v_min   = -10.0
+v_max   = 10.0
+n_atoms = 51
+dz      = float(v_max-v_min)/(n_atoms-1)
+z       = [v_min + i*dz for i in range(n_atoms)]
+
+nn_module = DistributionalDQN.partial(n_actions=n_actions, n_atoms=n_atoms)
 _, params = nn_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
 
 nn        = flax.nn.Model(nn_module, params)
 target_nn = flax.nn.Model(nn_module, params)
 
-print("nns are initialized...")
 
-outputs = nn([state])
-print("nn inference outputs")
-print(outputs)
-print("outputs len : ", len(outputs))
-print("n_actions   : ", n_actions)
-first_out = outputs[0]
-print(first_out)
-print(first_out.shape)
 
-#sys.exit(0)
+@jax.jit
+def inference(model, input_batch):
+    return model(input_batch)
 
 
 
@@ -158,6 +157,11 @@ try:
                 rewards.append    (batch[i][1][2])
                 next_states.append(batch[i][1][3])
                 dones.append      (batch[i][1][4])
+
+            z  = inference(nn       , jnp.array(next_states))
+            z_ = inference(target_nn, jnp.array(next_states))
+            print(z)
+            print(z_)
 
 
             episode_rewards.append(reward)
