@@ -146,9 +146,11 @@ try:
                 epsilon = epsilon_min+(epsilon_max-epsilon_min)*math.exp(-epsilon_decay*global_steps)
             new_state, reward, done, _ = env.step(int(action))
 
+            # Replay buffer-лүү дээжүүд нэмэх
             temporal_difference = 1.0
             per_memory.add(temporal_difference, (state, action, reward, new_state, int(done)))
 
+            # Batch ийн хэмжээгээр дээжүүд бэлтгэх
             batch = per_memory.sample(batch_size)
             states, actions, rewards, next_states, dones = [], [], [], [], []
             for i in range(batch_size):
@@ -158,16 +160,35 @@ try:
                 next_states.append(batch[i][1][3])
                 dones.append      (batch[i][1][4])
 
+            # Сургах batch-аа засан тохируулах
             z            = inference(nn       , jnp.array(next_states))
             z_           = inference(target_nn, jnp.array(next_states))
+
             z_concat     = jnp.vstack(z)
             q            = jnp.sum(jnp.multiply(z_concat, jnp.array(z_holder)), axis=1)
             q            = q.reshape((batch_size, n_actions), order='F')
-            next_actions = np.argmax(q, axis=1)
-            print(next_actions)
+            next_actions = jnp.argmax(q, axis=1)
 
-            #print(z)
-            #print(z_)
+            next_actions = np.array(next_actions)
+            z_           = np.array(z_)
+
+            labels = [np.zeros((batch_size, n_atoms)) for _ in range(n_actions)]
+            for i in range(batch_size):
+                if dones[i]:
+                    Tz = min(v_max, max(v_min, rewards[i]))
+                    bj = (Tz-v_min)/dz
+                    lower, upper = math.floor(bj), math.ceil(bj)
+                    labels[actions[i]][i][int(lower)] += (upper-bj)
+                    labels[actions[i]][i][int(upper)] += (bj-lower)
+                else:
+                    for j in range(n_atoms):
+                        Tz = min(v_max, max(v_min, rewards[i]+gamma*z_holder[j]))
+                        bj = (Tz-v_min)/dz
+                        lower, upper = math.floor(bj), math.ceil(bj)
+                        labels[actions[i]][i][int(lower)] += z_[next_actions[i]][i][j]*(upper-bj)
+                        labels[actions[i]][i][int(upper)] += z_[next_actions[i]][i][j]*(bj-lower)
+                    pass
+
 
 
             episode_rewards.append(reward)
