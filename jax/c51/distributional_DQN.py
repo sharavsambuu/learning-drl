@@ -1,4 +1,5 @@
 import os
+import sys
 import random
 import math
 import gym
@@ -70,7 +71,7 @@ class PERMemory:
         return (error+self.e)**self.a
     def add(self, error, sample):
         p = self._get_priority(error)
-        self.tree.add(p, sample) 
+        self.tree.add(p, sample)
     def sample(self, n):
         batch   = []
         segment = self.tree.total()/n
@@ -86,11 +87,47 @@ class PERMemory:
         self.tree.update(idx, p)
 
 
+class DistributionalDQN(flax.nn.Module):
+    def apply(self, x, n_actions, n_atoms):
+        dense_layer_1      = flax.nn.Dense(x, 64)
+        activation_layer_1 = flax.nn.relu(dense_layer_1)
+        dense_layer_2      = flax.nn.Dense(activation_layer_1, 64)
+        activation_layer_2 = flax.nn.relu(dense_layer_2)
+        outputs = []
+        for _ in range(n_actions):
+            atom_layer      = flax.nn.Dense(activation_layer_2, n_atoms)
+            atom_activation = flax.nn.softmax(atom_layer)
+            outputs.append(atom_activation)
+        return outputs
+
+
+
 per_memory = PERMemory(memory_length)
 
 env        = gym.make('CartPole-v1')
 state      = env.reset()
 n_actions  = env.action_space.n
+
+
+nn_module = DistributionalDQN.partial(n_actions=n_actions, n_atoms=51)
+_, params = nn_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
+
+nn        = flax.nn.Model(nn_module, params)
+target_nn = flax.nn.Model(nn_module, params)
+
+print("nns are initialized...")
+
+outputs = nn([state])
+print("nn inference outputs")
+print(outputs)
+print("outputs len : ", len(outputs))
+print("n_actions   : ", n_actions)
+first_out = outputs[0]
+print(first_out)
+print(first_out.shape)
+
+sys.exit(0)
+
 
 
 global_steps = 0
