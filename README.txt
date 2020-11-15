@@ -3,14 +3,14 @@
 
 # Tasks
 
-  On Going - Implement C51 aka Categorical DQN with Jax
+  DONE - Implement C51 aka Categorical DQN with Jax
   - Implement QR-DQN which is improvements over C51
   - Implement IQN which is improvements over previous C51 and QR-DQN
   - Implement FQF which is improvements overs C51, QR-DQN and IQN
   - Implement N-step DQN with Jax
   - Implement Rainbow
-  - Implement continuous Soft Actor Critics with Jax
-  - Implement discrete Soft Actor Critics with Jax
+  ON GOING - Implement continuous Soft Actor Critics with Jax
+  ON GOING - Implement discrete Soft Actor Critics with Jax
   - Implement Hierarchical DQN
   - Implement DDPG aka Deep Deterministic Policy Gradient with Jax
   - Implement TD3 aka Twin Delayed Deep Deterministic Policy Gradient with Jax
