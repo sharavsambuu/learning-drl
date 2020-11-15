@@ -175,11 +175,10 @@ try:
             else:
                 outputs  = inference(nn, jnp.array([state]))
                 if debug_render:
-                    #first_action_atoms  = np.multiply(np.array(outputs[0][0]), z_holder)
-                    #second_action_atoms = np.multiply(np.array(outputs[0][1]), z_holder)
                     plt.clf()
-                    plt.bar(z_holder, outputs[0][0])
-                    #plt.bar(atoms_placeholder, second_action_atoms)
+                    plt.bar(z_holder, outputs[0][0], alpha = 0.5, label='action 1', color='red')
+                    plt.bar(z_holder, outputs[0][1], alpha = 0.5, label='action 2', color='black')
+                    plt.legend(loc='upper left')
                     fig.canvas.draw()
                     pass
                 z_concat = jnp.vstack(outputs)
