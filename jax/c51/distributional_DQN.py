@@ -8,6 +8,7 @@ import flax
 import jax
 from jax import numpy as jnp
 import numpy as np
+import matplotlib.pyplot as plt
 
 
 debug_render  = True
@@ -132,7 +133,7 @@ def inference(model, input_batch):
 
 @jax.vmap
 def categorical_cross_entropy(predicted_atoms, label_atoms):
-    # (,n_atoms)
+    # (n_atoms,)
     # Reference : https://peltarion.com/knowledge-center/documentation/modeling-view/build-an-ai-model/loss-functions/categorical-crossentropy
     return -jnp.sum(jnp.multiply(label_atoms, jnp.log(predicted_atoms)))
 
@@ -156,6 +157,12 @@ def backpropagate(optimizer, model, states, labels):
     return optimizer, loss
 
 
+# for visualizing atoms
+fig = plt.gcf()
+fig.show()
+fig.canvas.draw()
+
+
 global_steps = 0
 try:
     for episode in range(num_episodes):
@@ -167,6 +174,14 @@ try:
                 action = env.action_space.sample()
             else:
                 outputs  = inference(nn, jnp.array([state]))
+                if debug_render:
+                    #first_action_atoms  = np.multiply(np.array(outputs[0][0]), z_holder)
+                    #second_action_atoms = np.multiply(np.array(outputs[0][1]), z_holder)
+                    plt.clf()
+                    plt.bar(z_holder, outputs[0][0])
+                    #plt.bar(atoms_placeholder, second_action_atoms)
+                    fig.canvas.draw()
+                    pass
                 z_concat = jnp.vstack(outputs)
                 q        = jnp.sum(jnp.multiply(z_concat, jnp.array(z_holder)), axis=1)
                 q        = q.reshape((1, n_actions), order='F')
@@ -228,7 +243,7 @@ try:
 
             if global_steps%sync_steps==0:
                 target_nn = target_nn.replace(params=optimizer.target.params)
-                print("Copied online weights to the target neural network.")
+                #print("Copied online weights to the target neural network.")
                 pass
 
             if debug_render:
