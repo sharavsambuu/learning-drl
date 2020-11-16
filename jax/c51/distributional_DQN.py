@@ -16,7 +16,7 @@ num_episodes  = 500
 batch_size    = 64
 learning_rate = 0.01
 sync_steps    = 100
-memory_length = 5000
+memory_length = 500
 
 epsilon       = 1.0
 epsilon_decay = 0.001
@@ -146,7 +146,7 @@ def custom_loss(predicted, label):
 def backpropagate(optimizer, model, states, labels):
     def loss_fn(model):
         predicted = model(states)
-        return jnp.mean(
+        return jnp.sum(
                 custom_loss(
                     jnp.vstack(predicted),
                     jnp.vstack(labels)
@@ -191,7 +191,7 @@ try:
             new_state, reward, done, _ = env.step(int(action))
 
             # Replay buffer-лүү дээжүүд нэмэх
-            temporal_difference = 1.0
+            temporal_difference = 0.0
             per_memory.add(temporal_difference, (state, action, reward, new_state, int(done)))
 
             # Batch ийн хэмжээгээр дээжүүд бэлтгэх

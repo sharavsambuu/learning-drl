@@ -7,7 +7,7 @@ import flax
 import jax
 from jax import numpy as jnp
 import numpy as np
-import pybullet_envs
+#import pybullet_envs
 
 
 debug_render  = True
