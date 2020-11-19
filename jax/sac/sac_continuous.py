@@ -130,7 +130,7 @@ class GaussianPolicy(flax.nn.Module):
             stds      = jnp.exp(log_std)
             xs        = gaussian_normal(key, mean, stds)
             actions   = flax.nn.tanh(xs)
-            log_probs = log_prob(mean, stds, xs) - jnp.log(1-jnp.square(actions)+1e-6)
+            log_probs = log_prob(mean, stds, xs) - jnp.log(1-jnp.square(actions)+1e-5)
             entropies = -jnp.sum(log_probs, axis=1, keepdims=True)
             return actions, entropies, flax.nn.tanh(mean)
         else:

@@ -153,7 +153,7 @@ try:
                         G_t = G_t + (gamma**idx)*rewards[j]*(1-dones[j])
                     discounted_rewards[t] = G_t
                 discounted_rewards = discounted_rewards - np.mean(discounted_rewards)
-                discounted_rewards = discounted_rewards / (np.std(discounted_rewards)+1e-10)
+                discounted_rewards = discounted_rewards / (np.std(discounted_rewards)+1e-5) # https://twitter.com/araffin2/status/1329382226421837825
 
                 actor_optimizer, _  = backpropagate_actor(
                     actor_optimizer,
