@@ -6,21 +6,12 @@
 # Tasks
 
 
-    - Implement Rainbow
-    - Implement SimCLRv2 with Jax
-    - Implement CURL with and compare results
-
 
 # Other things I will learn in the near future
 
     - What is SimCLRv2?
     - What is CURL?
     - What is MARL aka Multi-Agent RL?
-    - What is Concurrent Experience Replay Trajectories?
-    - What is Dec-HDRQN, Decentralized Hysteretic DQN?
-    - What is PPO-RNN?
-    - What is DQN-RNN?
-    - What is General Advantage Estimation (GAE) Buffer?
     - PPO's role in LLM alignments
 
 
