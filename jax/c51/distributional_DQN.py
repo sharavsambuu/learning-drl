@@ -11,12 +11,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-debug_render  = True
+debug_render  = False 
 num_episodes  = 500
 batch_size    = 64
-learning_rate = 0.01
+learning_rate = 0.001
 sync_steps    = 100
-memory_length = 500
+memory_length = 1000  # Increased memory length for better stability
 
 epsilon       = 1.0
 epsilon_decay = 0.001
@@ -103,7 +103,6 @@ class DistributionalDQN(flax.nn.Module):
         return outputs
 
 
-
 per_memory = PERMemory(memory_length)
 
 env        = gym.make('CartPole-v1')
@@ -115,7 +114,7 @@ v_min    = -10.0
 v_max    = 10.0
 n_atoms  = 51
 dz       = float(v_max-v_min)/(n_atoms-1)
-z_holder = [v_min + i*dz for i in range(n_atoms)]
+z_holder = jnp.array([v_min + i*dz for i in range(n_atoms)]) # Use JAX array
 
 nn_module = DistributionalDQN.partial(n_actions=n_actions, n_atoms=n_atoms)
 _, params = nn_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
@@ -128,33 +127,78 @@ optimizer = flax.optim.Adam(learning_rate).create(nn)
 
 @jax.jit
 def inference(model, input_batch):
-    return model(input_batch)
+    outputs = model(input_batch)
+    # outputs is a list of n_actions arrays, each (n_atoms,)
+    # Convert list of arrays to a single array (n_actions, n_atoms)
+    return jnp.stack(outputs)
 
-
-@jax.vmap
-def categorical_cross_entropy(predicted_atoms, label_atoms):
-    # (n_atoms,)
-    # Reference : https://peltarion.com/knowledge-center/documentation/modeling-view/build-an-ai-model/loss-functions/categorical-crossentropy
-    return -jnp.sum(jnp.multiply(label_atoms, jnp.log(predicted_atoms)))
-
-@jax.vmap
-def custom_loss(predicted, label):
-    # (batch_size, n_atoms)
-    return jnp.mean(categorical_cross_entropy(predicted, label))
 
 @jax.jit
-def backpropagate(optimizer, model, states, labels):
+def backpropagate(optimizer, model, target_model, states, actions, rewards, next_states, dones):
     def loss_fn(model):
-        predicted = model(states)
-        return jnp.sum(
-                custom_loss(
-                    jnp.vstack(predicted),
-                    jnp.vstack(labels)
-                    )
-                )
-    loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
+        predicted_distributions = inference(model, states) # (batch_size, n_actions, n_atoms)
+        target_distributions  = inference(target_model, next_states) # (batch_size, n_actions, n_atoms)
+
+        # Calculate Quantile Regression Huber loss for each action in the batch
+        loss = jnp.mean(
+            jax.vmap(categorical_loss_fn)(
+                predicted_distributions, # Predicted distributions for all actions in current state
+                target_distributions,    # Target distributions for all actions in next state
+                actions,                 # Actions taken in current states
+                rewards,                 # Rewards received
+                dones                    # Done flags
+            )(jnp.arange(batch_size))    # Vmap over batch dimension
+        )
+        return loss
+
+    gradients, loss = jax.value_and_grad(loss_fn)(optimizer.target)
     optimizer       = optimizer.apply_gradient(gradients)
     return optimizer, loss
+
+@jax.jit # Calculate categorical cross entropy loss for a single sample in the batch
+def categorical_loss_fn(predicted_distributions, target_distributions, action, reward, done, index):
+    # Get predicted distribution for the taken action: (n_atoms,)
+    predicted_action_dist = predicted_distributions[index, action]
+    # Calculate the projected distribution for the taken action: (n_atoms,)
+    projected_dist = projection_distribution(index, reward, done, target_distributions, action)
+    # Categorical cross-entropy loss
+    return -jnp.sum(projected_dist * jnp.log(predicted_action_dist + 1e-6)) # Adding small epsilon for numerical stability
+
+@jax.jit # Projection function (C51 projection)
+def projection_distribution(index, reward, done, next_state_distributions, action):
+    # Initialize projection distribution to zero: (n_atoms,)
+    projected_distribution = jnp.zeros((n_atoms,))
+
+    if done: # Terminal state
+        Tz = jnp.clip(reward, v_min, v_max)
+        bj = (Tz - v_min) / dz
+        lower_bound = jnp.int32(jnp.floor(bj))
+        upper_bound = jnp.int32(jnp.ceil(bj))
+        fraction_upper = bj - lower_bound
+        fraction_lower = 1.0 - fraction_upper
+
+        projected_distribution = projected_distribution.at[lower_bound].add(fraction_lower)
+        projected_distribution = projected_distribution.at[upper_bound].add(fraction_upper)
+    else: # Non-terminal state
+        next_state_dist = next_state_distributions[index] # (n_actions, n_atoms)
+        # Compute expected Q-values for next state using target network: (n_actions,)
+        q_values = jnp.sum(next_state_dist * z_holder, axis=1)
+        # Select best action based on expected Q-values: scalar
+        best_next_action = jnp.argmax(q_values)
+        # Get the distribution of the best next action: (n_atoms,)
+        next_state_best_action_dist = next_state_dist[best_next_action]
+
+        for atom_index in range(n_atoms):
+            Tz = jnp.clip(reward + gamma * z_holder[atom_index], v_min, v_max)
+            bj = (Tz - v_min) / dz
+            lower_bound = jnp.int32(jnp.floor(bj))
+            upper_bound = jnp.int32(jnp.ceil(bj))
+            fraction_upper = bj - lower_bound
+            fraction_lower = 1.0 - fraction_upper
+
+            projected_distribution = projected_distribution.at[lower_bound].add(fraction_lower * next_state_best_action_dist[atom_index])
+            projected_distribution = projected_distribution.at[upper_bound].add(fraction_upper * next_state_best_action_dist[atom_index])
+    return projected_distribution
 
 
 # for visualizing atoms
@@ -173,68 +217,77 @@ try:
             if np.random.rand() <= epsilon:
                 action = env.action_space.sample()
             else:
-                outputs  = inference(nn, jnp.array([state]))
+                outputs  = inference(nn, jnp.array([state])) # (n_actions, n_atoms)
                 if debug_render:
                     plt.clf()
-                    plt.bar(z_holder, outputs[0][0], alpha = 0.5, label='action 1', color='red')
-                    plt.bar(z_holder, outputs[0][1], alpha = 0.5, label='action 2', color='black')
+                    plt.bar(z_holder, outputs[0], alpha = 0.5, label='action 1', color='red') # outputs[0] is distribution for action 0
+                    plt.bar(z_holder, outputs[1], alpha = 0.5, label='action 2', color='black') # outputs[1] is distribution for action 1
                     plt.legend(loc='upper left')
                     fig.canvas.draw()
                     pass
-                z_concat = jnp.vstack(outputs)
-                q        = jnp.sum(jnp.multiply(z_concat, jnp.array(z_holder)), axis=1)
-                q        = q.reshape((1, n_actions), order='F')
-                action   = jnp.argmax(q, axis=1)[0]
-                pass
+                q        = jnp.sum(outputs * z_holder, axis=1) # Expected Q-values: (n_actions,)
+                action   = int(jnp.argmax(q))
+
             if epsilon>epsilon_min:
                 epsilon = epsilon_min+(epsilon_max-epsilon_min)*math.exp(-epsilon_decay*global_steps)
             new_state, reward, done, _ = env.step(int(action))
 
-            # Replay buffer-лүү дээжүүд нэмэх
-            temporal_difference = 0.0
-            per_memory.add(temporal_difference, (state, action, reward, new_state, int(done)))
+            # Calculate TD Error for PER - using Categorical Cross Entropy as a proxy for error
+            target_distributions_next_state = inference(target_nn, jnp.array([new_state])) # (1, n_actions, n_atoms)
+            predicted_distributions_current_state = inference(nn, jnp.array([state])) # (1, n_actions, n_atoms)
+
+            td_error = float(categorical_loss_fn(
+                predicted_distributions_current_state[0], # Take distribution for the single state (n_actions, n_atoms)
+                target_distributions_next_state[0], # Take distribution for the single next state (n_actions, n_atoms)
+                action,
+                reward,
+                done,
+                0 # index 0 for single sample
+            ))
+
+            per_memory.add(td_error, (state, action, reward, new_state, int(done)))
 
             # Batch ийн хэмжээгээр дээжүүд бэлтгэх
             batch = per_memory.sample(batch_size)
             states, actions, rewards, next_states, dones = [], [], [], [], []
+            idxs = [] # Indices for PER update
             for i in range(batch_size):
+                idxs.append      (batch[i][0]) # SumTree index
                 states.append     (batch[i][1][0])
                 actions.append    (batch[i][1][1])
                 rewards.append    (batch[i][1][2])
                 next_states.append(batch[i][1][3])
                 dones.append      (batch[i][1][4])
 
-            # Сургах batch-аа засан тохируулах
-            z            = inference(nn       , jnp.array(next_states))
-            z_           = inference(target_nn, jnp.array(next_states))
+            # Train step - Backpropagation
+            optimizer, loss = backpropagate(
+                optimizer, nn, target_nn,
+                jnp.array(states),
+                jnp.array(actions),
+                jnp.array(rewards),
+                jnp.array(next_states),
+                jnp.array(dones)
+            )
 
-            z_concat     = jnp.vstack(z)
-            q            = jnp.sum(jnp.multiply(z_concat, jnp.array(z_holder)), axis=1)
-            q            = q.reshape((batch_size, n_actions), order='F')
-            next_actions = jnp.argmax(q, axis=1)
 
-            next_actions = np.array(next_actions)
-            z_           = np.array(z_)
-
-            labels = [np.zeros((batch_size, n_atoms)) for _ in range(n_actions)]
+            # Update priorities in PER memory
+            predicted_distributions_batch = inference(nn, jnp.array(states)) # (batch_size, n_actions, n_atoms)
+            new_priorities = np.zeros(batch_size)
             for i in range(batch_size):
-                if dones[i]:
-                    Tz = min(v_max, max(v_min, rewards[i]))
-                    bj = (Tz-v_min)/dz
-                    lower, upper = math.floor(bj), math.ceil(bj)
-                    labels[actions[i]][i][int(lower)] += (upper-bj)
-                    labels[actions[i]][i][int(upper)] += (bj-lower)
-                else:
-                    for j in range(n_atoms):
-                        Tz = min(v_max, max(v_min, rewards[i]+gamma*z_holder[j]))
-                        bj = (Tz-v_min)/dz
-                        lower, upper = math.floor(bj), math.ceil(bj)
-                        labels[actions[i]][i][int(lower)] += z_[next_actions[i]][i][j]*(upper-bj)
-                        labels[actions[i]][i][int(upper)] += z_[next_actions[i]][i][j]*(bj-lower)
-                    pass
+                target_distributions_batch = inference(target_nn, jnp.array([next_states[i]])) # (1, n_actions, n_atoms)
+                td_error_sample = float(categorical_loss_fn(
+                    predicted_distributions_batch[i], # Distribution for the i-th state in batch (n_actions, n_atoms)
+                    target_distributions_batch[0], # Distribution for the i-th next state (n_actions, n_atoms)
+                    actions[i],
+                    rewards[i],
+                    dones[i],
+                    0 # dummy index as vmap is removed
+                ))
+                new_priorities[i] = td_error_sample
 
-            optimizer, loss = backpropagate(optimizer, nn, states, jnp.array(labels))
-            #print("loss : ", loss)
+
+            for i in range(batch_size):
+                per_memory.update(idxs[i], new_priorities[i])
 
 
             episode_rewards.append(reward)
