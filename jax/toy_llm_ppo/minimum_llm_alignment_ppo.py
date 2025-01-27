@@ -1,9 +1,21 @@
 #
 #
-#  The goal is to teach a little LLM to write happy sentences.
+# The goal is to teach a little LLM to write happy sentences.
 #
 #
-# Our Reward Model is like a "positivity meter" for sentences
+# RL "State" => Text context: The "state" in RL terms represents the context of the sentence being generated. 
+# It's how much of the sentence has been written so far.
+#
+# Critic's State => RNN's Hidden State: The Critic network uses the RNN's hidden state as 
+# its "state" input to evaluate the sentence's progress.
+#
+# Actor's Action => Character Choice: The "action" the Toy LLM takes at each 
+# step is choosing the next character to write from our vocabulary.
+#
+# PPO Teaches "Positive Writing": We use PPO to train the Toy LLM to generate 
+# sentences that get high "positivity scores" from our simple Reward Model.
+#
+# Reward Model is like a "positivity meter" for sentences
 # It doesn't compare our robot's sentence to some perfect "positive sentence." Instead, 
 # it just reads the sentence and gives it a score based on how "positive" it sounds, 
 # according to its own simple rules.
@@ -27,12 +39,6 @@
 #   Reward Score: 0
 #
 #
-# In our character-level Toy LLM:
-#
-#   The "action" is the choice of a character to generate next.
-#
-#
-#z
 #
 
 
@@ -54,9 +60,9 @@ debug_render    = False
 num_episodes    = 1000
 learning_rate   = 0.001
 gamma           = 0.99
-gae_lambda      = 0.95
-clip_ratio      = 0.2
-policy_epochs   = 10
+gae_lambda      = 0.95  # GAE Lambda Hyperparameter
+clip_ratio      = 0.2   # PPO Clip Ratio Hyperparameter
+policy_epochs   = 10    # PPO Policy Epochs Hyperparameter
 batch_size      = 32
 mini_batch_size = 16
 sync_steps      = 100
@@ -134,8 +140,8 @@ def reward_model(sentence): # Synthetic Reward Model
 
 # Generalized Advantage Estimation (GAE) function
 def gae_advantage(rewards, values, last_value, gamma, gae_lambda): 
-    values_np     = np.array(values + [last_value])
-    advantages    = np.zeros_like(rewards, dtype=np.float32)
+    values_np    = np.array(values + [last_value])
+    advantages   = np.zeros_like(rewards, dtype=np.float32)
     last_gae_lam = 0
     for t in reversed(range(len(rewards))):
         delta         = rewards[t] + gamma * values_np[t + 1] - values_np[t]
