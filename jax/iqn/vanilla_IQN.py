@@ -1,5 +1,5 @@
 #
-# IQN which is improvements over previous C51 and QR-DQN
+# IQN aka Implicit Quantile Networks which is improvements over previous C51 and QR-DQN
 #
 #   IQN is like making the quantile prediction process "smarter and more efficient." 
 #   Instead of always predicting the same fixed set of quantiles (QR-DQN), 

@@ -1,5 +1,5 @@
 #
-# QR-DQN which is improvements over C51
+# QR-DQN aka Quantile Regression DQN which is improvements over C51
 #
 #   QR-DQN is like upgrading from a histogram-based view of value distributions (C51) to a 
 #   more flexible and adaptable quantile-based view. By learning to predict quantiles directly 
