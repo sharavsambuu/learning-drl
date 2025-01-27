@@ -1,53 +1,30 @@
 # About
-  This repo is just my learning journey and may contain a buggy naive implementations.
+
+    This repo is just my learning journey and may contain a buggy naive implementations.
+
 
 # Tasks
 
-  DONE - Implement C51 aka Categorical DQN with Jax
-  - Implement QR-DQN which is improvements over C51
-  - Implement IQN which is improvements over previous C51 and QR-DQN
-  - Implement FQF which is improvements overs C51, QR-DQN and IQN
-  - Implement N-step DQN with Jax
-  - Implement Rainbow
-  ON GOING - Implement continuous Soft Actor Critics with Jax
-  ON GOING - Implement discrete Soft Actor Critics with Jax
-  - Implement Hierarchical DQN
-  - Implement DDPG aka Deep Deterministic Policy Gradient with Jax
-  - Implement TD3 aka Twin Delayed Deep Deterministic Policy Gradient with Jax
-  - Implement PPO aka Proximal Policy Optimization
-  - Implement TRPO aka Trust Region Policy Optimization
-  - Implement SimCLRv2 with Jax
-  - Implement CURL with and compare results
-  DONE - Implement A2C plus entropy bonus with Jax
-  DONE - Implement SQL with Jax, aka Soft Q-Learning
-  DONE - Implement A3C with Multiprocessing and Jax
-  DONE - Implement A3C with Jax
-  DONE - Implement online Advantage Actor Critics A2C with Jax
-  DONE - Implement episodic Advantage Actor Critics A2C with Jax
-  DONE - Implement Policy Gradient with Jax
-  DONE - Implement vanilla DQN with Jax
-  DONE - Implement vanilla DQN with Jax + PER
-  DONE - Implement Double DQN with Jax
-  DONE - Implement Double DQN with Jax + PER
-  DONE - Implement Dueling DQN with Jax
-  DONE - Implement Dueling DQN with Jax + PER
-  DONE - Implement Dueling Double DQN with PER in jax
-  DONE - Implement eGreedy Noisy Dueling Double DQN + PER
+
+    - Implement Rainbow
+    - Implement SimCLRv2 with Jax
+    - Implement CURL with and compare results
 
 
 # Other things I will learn in the near future
 
-  - What is SimCLRv2?
-  - What is CURL?
-  - What is MARL aka Multi-Agent RL?
-  - What is Concurrent Experience Replay Trajectories?
-  - What is Dec-HDRQN, Decentralized Hysteretic DQN?
-  - What is PPO-RNN?
-  - What is DQN-RNN?
-  - What is General Advantage Estimation (GAE) Buffer?
+    - What is SimCLRv2?
+    - What is CURL?
+    - What is MARL aka Multi-Agent RL?
+    - What is Concurrent Experience Replay Trajectories?
+    - What is Dec-HDRQN, Decentralized Hysteretic DQN?
+    - What is PPO-RNN?
+    - What is DQN-RNN?
+    - What is General Advantage Estimation (GAE) Buffer?
+    - PPO's role in LLM alignments
 
 
-#
+# Algo names and intuition table
 
 
 | Algorithm Name                     | Intuitive Summary                                                                                                                                                                                                                                                        |
