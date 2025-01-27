@@ -9,9 +9,6 @@
 
 # Other things I will learn in the near future
 
-    - What is SimCLRv2?
-    - What is CURL?
-    - What is MARL aka Multi-Agent RL?
     - PPO's role in LLM alignments
 
 
