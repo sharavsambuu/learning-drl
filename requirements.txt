@@ -5,3 +5,4 @@ jaxlib
 flax
 ray
 matplotlib
+tk
