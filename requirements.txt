@@ -1,4 +1,5 @@
-gym
+gymnasium
+gymnasium[classic-control]
 jax
 jaxlib
 flax
