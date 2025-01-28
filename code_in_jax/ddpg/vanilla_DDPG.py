@@ -14,27 +14,25 @@ from jax import numpy as jnp
 import numpy as np
 import optax
 
-debug_render  = True
-num_episodes  = 500
-learning_rate = 0.0005
-gamma         = 0.99
-tau           = 0.005  # Soft update coefficient
-buffer_size   = 10000
-batch_size    = 64
+debug_render    = True
+num_episodes    = 500
+learning_rate   = 0.0005
+gamma           = 0.99
+tau             = 0.005  # Soft update coefficient
+buffer_size     = 10000
+batch_size      = 64
 actor_noise_std = 0.1  # Standard deviation of actor exploration noise
 
 class OUProcess(object):  # Ornstein-Uhlenbeck process for action noise
     def __init__(self, theta, mu, sigma, dt, x0=None):
         self.theta = theta
-        self.mu = mu
+        self.mu    = mu
         self.sigma = sigma
-        self.dt = dt
-        self.x0 = x0
+        self.dt    = dt
+        self.x0    = x0
         self.reset()
-
     def reset(self):
         self.x_prev = self.x0 if self.x0 is not None else np.zeros_like(self.mu)
-
     def sample(self):
         x = self.x_prev + self.theta * (self.mu - self.x_prev) * self.dt + self.sigma * np.sqrt(self.dt) * np.random.normal(size=self.mu.shape)
         self.x_prev = x
@@ -42,7 +40,6 @@ class OUProcess(object):  # Ornstein-Uhlenbeck process for action noise
 
 class ActorNetwork(nn.Module):  # Deterministic Actor Network
     action_space_high: float
-
     @nn.compact
     def __call__(self, x):
         x = nn.Dense(features=64)(x)
@@ -64,28 +61,30 @@ class CriticNetwork(nn.Module):  # Q-Value Critic Network
         output = nn.Dense(features=1)(x)  # Output single Q-value
         return output
 
-env   = gym.make('Pendulum-v1', render_mode='human' if debug_render else None)  # Continuous action space environment
-state, info = env.reset()
-state = np.array(state, dtype=np.float32) # ensure state is float32
+
+env               = gym.make('Pendulum-v1', render_mode='human' if debug_render else None)  # Continuous action space environment
+state, info       = env.reset()
+state             = np.array(state, dtype=np.float32) # ensure state is float32
 action_space_high = env.action_space.high[0]  # Get action space max value
 
-actor_module = ActorNetwork(action_space_high=action_space_high)
-actor_params = actor_module.init(jax.random.PRNGKey(0), jnp.asarray([state]))['params']
-actor_model_params = actor_params
-target_actor_model_params = actor_params
+actor_module               = ActorNetwork(action_space_high=action_space_high)
+actor_params               = actor_module.init(jax.random.PRNGKey(0), jnp.asarray([state]))['params']
+actor_model_params         = actor_params
+target_actor_model_params  = actor_params
 
-critic_module = CriticNetwork()
-critic_params = critic_module.init(jax.random.PRNGKey(0), jnp.asarray([state]), jnp.zeros((1, *env.action_space.shape)))['params']  # Critic takes state and action
-critic_model_params = critic_params
+critic_module              = CriticNetwork()
+critic_params              = critic_module.init(jax.random.PRNGKey(0), jnp.asarray([state]), jnp.zeros((1, *env.action_space.shape)))['params']  # Critic takes state and action
+critic_model_params        = critic_params
 target_critic_model_params = critic_params
 
-actor_optimizer_def = optax.adam(learning_rate)
-actor_optimizer_state = actor_optimizer_def.init(actor_model_params)
+actor_optimizer_def    = optax.adam(learning_rate)
+actor_optimizer_state  = actor_optimizer_def.init(actor_model_params)
 
-critic_optimizer_def = optax.adam(learning_rate)
+critic_optimizer_def   = optax.adam(learning_rate)
 critic_optimizer_state = critic_optimizer_def.init(critic_model_params)
 
 replay_buffer = deque(maxlen=buffer_size)  # Experience Replay Buffer
+
 
 @jax.jit
 def actor_inference(params, x):
@@ -100,16 +99,16 @@ def update_critic(critic_optimizer_state, actor_model_params, critic_model_param
     states, actions, rewards, next_states, dones = batch
 
     def critic_loss_fn(critic_params):
-        next_actions = actor_module.apply({'params': target_actor_model_params}, next_states)  # Target actor network to get next actions
+        next_actions    = actor_module.apply({'params': target_actor_model_params}, next_states)  # Target actor network to get next actions
         target_q_values = critic_module.apply({'params': target_critic_model_params}, next_states, next_actions).reshape(-1)  # Target critic network to get target Q-values
-        target_values = rewards + gamma * (1 - dones) * target_q_values  # Bellman equation for target values
-        q_values = critic_module.apply({'params': critic_params}, states, actions).reshape(-1)  # Current critic Q-values
-        critic_loss = jnp.mean((q_values - target_values)**2)  # MSE loss
+        target_values   = rewards + gamma * (1 - dones) * target_q_values  # Bellman equation for target values
+        q_values        = critic_module.apply({'params': critic_params}, states, actions).reshape(-1)  # Current critic Q-values
+        critic_loss     = jnp.mean((q_values - target_values)**2)  # MSE loss
         return critic_loss
 
-    loss, gradients = jax.value_and_grad(critic_loss_fn)(critic_model_params)
+    loss, gradients              = jax.value_and_grad(critic_loss_fn)(critic_model_params)
     updates, new_optimizer_state = critic_optimizer_def.update(gradients, critic_optimizer_state, critic_model_params)
-    new_critic_model_params = optax.apply_updates(critic_model_params, updates)
+    new_critic_model_params      = optax.apply_updates(critic_model_params, updates)
     return new_optimizer_state, new_critic_model_params, loss
 
 @jax.jit
