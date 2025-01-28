@@ -1,87 +1,92 @@
 import os
 import random
 import math
-import gym
-
-import flax
+import gymnasium  as gym
+import flax.linen as nn
 import jax
 from jax import numpy as jnp
 import numpy as np
-import numpy
-
-numpy.set_printoptions(precision=15)
+import optax
 
 debug_render  = True
 debug         = False
 num_episodes  = 600
 learning_rate = 0.001
-gamma         = 0.99 # discount factor
+gamma         = 0.99   # discount factor
 
+class PolicyNetwork(nn.Module): 
+    n_actions: int 
 
-class PolicyNetwork(flax.nn.Module):
-    def apply(self, x, n_actions):
-        dense_layer_1      = flax.nn.Dense(x, 64)
-        activation_layer_1 = flax.nn.relu(dense_layer_1)
-        dense_layer_2      = flax.nn.Dense(activation_layer_1, 32)
-        activation_layer_2 = flax.nn.relu(dense_layer_2)
-        output_dense_layer = flax.nn.Dense(activation_layer_2, n_actions)
-        output_layer       = flax.nn.softmax(output_dense_layer)
+    @nn.compact 
+    def __call__(self, x): 
+        x = nn.Dense(features=64)(x) 
+        activation_layer_1 = nn.relu(x)
+        dense_layer_2      = nn.Dense(features=32)(activation_layer_1) 
+        activation_layer_2 = nn.relu(dense_layer_2)
+        output_dense_layer = nn.Dense(features=self.n_actions)(activation_layer_2) 
+        output_layer       = nn.softmax(output_dense_layer)
         return output_layer
 
+env   = gym.make('CartPole-v1', render_mode='human') 
+state, info = env.reset() 
+state = np.array(state, dtype=np.float32) 
 
-env   = gym.make('CartPole-v1')
-state = env.reset()
+n_actions             = env.action_space.n
+pg_module             = PolicyNetwork(n_actions=n_actions) 
+dummy_input           = jnp.zeros(state.shape)
+params                = pg_module.init(jax.random.PRNGKey(0), dummy_input)['params'] 
+policy_network_params = params 
+optimizer_def         = optax.adam(learning_rate) 
+optimizer_state       = optimizer_def.init(policy_network_params) 
 
-n_actions        = env.action_space.n
-
-pg_module        = PolicyNetwork.partial(n_actions=n_actions)
-_, params        = pg_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
-policy_network   = flax.nn.Model(pg_module, params)
-
-optimizer        = flax.optim.Adam(learning_rate).create(policy_network)
 
 @jax.jit
-def policy_inference(model, x):
-    action_probabilities = model(x)
-    return action_probabilities
+def policy_inference(params, x): 
+    return pg_module.apply({'params': params}, x) 
 
 @jax.vmap
-def gather(action_probabilities, action_index):
-    return action_probabilities[action_index]
+def gather(probability_vec, action_index):
+    return probability_vec[action_index]
 
 @jax.jit
-def train_step(optimizer, batch):
+def train_step(optimizer_state, policy_network_params, batch): 
     # batch[0] - states
     # batch[1] - actions
     # batch[2] - discounted rewards
-    def loss_fn(model):
-        action_probabilities_list   = model(batch[0])
+    def loss_fn(params):
+        action_probabilities_list   = pg_module.apply({'params': params}, batch[0]) 
         picked_action_probabilities = gather(action_probabilities_list, batch[1])
         log_probabilities           = jnp.log(picked_action_probabilities)
         losses                      = jnp.multiply(log_probabilities, batch[2])
         return -jnp.sum(losses)
-    loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
-    optimizer       = optimizer.apply_gradient(gradients)
-    return optimizer, loss
+    loss, gradients = jax.value_and_grad(loss_fn)(policy_network_params)
+    updates, new_optimizer_state = optimizer_def.update(gradients, optimizer_state, policy_network_params) 
+    new_policy_network_params = optax.apply_updates(policy_network_params, updates) 
+    return new_optimizer_state, new_policy_network_params, loss 
+
 
 global_steps = 0
 try:
     for episode in range(num_episodes):
-        states, actions, rewards = [], [], []
-        state = env.reset()
+        states, actions, rewards, dones = [], [], [], [] 
+        state, info = env.reset() 
+        state       = np.array(state, dtype=np.float32) 
         while True:
             global_steps = global_steps+1
 
-            action_probabilities  = policy_inference(optimizer.target, jnp.asarray([state]))[0]
-            action_probabilities  = np.array(action_probabilities)
+            action_probabilities  = policy_inference(policy_network_params, jnp.asarray([state])) 
+            action_probabilities  = np.array(action_probabilities[0])
             action_probabilities /= action_probabilities.sum()
             action                = np.random.choice(n_actions, p=action_probabilities)
 
-            new_state, reward, done, _ = env.step(int(action))
+            new_state, reward, terminated, truncated, info = env.step(int(action)) # env.step returns new values
+            done = terminated or truncated
+            new_state = np.array(new_state, dtype=np.float32) # ensure next_state is float32
 
-            states.append(state)
+            states .append(state )
             actions.append(action)
             rewards.append(reward)
+            dones  .append(done  ) 
 
             state = new_state
 
@@ -95,13 +100,15 @@ try:
                 for t in range(0, episode_length):
                     G_t = 0
                     for idx, j in enumerate(range(t, episode_length)):
-                        G_t = G_t + (gamma**idx)*rewards[j]
+                        G_t = G_t + (gamma**idx)*rewards[j]*(1-dones[j]) 
                     discounted_rewards[t] = G_t
                 discounted_rewards = discounted_rewards - np.mean(discounted_rewards)
-                discounted_rewards = discounted_rewards / (np.std(discounted_rewards)+1e-5) # https://twitter.com/araffin2/status/1329382226421837825
+                discounted_rewards = discounted_rewards / (np.std(discounted_rewards)+1e-5) 
 
-                print("Training...")
-                optimizer, loss = train_step(optimizer, (
+                optimizer_state, policy_network_params, loss = train_step( 
+                    optimizer_state,
+                    policy_network_params,
+                    (
                         jnp.asarray(states),
                         jnp.asarray(actions),
                         jnp.asarray(discounted_rewards)
