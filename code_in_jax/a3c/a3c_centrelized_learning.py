@@ -23,7 +23,7 @@ import ray
 try:
     ray.init(num_cpus=4, num_gpus=1)
 except:
-    ray.init()
+    ray.init(num_cpus=4)
 
 debug_render  = False
 num_episodes  = 1500
