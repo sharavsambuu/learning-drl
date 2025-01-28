@@ -12,34 +12,35 @@ import numpy as np
 import optax
 import matplotlib.pyplot as plt
 
-
-debug_render  = True
-num_episodes  = 500
-batch_size    = 64
-learning_rate = 0.0001
-sync_steps    = 100
+debug_render = True  # Enable rendering
+num_episodes = 500
+batch_size = 64
+learning_rate = 0.0005 # Increased learning rate
+sync_steps = 50 # More frequent target network sync
 memory_length = 4000
-n_quantiles   = 32     # Number of quantiles
-n_tau_samples = 64     # Number of tau samples for loss calculation
-epsilon       = 1.0
-epsilon_decay = 0.001
-epsilon_max   = 1.0
-epsilon_min   = 0.01
-gamma         = 0.99
-hidden_size   = 64
-
+n_quantiles = 32  # Number of quantiles
+n_tau_samples = 64 # Number of tau samples for loss calculation
+epsilon = 1.0
+epsilon_decay = 0.00005 # Slower epsilon decay
+epsilon_max = 1.0
+epsilon_min = 0.01
+gamma = 0.99
+hidden_size = 128      # Increased hidden size
 
 class SumTree:
     write = 0
+
     def __init__(self, capacity):
         self.capacity = capacity
         self.tree = np.zeros(2 * capacity - 1)
         self.data = np.zeros(capacity, dtype=object)
+
     def _propagate(self, idx, change):
         parent = (idx - 1) // 2
         self.tree[parent] += change
         if parent != 0:
             self._propagate(parent, change)
+
     def _retrieve(self, idx, s):
         left = 2 * idx + 1
         right = left + 1
@@ -49,8 +50,10 @@ class SumTree:
             return self._retrieve(left, s)
         else:
             return self._retrieve(right, s - self.tree[left])
+
     def total(self):
         return self.tree[0]
+
     def add(self, p, data):
         idx = self.write + self.capacity - 1
         self.data[self.write] = data
@@ -58,25 +61,34 @@ class SumTree:
         self.write += 1
         if self.write >= self.capacity:
             self.write = 0
+
     def update(self, idx, p):
         change = p - self.tree[idx]
         self.tree[idx] = p
         self._propagate(idx, change)
+
     def get(self, s):
         idx = self._retrieve(0, s)
         dataIdx = idx - self.capacity + 1
-        return (idx, self.tree[idx], self.data[dataIdx])
+        data = self.data[dataIdx]
+        print(f"SumTree.get: data type={type(data)}, data={data}") # Debugging
+        return (idx, self.tree[idx], data)
 
 class PERMemory:
     e = 0.01
     a = 0.6
+
     def __init__(self, capacity):
         self.tree = SumTree(capacity)
+
     def _get_priority(self, error):
         return (error + self.e) ** self.a
+
     def add(self, error, sample):
         p = self._get_priority(error)
-        self.tree.add(p, sample)
+        print(f"PERMemory.add: sample type={type(sample)}, sample={sample}") # Debugging
+        self.tree.add(p, sample)  # Add sample directly as a tuple
+
     def sample(self, n):
         batch = []
         segment = self.tree.total() / n
@@ -85,17 +97,17 @@ class PERMemory:
             b = segment * (i + 1)
             s = random.uniform(a, b)
             (idx, p, data) = self.tree.get(s)
-            batch.append((idx, data))
+            batch.append((idx, data))  # data should already be the sample tuple
         return batch
+
     def update(self, idx, error):
         p = self._get_priority(error)
         self.tree.update(idx, p)
 
-
 # FQF Network
 class FQFNetwork(nn.Module):
-    n_actions    : int
-    n_quantiles  : int
+    n_actions: int
+    n_quantiles: int
     n_tau_samples: int
 
     @nn.compact
@@ -107,13 +119,13 @@ class FQFNetwork(nn.Module):
         state_embedding = nn.relu(x)
 
         # Fraction proposal network
-        fraction_layer  = nn.Dense(features=self.n_quantiles)(state_embedding)
+        fraction_layer = nn.Dense(features=self.n_quantiles)(state_embedding)
         fraction_logits = nn.relu(fraction_layer)
-        tau_hats        = nn.softmax(fraction_logits, axis=-1)
-        tau_hats        = jnp.cumsum(tau_hats, axis=-1)
+        tau_hats = nn.softmax(fraction_logits, axis=-1)
+        tau_hats = jnp.cumsum(tau_hats, axis=-1)
 
         # generate tau_i
-        tau_0    = jnp.zeros((x.shape[0], 1))
+        tau_0 = jnp.zeros((x.shape[0], 1))
         tau_hats = jnp.concatenate([tau_0, tau_hats], axis=-1)
 
         tau_i = (tau_hats[:, 1:] + tau_hats[:, :-1]) / 2.
@@ -134,26 +146,23 @@ class FQFNetwork(nn.Module):
 
         return quantile_values, tau_hats
 
-
-
 # Create environment
-env         = gym.make('CartPole-v1', render_mode="human")
+env = gym.make('CartPole-v1', render_mode="human") # Add render_mode here
 state, info = env.reset()
 
 # Instantiate network and optimizer
-n_actions               = env.action_space.n
-fqf_module              = FQFNetwork(n_actions=n_actions, n_quantiles=n_quantiles, n_tau_samples=n_tau_samples)
-dummy_state             = jnp.zeros_like(state)
-params                  = fqf_module.init(jax.random.PRNGKey(0), jnp.expand_dims(dummy_state, axis=0))
-q_network_params        = params['params']
+n_actions = env.action_space.n
+fqf_module = FQFNetwork(n_actions=n_actions, n_quantiles=n_quantiles, n_tau_samples=n_tau_samples)
+dummy_state = jnp.zeros_like(state)
+params = fqf_module.init(jax.random.PRNGKey(0), jnp.expand_dims(dummy_state, axis=0))
+q_network_params = params['params']
 target_q_network_params = params['params']
 
-optimizer               = optax.adam(learning_rate)
-opt_state               = optimizer.init(q_network_params)
+optimizer = optax.adam(learning_rate)
+opt_state = optimizer.init(q_network_params)
 
 # PER Memory
-per_memory              = PERMemory(memory_length)
-
+per_memory = PERMemory(memory_length)
 
 def policy(params, x):
     x = jnp.expand_dims(x, axis=0)
@@ -170,13 +179,13 @@ def calculate_quantile_values(params, x, n_quantiles_sample):
 # Huber loss
 @jit
 def huber_loss(td_errors, tau_i):
-    delta               = 1.0
-    abs_td_errors       = jnp.abs(td_errors)
-    quadratic           = jnp.minimum(abs_td_errors, delta)
-    linear              = abs_td_errors - quadratic
-    loss                = 0.5 * quadratic ** 2 + delta * linear
+    delta = 1.0
+    abs_td_errors = jnp.abs(td_errors)
+    quadratic = jnp.minimum(abs_td_errors, delta)
+    linear = abs_td_errors - quadratic
+    loss = 0.5 * quadratic ** 2 + delta * linear
     # Ensure tau_i has the same shape as td_errors before the element-wise operations
-    tau_i_expanded      = jnp.expand_dims(tau_i, axis=-1)
+    tau_i_expanded = jnp.expand_dims(tau_i, axis=-1)
     quantile_huber_loss = jnp.abs(tau_i_expanded - (td_errors < 0.0).astype(jnp.float32)) * loss
 
     return jnp.mean(jnp.sum(quantile_huber_loss, axis=1))
@@ -224,7 +233,6 @@ def train_step(q_network_params, target_q_network_params, opt_state, batch, key)
 
     return q_network_params, opt_state, loss, new_priorities
 
-
 rng = jax.random.PRNGKey(0)
 global_steps = 0
 try:
@@ -255,6 +263,7 @@ try:
                 batch = per_memory.sample(batch_size)
                 states, actions, rewards, next_states, dones = [], [], [], [], []
                 for i in range(batch_size):
+                    print(f"Main loop: batch[{i}][1] type={type(batch[i][1])}, batch[{i}][1]={batch[i][1]}") # Debugging
                     states.append(batch[i][1][0])
                     actions.append(batch[i][1][1])
                     rewards.append(batch[i][1][2])
