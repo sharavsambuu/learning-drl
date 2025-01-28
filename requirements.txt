@@ -3,6 +3,6 @@ gymnasium[classic-control]
 jax
 jaxlib
 flax
-ray
+ray[default]
 matplotlib
 tk
