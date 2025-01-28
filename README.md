@@ -42,6 +42,11 @@
 | **\* FQF (Fully Parameterized Quantile Function)** | "Ultimate Distributional RL" - learns to model the *entire CDF shape* directly, adaptively choosing key quantiles for data-efficient, powerful representation.                                                                                       |
 
 
+# Environment
+
+    Python3.12
+
+
 # Dependencies
 
 ```shell
@@ -53,7 +58,7 @@
 # Prepare
 
 ```shell
-  virtualenv -p python3 env && source env/bin/activate && pip install -r requirements.txt
+  virtualenv -p python3.12 env && source env/bin/activate && pip install -r requirements.txt
 ```
 
 
