@@ -62,4 +62,4 @@ y_predicted_trained = module.apply({'params': trained_model_params}, x.reshape(-
 plt.plot(x, y_predicted_trained, label='Trained prediction')
 plt.scatter(X, Y, label='Data')
 plt.legend()
-plt.show()
+plt.show()  
