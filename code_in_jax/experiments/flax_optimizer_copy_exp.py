@@ -1,52 +1,55 @@
-import flax
+import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
+import optax
 
-rng             = jax.random.PRNGKey(0)
+rng = jax.random.PRNGKey(0)
 rng, key1, key2 = jax.random.split(rng, 3)
 
 n = 50
-x = jnp.linspace(-5., 5.)
-X = jax.random.uniform(key1, (n,), minval=-5., maxval=5.)
-f = lambda x: 2.*x
-Y = f(x)+jax.random.normal(key2, (n,))
+x = jnp.linspace(-5., 5., num=100)
+X = jax.random.uniform(key1, (n, 1), minval=-5., maxval=5.)  # Reshape X to have a feature dimension
+f = lambda x: 2. * x
+Y = f(X) + jax.random.normal(key2, (n, 1))  # Adjust Y to match the shape of X
 
-class LinearRegression(flax.nn.Module):
-    def apply(self, x):
-        return flax.nn.Dense(x[..., None], features=1)[..., 0]
+class LinearRegression(nn.Module):
+    @nn.compact
+    def __call__(self, x):
+        return nn.Dense(features=1)(x)
 
-rng, key  = jax.random.split(rng)
-_, params = LinearRegression.init(key, X)
-model     = flax.nn.Model(LinearRegression, params)
+rng, key = jax.random.split(rng)
+module = LinearRegression()
+params = module.init(key, X)['params']
+model_params = params
 
+optimizer_def = optax.adam(learning_rate=0.001)  # Use optax.adam
+optimizer_state = optimizer_def.init(model_params)
+train_steps = 10000
 
-optimizer_def = flax.optim.Adam(learning_rate=0.001)
-optimizer     = optimizer_def.create(model)
-train_steps   = 10000
+@jax.jit
+def loss_fn(model_params):
+    y_predicted = module.apply({'params': model_params}, X)
+    return jnp.square(Y - y_predicted).mean()
 
-def loss_fn(model):
-    y_predicted = model(X)
-    return jnp.square(Y-y_predicted).mean()
+@jax.jit
+def train_step(optimizer_state, model_params):
+    loss, grads = jax.value_and_grad(loss_fn)(model_params)
+    updates, new_optimizer_state = optimizer_def.update(grads, optimizer_state, model_params)
+    new_model_params = optax.apply_updates(model_params, updates)
+    return new_optimizer_state, new_model_params, loss
 
 for i in range(train_steps):
-    loss, grad = jax.value_and_grad(loss_fn)(optimizer.target)
-    optimizer  = optimizer.apply_gradient(grad)
+    optimizer_state, model_params, loss = train_step(optimizer_state, model_params)
+    if (i + 1) % 100 == 0:
+        print(f"Step {i+1}, MSE : {loss}")
 
-    updated_model = optimizer.target
-    #optimizer     = None
-    #del optimizer
-
-    optimizer = flax.optim.Adam(learning_rate=0.001).create(updated_model)
-    # update optimizer
-    #optimizer.replace(optimizer_def=flax.optim.Adam(learning_rate=0.001).create(trained_model))
-    print("MSE :", loss)
-
-trained_model = optimizer.target
-print("Сургасан моделийн параметр :")
-print(trained_model.params)
-plt.plot(x, f(x))
-plt.plot(x, trained_model(x))
-plt.scatter(X, Y)
+trained_model_params = model_params
+print("Trained model parameters :")
+print(trained_model_params)
+plt.plot(x, f(x), label='True function')
+y_predicted_trained = module.apply({'params': trained_model_params}, x.reshape(-1, 1))
+plt.plot(x, y_predicted_trained, label='Trained prediction')
+plt.scatter(X, Y, label='Data')
+plt.legend()
 plt.show()
-

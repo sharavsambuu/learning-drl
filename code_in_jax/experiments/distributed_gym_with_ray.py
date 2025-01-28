@@ -1,8 +1,8 @@
 # Spawn multiple environment using ray
 # References:
 #  - https://bair.berkeley.edu/blog/2018/01/09/ray/
-import gym
 import ray
+import gymnasium as gym
 
 ray.init()
 
