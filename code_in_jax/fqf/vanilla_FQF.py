@@ -12,20 +12,22 @@ import numpy as np
 import optax
 import matplotlib.pyplot as plt
 
-debug_render = True  # Enable rendering
-num_episodes = 500
-batch_size = 64
-learning_rate = 0.0005 # Increased learning rate
-sync_steps = 50 # More frequent target network sync
+
+debug_render  = True
+num_episodes  = 500
+batch_size    = 64
+learning_rate = 0.0005
+sync_steps    = 50
 memory_length = 4000
-n_quantiles = 32  # Number of quantiles
-n_tau_samples = 64 # Number of tau samples for loss calculation
-epsilon = 1.0
-epsilon_decay = 0.00005 # Slower epsilon decay
-epsilon_max = 1.0
-epsilon_min = 0.01
-gamma = 0.99
-hidden_size = 128      # Increased hidden size
+n_quantiles   = 32
+n_tau_samples = 64
+epsilon       = 1.0
+epsilon_decay = 0.00005
+epsilon_max   = 1.0
+epsilon_min   = 0.01
+gamma         = 0.99
+hidden_size   = 128
+
 
 class SumTree:
     write = 0
@@ -70,9 +72,7 @@ class SumTree:
     def get(self, s):
         idx = self._retrieve(0, s)
         dataIdx = idx - self.capacity + 1
-        data = self.data[dataIdx]
-        print(f"SumTree.get: data type={type(data)}, data={data}") # Debugging
-        return (idx, self.tree[idx], data)
+        return (idx, self.tree[idx], self.data[dataIdx])
 
 class PERMemory:
     e = 0.01
@@ -80,14 +80,14 @@ class PERMemory:
 
     def __init__(self, capacity):
         self.tree = SumTree(capacity)
+        self.capacity = capacity # Added capacity to PERMemory
 
     def _get_priority(self, error):
         return (error + self.e) ** self.a
 
     def add(self, error, sample):
         p = self._get_priority(error)
-        print(f"PERMemory.add: sample type={type(sample)}, sample={sample}") # Debugging
-        self.tree.add(p, sample)  # Add sample directly as a tuple
+        self.tree.add(p, sample)
 
     def sample(self, n):
         batch = []
@@ -97,12 +97,16 @@ class PERMemory:
             b = segment * (i + 1)
             s = random.uniform(a, b)
             (idx, p, data) = self.tree.get(s)
-            batch.append((idx, data))  # data should already be the sample tuple
+            assert isinstance(data, tuple), f"Data is not a tuple, but {type(data)}" # Assertion to check data type
+            batch.append((idx, data))
+        assert len(batch) == n, f"Batch size is not equal to n, batch_size={len(batch)}, n={n}" # Assertion to check batch size
         return batch
 
     def update(self, idx, error):
         p = self._get_priority(error)
         self.tree.update(idx, p)
+
+
 
 # FQF Network
 class FQFNetwork(nn.Module):
@@ -134,28 +138,29 @@ class FQFNetwork(nn.Module):
         # Cosine embedding of tau_i
         i_pi = jnp.arange(1, self.n_tau_samples + 1, dtype=jnp.float32) * jnp.pi
         tau_i_embedding = jnp.cos(tau_i[..., jnp.newaxis] * i_pi)
-        tau_i_embedding = tau_i_embedding.reshape(x.shape[0], self.n_actions, -1) # (batch_size, n_actions, n_tau_samples)
+        tau_i_embedding = tau_i_embedding.reshape(x.shape[0], self.n_actions, -1)
 
         # Value network
         # Concatenate state embedding with cosine embedding
         state_embedding_expanded = jnp.tile(state_embedding[:, jnp.newaxis, :], (1, self.n_actions, 1))
-        x = jnp.concatenate([state_embedding_expanded, tau_i_embedding], axis=-1) # Concatenation here
+        x = jnp.concatenate([state_embedding_expanded, tau_i_embedding], axis=-1)
         x = nn.Dense(features=hidden_size)(x)
         x = nn.relu(x)
         quantile_values = nn.Dense(features=self.n_quantiles)(x)
 
         return quantile_values, tau_hats
 
+
 # Create environment
-env = gym.make('CartPole-v1', render_mode="human") # Add render_mode here
+env = gym.make('CartPole-v1', render_mode="human")
 state, info = env.reset()
 
 # Instantiate network and optimizer
-n_actions = env.action_space.n
-fqf_module = FQFNetwork(n_actions=n_actions, n_quantiles=n_quantiles, n_tau_samples=n_tau_samples)
+n_actions   = env.action_space.n
+fqf_module  = FQFNetwork(n_actions=n_actions, n_quantiles=n_quantiles, n_tau_samples=n_tau_samples)
 dummy_state = jnp.zeros_like(state)
-params = fqf_module.init(jax.random.PRNGKey(0), jnp.expand_dims(dummy_state, axis=0))
-q_network_params = params['params']
+params                  = fqf_module.init(jax.random.PRNGKey(0), jnp.expand_dims(dummy_state, axis=0))
+q_network_params        = params['params']
 target_q_network_params = params['params']
 
 optimizer = optax.adam(learning_rate)
@@ -166,10 +171,10 @@ per_memory = PERMemory(memory_length)
 
 def policy(params, x):
     x = jnp.expand_dims(x, axis=0)
-    predicted_q_values, _ = fqf_module.apply({'params': params}, x) # (1, n_actions, n_quantiles)
-    expected_q_values = jnp.mean(predicted_q_values, axis=-1) # (1, n_actions)
-    max_q_action = jnp.argmax(expected_q_values, axis=-1) # (1, )
-    return max_q_action[0], expected_q_values[0]  # Remove extra dimension
+    predicted_q_values, _ = fqf_module.apply({'params': params}, x)
+    expected_q_values = jnp.mean(predicted_q_values, axis=-1)
+    max_q_action = jnp.argmax(expected_q_values, axis=-1)
+    return max_q_action[0], expected_q_values[0]
 
 @jit
 def calculate_quantile_values(params, x, n_quantiles_sample):
@@ -184,53 +189,33 @@ def huber_loss(td_errors, tau_i):
     quadratic = jnp.minimum(abs_td_errors, delta)
     linear = abs_td_errors - quadratic
     loss = 0.5 * quadratic ** 2 + delta * linear
-    # Ensure tau_i has the same shape as td_errors before the element-wise operations
     tau_i_expanded = jnp.expand_dims(tau_i, axis=-1)
     quantile_huber_loss = jnp.abs(tau_i_expanded - (td_errors < 0.0).astype(jnp.float32)) * loss
-
     return jnp.mean(jnp.sum(quantile_huber_loss, axis=1))
 
 @jit
 def train_step(q_network_params, target_q_network_params, opt_state, batch, key):
-    # batch[0] - states
-    # batch[1] - actions
-    # batch[2] - rewards
-    # batch[3] - next_states
-    # batch[4] - dones
     def loss_fn(params):
-        predicted_quantile_values, tau_hats = fqf_module.apply({'params': params}, batch[0])  # (batch_size, n_actions, n_quantiles)
-        target_quantile_values, _ = fqf_module.apply({'params': target_q_network_params}, batch[3])  # (batch_size, n_actions, n_quantiles)
+        predicted_quantile_values, tau_hats = fqf_module.apply({'params': params}, batch[0])
+        target_quantile_values, _ = fqf_module.apply({'params': target_q_network_params}, batch[3])
 
         tau_i = (tau_hats[:, 1:] + tau_hats[:, :-1]) / 2.
         tau_i_selected = tau_i[jnp.arange(batch_size), batch[1]]
 
-        # Find the greedy action in the next state (using the target network)
-        expected_next_q_values = jnp.mean(target_quantile_values, axis=2)  # (batch_size, n_actions)
-        max_next_actions = jnp.argmax(expected_next_q_values, axis=1)  # (batch_size,)
+        expected_next_q_values = jnp.mean(target_quantile_values, axis=2)
+        max_next_actions = jnp.argmax(expected_next_q_values, axis=1)
+        next_state_quantile_values = target_quantile_values[jnp.arange(batch_size), max_next_actions]
 
-        # Select the quantile values for the greedy action in the next state
-        next_state_quantile_values = target_quantile_values[jnp.arange(batch_size), max_next_actions]  # (batch_size, n_quantiles)
-
-        # Compute target quantile values
-        target_quantile_values = batch[2][:, jnp.newaxis] + gamma * (1 - batch[4][:, jnp.newaxis]) * next_state_quantile_values # (batch_size, n_quantiles)
-
-        # Get Q-values for the actions taken in the current state
-        predicted_action_quantile_values = predicted_quantile_values[jnp.arange(batch_size), batch[1]]  # (batch_size, n_quantiles)
-
-        # Calculate the TD error for each element in the batch
-        td_errors = target_quantile_values - predicted_action_quantile_values  # (batch_size, n_quantiles)
-
-        # Calculate Huber loss
+        target_quantile_values = batch[2][:, jnp.newaxis] + gamma * (1 - batch[4][:, jnp.newaxis]) * next_state_quantile_values
+        predicted_action_quantile_values = predicted_quantile_values[jnp.arange(batch_size), batch[1]]
+        td_errors = target_quantile_values - predicted_action_quantile_values
         loss = huber_loss(td_errors, tau_i_selected)
         return loss, td_errors
 
     (loss, td_errors), gradients = jax.value_and_grad(loss_fn, has_aux=True)(q_network_params)
     updates, opt_state = optimizer.update(gradients, opt_state, q_network_params)
     q_network_params = optax.apply_updates(q_network_params, updates)
-
-    # Calculate the TD error for updating priorities
     new_priorities = jnp.abs(jnp.mean(td_errors, axis=1))
-
     return q_network_params, opt_state, loss, new_priorities
 
 rng = jax.random.PRNGKey(0)
@@ -257,18 +242,18 @@ try:
             done = terminated or truncated
             new_state = np.array(new_state, dtype=np.float32)
 
-            per_memory.add(0, (state, action, reward, new_state, float(done)))  # Use dummy priority 0 for new samples
+            per_memory.add(0, (state, action, reward, new_state, float(done)))
 
             if len(per_memory.tree.data) >= batch_size:
                 batch = per_memory.sample(batch_size)
                 states, actions, rewards, next_states, dones = [], [], [], [], []
                 for i in range(batch_size):
-                    print(f"Main loop: batch[{i}][1] type={type(batch[i][1])}, batch[{i}][1]={batch[i][1]}") # Debugging
-                    states.append(batch[i][1][0])
-                    actions.append(batch[i][1][1])
-                    rewards.append(batch[i][1][2])
-                    next_states.append(batch[i][1][3])
-                    dones.append(batch[i][1][4])
+                    data = batch[i][1]
+                    states.append(data[0])
+                    actions.append(data[1])
+                    rewards.append(data[2])
+                    next_states.append(data[3])
+                    dones.append(data[4])
 
                 q_network_params, opt_state, loss, new_priorities = train_step(
                     q_network_params,
@@ -283,8 +268,6 @@ try:
                     ),
                     train_key
                 )
-
-                # Update priorities in PER memory
                 for i in range(batch_size):
                     idx = batch[i][0]
                     per_memory.update(idx, new_priorities[i])
