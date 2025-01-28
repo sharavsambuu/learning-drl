@@ -3,7 +3,6 @@
 # Notes : 
 #   unicode-оор бичсэн коммент юм уу string remote доторхи 
 #   тодорхойлолт байх ёсгүй одоогоор энэ ray-н алдаа юм шиг байна.
-import gym
 import ray
 
 ray.init()

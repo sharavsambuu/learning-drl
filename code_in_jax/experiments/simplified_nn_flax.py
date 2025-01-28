@@ -3,6 +3,7 @@ import jax
 from jax import numpy as jnp
 import numpy as np
 
+
 class Dense(nn.Module):
     features: int
     kernel_init: callable = jax.nn.initializers.lecun_normal()
@@ -253,4 +254,4 @@ y, state_b = MyModel().apply(variables, x_b, training=True, mutable=['stats'])
 print("Гаралтын стандарт хазайлт (training) :", y.std(0))
 
 y = MyModel().apply({'params': params, 'stats': state_b['stats']}, x_b, training=False, mutable=['stats'])
-print("Гаралтын стандарт хазайлт (testing) :", y[0].std(0)) 
+print("Гаралтын стандарт хазайлт (testing) :", y[0].std(0))
