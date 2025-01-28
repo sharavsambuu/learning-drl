@@ -41,6 +41,7 @@
 #
 #
 
+
 import os
 import random
 import math
@@ -51,7 +52,6 @@ import flax.linen as nn  # Use flax.linen for neural network definitions
 import jax
 from jax import numpy as jnp
 import numpy as np
-import matplotlib.pyplot as plt
 import optax
 import time
 
@@ -66,7 +66,7 @@ policy_epochs   = 10    # PPO Policy Epochs Hyperparameter
 batch_size      = 32
 mini_batch_size = 16
 sentence_length = 20
-hidden_size     = 128 # Hidden size for feedforward networks
+hidden_size     = 128   # Hidden size for feedforward networks
 
 # Vocabulary
 vocabulary_characters = [
@@ -106,8 +106,9 @@ toy_llm_module   = ToyLLM(n_vocab=vocab_size) # Pass vocab size to LLM
 critic_module    = CriticNetwork()
 
 dummy_input      = jnp.zeros((1,), dtype=jnp.int32) # Dummy input for init (single token index)
-actor_params     = toy_llm_module.init(rng, dummy_input)
-critic_params    = critic_module.init(rng, dummy_input)
+actor_params     = toy_llm_module.init(rng, dummy_input)['params'] # Access 'params' key
+critic_params    = critic_module.init (rng, dummy_input)['params'] # Access 'params' key
+
 
 actor_optimizer  = optax.adam(learning_rate)
 critic_optimizer = optax.adam(learning_rate)
@@ -118,13 +119,13 @@ critic_opt_state = critic_optimizer.init(critic_params)
 
 @jax.jit
 def actor_inference(actor_params, x):
-    logits = toy_llm_module.apply(actor_params, x)
+    logits = toy_llm_module.apply({'params': actor_params}, x) # Pass params as dict
     action_probabilities = nn.softmax(logits)
     return action_probabilities
 
 @jax.jit
 def critic_inference(critic_params, x):
-    value = critic_module.apply(critic_params, x)
+    value = critic_module.apply({'params': critic_params}, x) # Pass params as dict
     return value
 
 def reward_model(sentence): # Synthetic Reward Model
@@ -150,7 +151,7 @@ def train_step(actor_params, actor_opt_state, critic_params, critic_opt_state, b
     states, actions, old_log_probs, advantages, returns = batch
 
     def actor_loss_fn(actor_params):
-        logits = toy_llm_module.apply(actor_params, states)
+        logits = toy_llm_module.apply({'params': actor_params}, states) # Pass params as dict
         action_probabilities = nn.softmax(logits)
         log_probs = jnp.log(action_probabilities[jnp.arange(len(actions)), actions])
         ratio = jnp.exp(log_probs - old_log_probs)
@@ -160,18 +161,20 @@ def train_step(actor_params, actor_opt_state, critic_params, critic_opt_state, b
         return actor_loss
 
     def critic_loss_fn(critic_params):
-        values = critic_module.apply(critic_params, states).reshape(-1)
+        values = critic_module.apply({'params': critic_params}, states).reshape(-1) # Pass params as dict
         critic_loss = jnp.mean((values - returns)**2)
         return critic_loss
 
     def combined_loss_fn(params): # Combined loss function
-        actor_loss = actor_loss_fn(params[0])
-        critic_loss = critic_loss_fn(params[1])
-        return actor_loss + critic_loss # Sum of actor and critic losses
+        actor_loss_val = actor_loss_fn(params[0]) # Calculate actor loss
+        critic_loss_val = critic_loss_fn(params[1]) # Calculate critic loss
+        combined_loss = actor_loss_val + critic_loss_val # Sum of actor and critic losses
+        return combined_loss, (actor_loss_val, critic_loss_val) # Return individual losses as well
 
 
-    # Compute gradients for the combined loss
-    combined_loss, grads = jax.value_and_grad(combined_loss_fn)([actor_params, critic_params])
+    # Compute gradients for the combined loss, and also get individual losses
+    (combined_loss, auxiliary_losses), grads = jax.value_and_grad(combined_loss_fn, has_aux=True)([actor_params, critic_params]) # has_aux=True to get auxiliary output
+    actor_loss_val, critic_loss_val = auxiliary_losses # Unpack auxiliary losses
     actor_grads, critic_grads = grads
 
     # Apply gradients using optimizers
@@ -181,7 +184,7 @@ def train_step(actor_params, actor_opt_state, critic_params, critic_opt_state, b
     actor_params  = optax.apply_updates(actor_params, actor_updates)
     critic_params = optax.apply_updates(critic_params, critic_updates)
 
-    return actor_params, actor_opt_state, critic_params, critic_opt_state, combined_loss, actor_loss, critic_loss # Return individual losses for logging
+    return actor_params, actor_opt_state, critic_params, critic_opt_state, combined_loss, actor_loss_val, critic_loss_val # Return individual losses for logging
 
 
 def decode_text(token_indices): # Decoder function
@@ -190,7 +193,7 @@ def decode_text(token_indices): # Decoder function
         if index == eos_token_index:
             break
         decoded_text += vocabulary_characters[index]
-    return decoded_text 
+    return decoded_text
 
 
 rng = jax.random.PRNGKey(0)
@@ -250,9 +253,11 @@ try:
 
         # PPO Policy Update Loop
         for _ in range(policy_epochs):
-            perm = np.random.permutation(len(episode_states))
+            perm = np.random.permutation(len(episode_states)) # Corrected permutation here
             for start_idx in range(0, len(episode_states), mini_batch_size):
                 mini_batch_idx = perm[start_idx:start_idx + mini_batch_size]
+
+
                 mini_batch = tuple(arr[mini_batch_idx] for arr in batch_data)
                 actor_params, actor_opt_state, critic_params, critic_opt_state, combined_loss, actor_loss, critic_loss = train_step( # Get individual losses here
                     actor_params, actor_opt_state, critic_params, critic_opt_state, mini_batch
