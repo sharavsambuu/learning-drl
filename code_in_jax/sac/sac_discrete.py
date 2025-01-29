@@ -1,270 +1,294 @@
-import os
 import random
-import math
-import gym
-import flax
 import jax
-from jax import numpy as jnp
+import optax
+import gymnasium as gym
+import flax.linen as nn
 import numpy as np
-import numpy
+from jax import numpy as jnp
 
-debug_render               = False  # render-ийг debug хийх үед True болгоно уу
-debug                      = False
-num_episodes               = 1500
-learning_rate              = 0.0003 # learning rate-ийг багасгах нь сургалтыг тогтворжуулна
-gamma                      = 0.99
-tau                        = 0.005  # target network-ийг зөөлөн шинэчлэх параметр
-target_entropy_coefficient = 0.98   # зорилтот энтропийн коэффициент, action space-ийн хэмжээтэй ойролцоо байх нь зүйтэй
+num_episodes    = 500
+learning_rate   = 0.001
+gamma           = 0.99
+tau             = 0.005  # Soft update coefficient for target network
+entropy_alpha   = 0.2    # Initial entropy temperature (can be tuned or made learnable)
+batch_size      = 64
+memory_length   = 10000
 
-class ActorNetwork(flax.nn.Module):
-    def apply(self, x, n_actions):
-        dense_layer_1      = flax.nn.Dense(x, 256) # давхаргын хэмжээг нэмэгдүүлэх
-        activation_layer_1 = flax.nn.relu(dense_layer_1)
-        dense_layer_2      = flax.nn.Dense(activation_layer_1, 256) # давхаргын хэмжээг нэмэгдүүлэх
-        activation_layer_2 = flax.nn.relu(dense_layer_2)
-        output_dense_layer = flax.nn.Dense(activation_layer_2, n_actions)
-        output_layer       = flax.nn.softmax(output_dense_layer) # discrete action space-д softmax ашиглана
-        return output_layer
-
-class CriticNetwork(flax.nn.Module):
-    def apply(self, x):
-        dense_layer_1      = flax.nn.Dense(x, 256) # давхаргын хэмжээг нэмэгдүүлэх
-        activation_layer_1 = flax.nn.relu(dense_layer_1)
-        dense_layer_2      = flax.nn.Dense(activation_layer_1, 256) # давхаргын хэмжээг нэмэгдүүлэх
-        activation_layer_2 = flax.nn.relu(dense_layer_2)
-        output_dense_layer = flax.nn.Dense(activation_layer_2, 1)
-        return output_dense_layer
+per_alpha       = 0.6
+per_beta_start  = 0.4
+per_beta_frames = 100000
+per_epsilon     = 1e-6
 
 
-env   = gym.make('CartPole-v1')
-state = env.reset()
-n_actions        = env.action_space.n
+class SumTree:
+    write = 0
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.tree = np.zeros(2 * capacity - 1)
+        self.data = np.zeros(capacity, dtype=object)
+    def _propagate(self, idx, change):
+        parent = (idx - 1) // 2
+        self.tree[parent] += change
+        if parent != 0:
+            self._propagate(parent, change)
+    def _retrieve(self, idx, s):
+        left = 2 * idx + 1
+        right = left + 1
+        if left >= len(self.tree):
+            return idx
+        if s <= self.tree[left]:
+            return self._retrieve(left, s)
+        else:
+            return self._retrieve(right, s - self.tree[left])
+    def total(self):
+        return self.tree[0]
+    def add(self, p, data):
+        idx = self.write + self.capacity - 1
+        self.data[self.write] = data
+        self.update(idx, p)
+        self.write += 1
+        if self.write >= self.capacity:
+            self.write = 0
+    def update(self, idx, p):
+        change = p - self.tree[idx]
+        self.tree[idx] = p
+        self._propagate(idx, change)
+    def get(self, s):
+        idx = self._retrieve(0, s)
+        dataIdx = idx - self.capacity + 1
+        return (idx, self.tree[idx], self.data[dataIdx])
 
-# Actor сүлжээ
-actor_module     = ActorNetwork.partial(n_actions=n_actions)
-_, actor_params  = actor_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
-actor_model      = flax.nn.Model(actor_module, actor_params)
-actor_optimizer  = flax.optim.Adam(learning_rate).create(actor_model)
+class PrioritizedReplayMemory:
+    def __init__(self, capacity, alpha=per_alpha):
+        self.tree = SumTree(capacity)
+        self.alpha = alpha
+        self.capacity = capacity
+    def _get_priority(self, error):
+        return (np.abs(error) + per_epsilon) ** self.alpha
+    def push(self, state, action, reward, next_state, done):
+        error = 1.0  # Initial error for new transitions
+        p = self._get_priority(error)
+        self.tree.add(p, (state, action, reward, next_state, done))
+    def sample(self, batch_size, beta):
+        batch = []
+        idxs  = []
+        segment = self.tree.total() / batch_size
+        priorities = []
+        for i in range(batch_size):
+            a = segment * i
+            b = segment * (i + 1)
+            s = random.uniform(a, b)
+            (idx, p, data) = self.tree.get(s)
+            priorities.append(p)
+            batch.append(data)
+            idxs.append(idx)
+        sampling_probabilities = priorities / self.tree.total()
+        is_weight = np.power(self.tree.capacity * sampling_probabilities, -beta)
+        is_weight /= is_weight.max()
+        states, actions, rewards, next_states, dones = zip(*batch)
+        return idxs, np.array(states), np.array(actions), np.array(rewards), np.array(next_states), np.array(
+            dones), is_weight
+    def update(self, idx, error):
+        p = self._get_priority(error)
+        self.tree.update(idx, p)
+    def __len__(self):
+        return min(self.tree.write, self.capacity)
 
-# Critic сүлжээ 1
-critic_module_1       = CriticNetwork.partial()
-_, critic_params_1    = critic_module_1.init_by_shape(jax.random.PRNGKey(0), [state.shape])
-critic_model_1        = flax.nn.Model(critic_module_1, critic_params_1)
-critic_optimizer_1    = flax.optim.Adam(learning_rate).create(critic_model_1)
-# Critic сүлжээ 2
-critic_module_2       = CriticNetwork.partial()
-_, critic_params_2    = critic_module_2.init_by_shape(jax.random.PRNGKey(0), [state.shape])
-critic_model_2        = flax.nn.Model(critic_module_2, critic_params_2)
-critic_optimizer_2    = flax.optim.Adam(learning_rate).create(critic_model_2)
 
-# Зорилтот Critic сүлжээ 1, 2 (эхэндээ онлайн Critic сүлжээтэй ижил жинтэй)
-target_critic_model_1 = flax.nn.Model(critic_module_1, critic_params_1)
-target_critic_model_2 = flax.nn.Model(critic_module_2, critic_params_2)
+class SoftQNetwork(nn.Module):
+    n_actions: int
+    @nn.compact
+    def __call__(self, x):
+        x = nn.Dense(features=64)(x)
+        x = nn.relu(x)
+        x = nn.Dense(features=64)(x)
+        x = nn.relu(x)
+        x = nn.Dense(features=self.n_actions)(x)
+        return x
 
-# Энтропийн температурыг сургах параметр (log scale дээр сургана, учир нь alpha>0 байх ёстой)
-log_alpha           = jnp.zeros(())
-alpha_optimizer     = flax.optim.Adam(learning_rate).create(log_alpha)
-target_entropy      = -target_entropy_coefficient * n_actions # зорилтот энтропи, ойролцоогоор -log(1/n_actions)
+class DiscretePolicyNetwork(nn.Module):
+    n_actions: int
+    @nn.compact
+    def __call__(self, x):
+        x = nn.Dense(features=64)(x)
+        x = nn.relu(x)
+        x = nn.Dense(features=64)(x)
+        x = nn.relu(x)
+        x = nn.Dense(features=self.n_actions)(x)
+        x = nn.softmax(x)
+        return x
+
+
+env         = gym.make('CartPole-v1', render_mode='human')
+state, info = env.reset()
+state       = np.array(state, dtype=np.float32)
+n_actions   = env.action_space.n
+
+soft_q_module_1 = SoftQNetwork(n_actions=n_actions)
+soft_q_module_2 = SoftQNetwork(n_actions=n_actions)
+policy_module   = DiscretePolicyNetwork(n_actions=n_actions)
+dummy_input     = jnp.zeros(state.shape)
+
+soft_q_params_1        = soft_q_module_1.init(jax.random.PRNGKey(0), dummy_input)['params']
+soft_q_params_2        = soft_q_module_2.init(jax.random.PRNGKey(1), dummy_input)['params']
+target_soft_q_params_1 = soft_q_params_1
+target_soft_q_params_2 = soft_q_params_2
+policy_params          = policy_module.init(jax.random.PRNGKey(2), dummy_input)['params']
+
+soft_q_optimizer_1 = optax.adam(learning_rate)
+soft_q_optimizer_2 = optax.adam(learning_rate)
+policy_optimizer   = optax.adam(learning_rate)
+soft_q_opt_state_1 = soft_q_optimizer_1.init(soft_q_params_1)
+soft_q_opt_state_2 = soft_q_optimizer_2.init(soft_q_params_2)
+policy_opt_state   = policy_optimizer.init(policy_params)
+
+
+replay_memory = PrioritizedReplayMemory(memory_length)
 
 
 @jax.jit
-def actor_inference(model, x):
-    return model(x)
+def soft_q_inference(params, x):
+    return soft_q_module_1.apply({'params': params}, x)
 
 @jax.jit
-def critic_inference(model, x):
-    return model(x)
-
-@jax.jit
-def backpropagate_critic(
-        critic_optimizer,
-        critic_model,
-        target_critic_model_1,
-        target_critic_model_2,
-        actor_model,
-        alpha,
-        batch_props
-    ):
-    # batch_props[0] - states
-    # batch_props[1] - next_states
-    # batch_props[2] - rewards
-    # batch_props[3] - dones
-    # batch_props[4] - actions
-    next_action_probabilities = actor_model(batch_props[1])
-    next_log_action_probabilities = jnp.log(next_action_probabilities)
-    next_q_values_1           = target_critic_model_1(batch_props[1])
-    next_q_values_2           = target_critic_model_2(batch_props[1])
-    next_min_q_values         = jnp.minimum(next_q_values_1, next_q_values_2)
-    next_values               = next_action_probabilities * (next_min_q_values - alpha * next_log_action_probabilities)
-    next_values               = jnp.sum(next_values, axis=1, keepdims=True) # action-уудын хэмжээгээр sum хийх
-    target_q_values           = batch_props[2] + gamma*(1-batch_props[3])*next_values[:, 0] # batch dimension-ийг хасах
-
-    def loss_fn(critic_model):
-        current_q_values = critic_model(batch_props[0])
-        critic_loss      = jnp.mean(jnp.square(target_q_values - current_q_values[:, 0])) # MSE loss
-        return critic_loss, { 'critic_loss' : critic_loss } # loss-ыг metrics-д хадгалах
-    (loss, metrics), gradients = jax.value_and_grad(loss_fn, has_aux=True)(critic_model) # metrics-ийг авахын тулд has_aux=True болгох
-    critic_optimizer            = critic_optimizer.apply_gradient(gradients)
-    return critic_optimizer, metrics
+def policy_inference(params, x):
+    return policy_module.apply({'params': params}, x)
 
 @jax.vmap
 def gather(probability_vec, action_index):
     return probability_vec[action_index]
 
 @jax.jit
-def backpropagate_actor(actor_optimizer, critic_model_1, critic_model_2, alpha, batch_props):
-    # batch_props[0] - states
-    # batch_props[4] - actions
-    def loss_fn(actor_model):
-        action_probabilities      = actor_model(batch_props[0])
-        log_action_probabilities  = jnp.log(action_probabilities)
-        q_values_1                = critic_model_1(batch_props[0])
-        q_values_2                = critic_model_2(batch_props[0])
-        min_q_values              = jnp.minimum(q_values_1, q_values_2)
-        actor_loss                = jnp.mean(
-            (alpha * log_action_probabilities - min_q_values) * action_probabilities
-        ) # Policy Gradient loss-г entropy-той хослуулсан
-        return actor_loss, { 'actor_loss' : actor_loss, 'entropy': -jnp.mean(jnp.sum(action_probabilities * log_action_probabilities, axis=1))} # metrics-д entropy-г хадгалах
-    (loss, metrics), gradients = jax.value_and_grad(loss_fn, has_aux=True)(actor_model) # metrics-ийг авахын тулд has_aux=True болгох
-    actor_optimizer           = actor_optimizer.apply_gradient(gradients)
-    return actor_optimizer, metrics
+def soft_q_update(
+    soft_q_params_1, soft_q_opt_state_1,
+    soft_q_params_2,
+    target_soft_q_params_1, target_soft_q_params_2,
+    policy_params,
+    states, actions, rewards, next_states, dones, is_weights
+):
+    # Calculate target Q-value
+    next_state_policy_probs = policy_module.apply({'params': policy_params}, next_states)
+    next_state_q_values_1 = soft_q_module_1.apply({'params': target_soft_q_params_1}, next_states)
+    next_state_q_values_2 = soft_q_module_2.apply({'params': target_soft_q_params_2}, next_states)
+    next_state_min_q = jnp.minimum(next_state_q_values_1, next_state_q_values_2)
+    
+    next_state_v = jnp.sum(next_state_policy_probs * (next_state_min_q - entropy_alpha * jnp.log(next_state_policy_probs + 1e-6)), axis=1)
+    
+    target_q_values = rewards + (1.0 - dones) * gamma * next_state_v
+
+    # Calculate Q-function loss with Importance Sampling weights
+    def soft_q_loss_fn(params, target, actions, q_net_module, is_weights):
+        q_values = q_net_module.apply({'params': params}, states)
+        q_values_of_actions = gather(q_values, actions)
+        td_error = target - q_values_of_actions
+        return jnp.mean(is_weights * jnp.square(td_error)), td_error
+
+    # Update Q-function 1
+    (q1_loss, q1_td_error), q1_grads = jax.value_and_grad(soft_q_loss_fn, has_aux=True)(soft_q_params_1, target_q_values, actions, soft_q_module_1, is_weights)
+    q1_updates, new_soft_q_opt_state_1 = soft_q_optimizer_1.update(q1_grads, soft_q_opt_state_1, soft_q_params_1)
+    new_soft_q_params_1 = optax.apply_updates(soft_q_params_1, q1_updates)
+
+    # Update Q-function 2
+    (q2_loss, q2_td_error), q2_grads = jax.value_and_grad(soft_q_loss_fn, has_aux=True)(soft_q_params_2, target_q_values, actions, soft_q_module_2, is_weights)
+    q2_updates, new_soft_q_opt_state_2 = soft_q_optimizer_2.update(q2_grads, soft_q_opt_state_2, soft_q_params_2)
+    new_soft_q_params_2 = optax.apply_updates(soft_q_params_2, q2_updates)
+
+    return new_soft_q_params_1, new_soft_q_opt_state_1, new_soft_q_params_2, new_soft_q_opt_state_2, q1_loss, q2_loss, q1_td_error, q2_td_error
 
 @jax.jit
-def backpropagate_alpha(alpha_optimizer, actor_model, batch_props, target_entropy):
-    # batch_props[0] - states
-    def loss_fn(log_alpha):
-        alpha                 = jnp.exp(log_alpha)
-        action_probabilities  = actor_model(batch_props[0])
-        log_action_probabilities = jnp.log(action_probabilities)
-        entropy               = -jnp.sum(action_probabilities * log_action_probabilities, axis=1)
-        alpha_loss            = jnp.mean(-log_alpha * jax.lax.stop_gradient(entropy + target_entropy))
-        return alpha_loss, {'alpha_loss': alpha_loss, 'alpha': alpha} # metrics-д alpha-г хадгалах
-    (loss, metrics), gradients = jax.value_and_grad(loss_fn, has_aux=True)(alpha_optimizer.target) # metrics-ийг авахын тулд has_aux=True болгох
-    alpha_optimizer           = alpha_optimizer.apply_gradient(gradients)
-    return alpha_optimizer, metrics
+def policy_update(policy_params, policy_opt_state, soft_q_params_1, soft_q_params_2, states):
+    def policy_loss_fn(params):
+        policy_probs = policy_module.apply({'params': params}, states)
+        
+        soft_q_values_1 = soft_q_module_1.apply({'params': soft_q_params_1}, states)
+        soft_q_values_2 = soft_q_module_2.apply({'params': soft_q_params_2}, states)
+        min_soft_q_values = jnp.minimum(soft_q_values_1, soft_q_values_2)
+
+        log_probs = min_soft_q_values - jax.scipy.special.logsumexp(min_soft_q_values, axis=1, keepdims=True)
+        
+        policy_loss = jnp.sum(policy_probs * (entropy_alpha * jnp.log(policy_probs + 1e-6) - min_soft_q_values), axis=1)
+        return jnp.mean(policy_loss)
+
+    (policy_loss, policy_grads) = jax.value_and_grad(policy_loss_fn)(policy_params)
+    policy_updates, new_policy_opt_state = policy_optimizer.update(policy_grads, policy_opt_state, policy_params)
+    new_policy_params = optax.apply_updates(policy_params, policy_updates)
+
+    return new_policy_params, new_policy_opt_state, policy_loss
 
 @jax.jit
-def soft_update(target_model, online_model, tau):
-    new_params = jax.tree_util.tree_map(
-        lambda target_params, online_params: (1 - tau) * target_params + tau * online_params,
-        target_model.params, online_model.params
-    )
-    return target_model.replace(params=new_params)
+def soft_update(target_params, params, tau):
+    def update_fn(target_param, param):
+        return (1 - tau) * target_param + tau * param
+    return jax.tree_map(update_fn, target_params, params)
 
-
-replay_buffer_states      = np.empty((memory_size, env.observation_space.shape[0]), dtype=state.dtype) # санах ойн хэмжээ, state-ийн dtype-тэй ижил
-replay_buffer_actions     = np.empty((memory_size, 1          ), dtype=np.int32    ) # action нь integer утгатай
-replay_buffer_rewards     = np.empty((memory_size, 1          ), dtype=np.float32  )
-replay_buffer_next_states = np.empty((memory_size, env.observation_space.shape[0]), dtype=state.dtype) # санах ойн хэмжээ, state-ийн dtype-тэй ижил
-replay_buffer_dones       = np.empty((memory_size, 1          ), dtype=np.float32  )
-memory_counter            = 0
-memory_size               = 10000 # replay buffer-ийн хэмжээ
-batch_size                = 256   # batch size-ийг нэмэгдүүлэх
 
 global_step = 0
+per_beta    = per_beta_start
+
 try:
     for episode in range(num_episodes):
-        state           = env.reset()
-        episode_rewards = []
-        while True:
-            global_step = global_step+1
+        state, info = env.reset()
+        state = np.array(state, dtype=np.float32)
+        done = False
+        total_reward = 0
 
-            alpha_value         = jnp.exp(alpha_optimizer.target) # alpha утгыг авах
-            action_probabilities  = actor_inference(actor_optimizer.target, jnp.asarray([state]))
-            action_probabilities  = np.array(action_probabilities[0])
-            action                = np.random.choice(n_actions, p=action_probabilities) # магадлалаар sample-дах
+        while not done:
+            global_step += 1
+            if np.random.rand() < 0.1:
+                action = env.action_space.sample()
+            else:
+                action_probs = policy_inference(policy_params, jnp.array([state]))
+                action = int(jnp.argmax(action_probs))
 
-            next_state, reward, done, _ = env.step(int(action))
+            next_state, reward, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
+            next_state = np.array(next_state, dtype=np.float32)
+            total_reward += reward
 
-            # Replay Buffer-т хадгалах
-            idx                           = memory_counter % memory_size
-            replay_buffer_states     [idx] = state
-            replay_buffer_actions    [idx] = action
-            replay_buffer_rewards    [idx] = reward
-            replay_buffer_next_states[idx] = next_state
-            replay_buffer_dones      [idx] = done
-            memory_counter                += 1
+            replay_memory.push(state, action, reward, next_state, float(done))
 
-            episode_rewards.append(reward)
+            # Linearly annealing beta from per_beta_start to 1.0
+            per_beta = min(1.0, per_beta_start + global_step * (1.0 - per_beta_start) / per_beta_frames)
 
-            if global_step > batch_size: # batch size-ээс дээш алхам хийсний дараа сургалт хийнэ
-                # Replay Buffer-оос batch sample-дах
-                indices = np.random.choice(memory_size, size=batch_size)
-                batch_states      = replay_buffer_states     [indices]
-                batch_actions     = replay_buffer_actions    [indices]
-                batch_rewards     = replay_buffer_rewards    [indices]
-                batch_next_states = replay_buffer_next_states[indices]
-                batch_dones       = replay_buffer_dones      [indices]
+            if len(replay_memory) > batch_size:
+                idxs, states, actions, rewards, next_states, dones, is_weights = replay_memory.sample(batch_size, per_beta)
 
-                # Critic сүлжээ 1-ийг сургах
-                critic_optimizer_1, critic_metrics_1 = backpropagate_critic(
-                    critic_optimizer_1,
-                    critic_model_1,
-                    target_critic_model_1,
-                    target_critic_model_2,
-                    actor_optimizer.target,
-                    alpha_value,
-                    (
-                        jnp.asarray(batch_states),
-                        jnp.asarray(batch_next_states),
-                        jnp.asarray(batch_rewards),
-                        jnp.asarray(batch_dones),
-                        jnp.asarray(batch_actions).reshape(batch_size,) # actions-ийг reshape хийх
-                    )
-                )
-                # Critic сүлжээ 2-ыг сургах
-                critic_optimizer_2, critic_metrics_2 = backpropagate_critic(
-                    critic_optimizer_2,
-                    critic_model_2,
-                    target_critic_model_1,
-                    target_critic_model_2,
-                    actor_optimizer.target,
-                    alpha_value,
-                    (
-                        jnp.asarray(batch_states),
-                        jnp.asarray(batch_next_states),
-                        jnp.asarray(batch_rewards),
-                        jnp.asarray(batch_dones),
-                        jnp.asarray(batch_actions).reshape(batch_size,) # actions-ийг reshape хийх
-                    )
-                )
-                # Actor сүлжээг сургах
-                actor_optimizer, actor_metrics = backpropagate_actor(
-                    actor_optimizer,
-                    critic_model_1,
-                    critic_model_2,
-                    alpha_value,
-                    (
-                        jnp.asarray(batch_states),
-                        jnp.asarray(batch_actions).reshape(batch_size,) # actions-ийг reshape хийх
-                    )
-                )
-                # Alpha-г сургах
-                alpha_optimizer, alpha_metrics = backpropagate_alpha(
-                    alpha_optimizer,
-                    actor_optimizer.target,
-                    (jnp.asarray(batch_states)),
-                    target_entropy
+                states      = jnp.array(states     )
+                actions     = jnp.array(actions    )
+                rewards     = jnp.array(rewards    )
+                next_states = jnp.array(next_states)
+                dones       = jnp.array(dones      )
+                is_weights  = jnp.array(is_weights )
+
+                soft_q_params_1, soft_q_opt_state_1, soft_q_params_2, soft_q_opt_state_2, q1_loss, q2_loss, q1_td_error, q2_td_error = soft_q_update(
+                    soft_q_params_1,
+                    soft_q_opt_state_1,
+                    soft_q_params_2,
+                    target_soft_q_params_1,
+                    target_soft_q_params_2,
+                    policy_params,
+                    states, actions, rewards, next_states, dones, is_weights
                 )
 
-                # Target Critic сүлжээг зөөлөн шинэчлэх
-                target_critic_model_1 = soft_update(target_critic_model_1, critic_model_1, tau)
-                target_critic_model_2 = soft_update(target_critic_model_2, critic_model_2, tau)
+                policy_params, policy_opt_state, policy_loss = policy_update(
+                    policy_params,
+                    policy_opt_state,
+                    soft_q_params_1,
+                    soft_q_params_2,
+                    states
+                )
 
+                # Update priorities in PER tree
+                for idx, error in zip(idxs, np.mean((np.abs(q1_td_error), np.abs(q2_td_error)), axis=0)):
+                    replay_memory.update(idx, error)
+
+                # Soft update target networks
+                target_soft_q_params_1 = soft_update(target_soft_q_params_1, soft_q_params_1, tau)
+                target_soft_q_params_2 = soft_update(target_soft_q_params_2, soft_q_params_2, tau)
 
             state = next_state
 
-            if debug_render:
-                env.render()
+        print(f"Episode: {episode}, Total Reward: {total_reward}")
 
-            if done:
-                print(episode, " - reward :", sum(episode_rewards),
-                      "- critic_loss_1: ", critic_metrics_1['critic_loss'],
-                      "- critic_loss_2: ", critic_metrics_2['critic_loss'],
-                      "- actor_loss: ", actor_metrics['actor_loss'],
-                      "- alpha_loss: ", alpha_metrics['alpha_loss'],
-                      "- entropy: ", actor_metrics['entropy'],
-                      "- alpha: ", alpha_metrics['alpha'])
-                break
 finally:
     env.close()
