@@ -6,15 +6,11 @@ import numpy as np
 import optax
 import jax.tree_util
 
-
-num_episodes           = 500
-learning_rate          = 0.003
-gamma                  = 0.99
-kl_target              = 0.01
-batch_size             = 128
-epsilon_start          = 0.2
-epsilon_end            = 0.01
-epsilon_decay_episodes = num_episodes / 4
+num_episodes  = 1000
+learning_rate = 0.001
+gamma         = 0.99
+kl_target     = 0.01
+batch_size    = 128
 
 
 class PolicyNetwork(nn.Module):
@@ -26,7 +22,7 @@ class PolicyNetwork(nn.Module):
         x = nn.Dense(features=128)(x)
         x = nn.relu(x)
         mean_output = nn.Dense(features=self.n_actions)(x)
-        log_std = self.param('log_std', nn.initializers.zeros, (self.n_actions,))  # Learnable log stddev
+        log_std = self.param('log_std', nn.initializers.constant(-0.5), (self.n_actions,))
         return mean_output, log_std
 
 class ValueNetwork(nn.Module):
@@ -40,18 +36,17 @@ class ValueNetwork(nn.Module):
         return x
 
 
-env        = gym.make('Pendulum-v1', render_mode='human')  
+env        = gym.make('Pendulum-v1', render_mode='human')
 state_dim  = env.observation_space.shape[0]
 
 if isinstance(env.action_space, gym.spaces.Discrete):
-    n_actions = env.action_space.n  
+    n_actions = env.action_space.n
 elif isinstance(env.action_space, gym.spaces.Box):
-    n_actions = env.action_space.shape[0] 
+    n_actions = env.action_space.shape[0]
 else:
     n_actions = 1
 
-print(f"Action dimension : {n_actions}") 
-
+print(f"Action dimension : {n_actions}")
 
 policy_module   = PolicyNetwork(n_actions=n_actions)
 value_module    = ValueNetwork()
@@ -96,7 +91,7 @@ def value_update(value_params, value_opt_state, states, returns):
         values = value_module.apply({'params': params}, states)
         return jnp.mean(jnp.square(values - returns))
 
-    for _ in range(5):  
+    for _ in range(5):
         loss, grads = jax.value_and_grad(value_loss_fn)(value_params)
         updates, new_value_opt_state = value_optimizer.update(grads, value_opt_state, value_params)
         value_params = optax.apply_updates(value_params, updates)
@@ -121,19 +116,23 @@ def compute_surrogate_loss(new_params, old_params, states, actions, advantages):
     surrogate_loss = ratio * advantages
     return -jnp.mean(surrogate_loss)  # TRPO maximizes the surrogate objective, hence the negative sign
 
-def conjugate_gradient(old_params, states, actions, advantages, b, num_iterations=15):  # Increased CG iterations
+def hvp(f, primals, tangents):
+    return jax.jvp(jax.grad(f), primals, tangents)[1]
+
+def calculate_hvp_kl(old_params, states, p, damping_coeff=0.1):
+    def kl_divergence_single_arg(params):
+        return calculate_kl_divergence(old_params, params, states)
+    unflat_p = unflatten_params(p, old_params)
+    # Add damping for numerical stability
+    return flatten_params(hvp(kl_divergence_single_arg, (old_params,), (unflat_p,))) + damping_coeff * p
+
+def conjugate_gradient(old_params, states, b, num_iterations=10):
     x = jnp.zeros_like(b)
     r = b.copy()
     p = r.copy()
     rdotr = jnp.dot(r, r)
     for _ in range(num_iterations):
-        def hvp_loss(params):
-            mean, log_std = policy_module.apply({'params': params}, states)
-            log_prob = gaussian_log_prob(actions, mean, log_std)
-            ratio = jnp.exp(log_prob - gaussian_log_prob(actions, *policy_module.apply({'params': old_params}, states)))
-            surrogate_loss = ratio * advantages
-            return -jnp.mean(surrogate_loss)  # Negative sign because we are minimizing for HVP
-        Ap = flatten_params(hvp(hvp_loss, (old_params,), (unflatten_params(p, old_params),)))
+        Ap = calculate_hvp_kl(old_params, states, p)
         alpha = rdotr / jnp.dot(p, Ap)
         x += alpha * p
         r -= alpha * Ap
@@ -143,12 +142,12 @@ def conjugate_gradient(old_params, states, actions, advantages, b, num_iteration
         rdotr = new_rdotr
     return x
 
-def linesearch(old_params, new_params, states, actions, advantages, expected_improvement, max_backtracks=15, backtrack_ratio=0.8): 
+def linesearch(old_params, new_params, states, actions, advantages, expected_improvement, max_backtracks=10, backtrack_ratio=0.8):
     for step in range(max_backtracks):
         ratio = backtrack_ratio ** step
         step_params = jax.tree.map(lambda p, u: p + ratio * u, old_params, unflatten_params(new_params, old_params))
         loss = compute_surrogate_loss(step_params, old_params, states, actions, advantages)
-        improvement = compute_surrogate_loss(old_params, old_params, states, actions, advantages) - loss  
+        improvement = compute_surrogate_loss(old_params, old_params, states, actions, advantages) - loss
         if improvement >= expected_improvement * ratio and improvement > 0:
             return step_params
     return old_params
@@ -164,9 +163,6 @@ def unflatten_params(flat_params, params_example):
     new_params_list = [jnp.reshape(p, s) for p, s in zip(params_list, shapes)]
     return jax.tree_util.tree_unflatten(jax.tree_util.tree_structure(params_example), new_params_list)
 
-def hvp(f, primals, tangents):
-    return jax.jvp(jax.grad(f), primals, tangents)[1]
-
 try:
     for episode in range(num_episodes):
         states, actions, rewards, dones = [], [], [], []
@@ -175,26 +171,21 @@ try:
         done = False
         total_reward = 0
 
-        epsilon = epsilon_end + (epsilon_start - epsilon_end) * np.exp(-episode / epsilon_decay_episodes)  
-
         while not done:
-            mean, log_std = policy_inference(policy_params, jnp.array(state))  
+            mean, log_std = policy_inference(policy_params, jnp.array(state))
             std = jnp.exp(log_std)
 
-            if np.random.rand() < epsilon:  
-                action = env.action_space.sample()
-            else:
-                action = mean + std * jax.random.normal(jax.random.PRNGKey(episode), shape=mean.shape)  # Sample action from Gaussian policy
+            action = mean + std * jax.random.normal(jax.random.PRNGKey(episode), shape=mean.shape)  # Sample action from Gaussian policy
 
             action_np      = np.array(action)
             action_clipped = np.clip(action_np, env.action_space.low, env.action_space.high)
-            next_state, reward, terminated, truncated, info = env.step(action_clipped) 
+            next_state, reward, terminated, truncated, info = env.step(action_clipped)
             done           = terminated or truncated
             next_state     = np.array(next_state, dtype=np.float32)
             total_reward  += reward
 
             states .append(state         )
-            actions.append(action_clipped) 
+            actions.append(action_clipped)
             rewards.append(reward        )
             dones  .append(done          )
             state = next_state
@@ -212,9 +203,8 @@ try:
 
         old_params       = policy_params
         b                = flatten_params(jax.grad(compute_surrogate_loss)(old_params, old_params, states, actions, advantages))
-        search_direction = conjugate_gradient(old_params, states, actions, advantages, b)
-
-        expected_improvement = -compute_surrogate_loss(old_params, old_params, states, actions, advantages)  # Expected improvement should be based on the surrogate loss itself
+        search_direction = conjugate_gradient(old_params, states, b)
+        expected_improvement = 0.5 * jnp.dot(b, search_direction)
 
         # Update policy parameters
         policy_params = linesearch(old_params, search_direction, states, actions, advantages, expected_improvement)
@@ -224,7 +214,7 @@ try:
         if kl_divergence > 1.5 * kl_target:
             print(f'Episode {episode}: Early stopping due to high KL divergence: {kl_divergence}')
 
-        print(f"Episode: {episode}, Total Reward: {total_reward}, Value Loss: {value_loss:.4f}, KL Divergence: {kl_divergence:.4f}, Epsilon: {epsilon:.4f}")
+        print(f"Episode: {episode}, Total Reward: {total_reward}, Value Loss: {value_loss:.4f}, KL Divergence: {kl_divergence:.4f}")
 
 finally:
     env.close()
