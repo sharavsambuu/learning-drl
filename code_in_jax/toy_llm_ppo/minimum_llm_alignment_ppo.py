@@ -57,7 +57,7 @@ import time
 
 # Hyperparameters
 debug_render    = False
-num_episodes    = 1000
+num_episodes    = 50000
 learning_rate   = 0.001
 gamma           = 0.99
 gae_lambda      = 0.95  # GAE Lambda Hyperparameter

@@ -5,28 +5,25 @@ from jax import numpy as jnp
 import numpy as np
 import optax
 import jax.tree_util
+from jax.scipy.sparse.linalg import cg as jax_cg
+from functools import partial
 
 
-num_episodes           = 500
-learning_rate          = 0.003  
-gamma                  = 0.99
-kl_target              = 0.01
-batch_size             = 128  
-n_actions              = 2
+num_episodes  = 500
+learning_rate = 0.003
+gamma         = 0.99
+kl_target     = 0.01
+batch_size    = 128
+n_actions     = 2
 
-# Epsilon-greedy exploration
-epsilon_start          = 0.2  
-epsilon_end            = 0.01
-epsilon_decay_episodes = num_episodes / 4  
 
 class PolicyNetwork(nn.Module):
     n_actions: int
-
     @nn.compact
     def __call__(self, x):
-        x = nn.Dense(features=128)(x)  
+        x = nn.Dense(features=128)(x)
         x = nn.relu(x)
-        x = nn.Dense(features=128)(x)  
+        x = nn.Dense(features=128)(x)
         x = nn.relu(x)
         x = nn.Dense(features=self.n_actions)(x)
         x = nn.softmax(x)
@@ -35,7 +32,7 @@ class PolicyNetwork(nn.Module):
 class ValueNetwork(nn.Module):
     @nn.compact
     def __call__(self, x):
-        x = nn.Dense(features=128)(x)  
+        x = nn.Dense(features=128)(x)
         x = nn.relu(x)
         x = nn.Dense(features=64)(x)
         x = nn.relu(x)
@@ -43,15 +40,21 @@ class ValueNetwork(nn.Module):
         return x
 
 
-env             = gym.make('CartPole-v1', render_mode='human')
-state_dim       = env.observation_space.shape[0]
-policy_module   = PolicyNetwork(n_actions=n_actions)
-value_module    = ValueNetwork()
+
+env = gym.make('CartPole-v1', render_mode='human')
+
+state_dim     = env.observation_space.shape[0]
+policy_module = PolicyNetwork(n_actions=n_actions)
+value_module  = ValueNetwork()
+
+rng = jax.random.PRNGKey(0)
+rng, policy_rng, value_rng = jax.random.split(rng, 3)
 dummy_input     = jnp.zeros((1, state_dim))
-policy_params   = policy_module.init(jax.random.PRNGKey(0), dummy_input)['params']
-value_params    = value_module .init(jax.random.PRNGKey(1), dummy_input)['params']
+policy_params   = policy_module.init(policy_rng, dummy_input)['params']
+value_params    = value_module.init(value_rng, dummy_input)['params']
 value_optimizer = optax.adam(learning_rate)
 value_opt_state = value_optimizer.init(value_params)
+
 
 
 @jax.jit
@@ -84,7 +87,7 @@ def value_update(value_params, value_opt_state, states, returns):
         values = value_module.apply({'params': params}, states)
         return jnp.mean(jnp.square(values - returns))
 
-    for _ in range(5):  # Increased value update iterations
+    for _ in range(5):
         loss, grads = jax.value_and_grad(value_loss_fn)(value_params)
         updates, new_value_opt_state = value_optimizer.update(grads, value_opt_state, value_params)
         value_params = optax.apply_updates(value_params, updates)
@@ -94,8 +97,8 @@ def value_update(value_params, value_opt_state, states, returns):
 def calculate_kl_divergence(old_params, new_params, states):
     old_probs = policy_module.apply({'params': old_params}, states)
     new_probs = policy_module.apply({'params': new_params}, states)
-    kl = jnp.sum(old_probs * (jnp.log(old_probs + 1e-6) - jnp.log(new_probs + 1e-6)), axis=-1)
-    return jnp.mean(kl)
+    kl = jnp.sum(old_probs * (jnp.log(old_probs + 1e-10) - jnp.log(new_probs + 1e-10)), axis=-1)
+    return kl
 
 @jax.jit
 def compute_surrogate_loss(new_params, old_params, states, actions, advantages):
@@ -103,41 +106,12 @@ def compute_surrogate_loss(new_params, old_params, states, actions, advantages):
     old_probs = policy_module.apply({'params': old_params}, states)
     new_probs_for_actions = gather(new_probs, actions)
     old_probs_for_actions = gather(old_probs, actions)
-    ratio = new_probs_for_actions / (old_probs_for_actions + 1e-6)
-    surrogate_loss = ratio * advantages
-    return jnp.mean(surrogate_loss)
-
-def conjugate_gradient(old_params, states, actions, advantages, b, num_iterations=15): # Increased CG iterations
-    x = jnp.zeros_like(b)
-    r = b.copy()
-    p = r.copy()
-    rdotr = jnp.dot(r, r)
-    for _ in range(num_iterations):
-        def hvp_loss(params):
-            probs = policy_module.apply({'params': params}, states)
-            probs_for_actions = gather(probs, actions)
-            ratio = probs_for_actions / (gather(policy_module.apply({'params': old_params}, states), actions) + 1e-6)
-            surrogate_loss = ratio * advantages
-            return jnp.mean(surrogate_loss)
-        Ap = flatten_params(hvp(hvp_loss, (old_params,), (unflatten_params(p, old_params),)))
-        alpha = rdotr / jnp.dot(p, Ap)
-        x += alpha * p
-        r -= alpha * Ap
-        new_rdotr = jnp.dot(r, r)
-        beta = new_rdotr / rdotr
-        p = r + beta * p
-        rdotr = new_rdotr
-    return x
-
-def linesearch(old_params, new_params, states, actions, advantages, expected_improvement, max_backtracks=15, backtrack_ratio=0.8): # Increased backtracks
-    for step in range(max_backtracks):
-        ratio = backtrack_ratio ** step
-        step_params = jax.tree.map(lambda p, u: p + ratio * u, old_params, unflatten_params(new_params, old_params))
-        loss = compute_surrogate_loss(step_params, old_params, states, actions, advantages)
-        improvement = loss - compute_surrogate_loss(old_params, old_params, states, actions, advantages)
-        if improvement >= expected_improvement * ratio and improvement > 0:
-            return step_params
-    return old_params
+    ratio = new_probs_for_actions / (old_probs_for_actions + 1e-10)
+    
+    entropy = -jnp.sum(new_probs * jnp.log(new_probs + 1e-10), axis=-1)
+    entropy_bonus = 0.01 * jnp.mean(entropy)
+    
+    return jnp.mean(ratio * advantages) + entropy_bonus
 
 def flatten_params(params):
     return jnp.concatenate([jnp.reshape(p, (-1,)) for p in jax.tree_util.tree_leaves(params)])
@@ -153,6 +127,61 @@ def unflatten_params(flat_params, params_example):
 def hvp(f, primals, tangents):
     return jax.jvp(jax.grad(f), primals, tangents)[1]
 
+@jax.jit
+def fisher_vector_product(v, old_params, states):
+    def kl_loss(params):
+        return jnp.mean(calculate_kl_divergence(old_params, params, states))
+    tangent = unflatten_params(v, old_params)
+    return flatten_params(hvp(kl_loss, (old_params,), (tangent,)))
+
+@partial(jax.jit, static_argnames=('max_iterations',))
+def conjugate_gradient(old_params, states, b, max_iterations=15):
+    def inner_loop(i, val):
+        x, r, p, rdotr = val
+        Ap = fisher_vector_product(p, old_params, states)
+        alpha = rdotr / jnp.dot(p, Ap)
+        x_next = x + alpha * p
+        r_next = r - alpha * Ap
+        rdotr_next = jnp.dot(r_next, r_next)
+        beta = rdotr_next / (rdotr + 1e-10)
+        p_next = r_next + beta * p
+        return x_next, r_next, p_next, rdotr_next
+    x = jnp.zeros_like(b)
+    r = -b
+    p = r
+    rdotr = jnp.dot(r, r)
+    x, r, p, rdotr = jax.lax.fori_loop(0, max_iterations, inner_loop, (x, r, p, rdotr))
+    return x
+
+@partial(jax.jit, static_argnames=('max_backtracks',))
+def linesearch(old_params, new_params, states, actions, advantages, expected_improvement, max_backtracks=15, backtrack_ratio=0.8):
+    def step_cond(loop_state):
+        step, step_params = loop_state
+        ratio = backtrack_ratio ** step
+        step_params = jax.tree_util.tree_map(lambda p, u: p + ratio * u, old_params, unflatten_params(new_params, old_params))
+        loss = compute_surrogate_loss(step_params, old_params, states, actions, advantages)
+        improvement = compute_surrogate_loss(old_params, old_params, states, actions, advantages) - loss
+        kl = jnp.max(calculate_kl_divergence(old_params, step_params, states))
+        return jnp.all(jnp.array([kl > kl_target, improvement < 0.5 * expected_improvement * ratio, step < max_backtracks]))
+    def step_body(loop_state):
+        step, step_params = loop_state
+        return (step + 1, step_params)
+    step        = 0
+    step_params = old_params
+    init_val    = (step, step_params)
+    final_step, final_step_params = jax.lax.while_loop(step_cond, step_body, init_val)
+    loss = compute_surrogate_loss(final_step_params, old_params, states, actions, advantages)
+    improvement = compute_surrogate_loss(old_params, old_params, states, actions, advantages) - loss
+    kl = jnp.max(calculate_kl_divergence(old_params, final_step_params, states))
+    step_params = jax.lax.cond(
+        jnp.all(jnp.array([kl <= kl_target, improvement >= 0.5 * expected_improvement * backtrack_ratio**final_step])),
+        lambda: final_step_params,
+        lambda: old_params
+    )
+    return step_params
+
+
+
 try:
     for episode in range(num_episodes):
         states, actions, rewards, dones = [], [], [], []
@@ -161,54 +190,48 @@ try:
         done = False
         total_reward = 0
 
-        epsilon = epsilon_end + (epsilon_start - epsilon_end) * np.exp(-episode / epsilon_decay_episodes)
-
         while not done:
+            rng, action_rng = jax.random.split(rng)
             action_probs = policy_inference(policy_params, jnp.array([state]))
-
-            if np.random.rand() < epsilon:
-                action = env.action_space.sample()
-            else:
-                action = int(jnp.argmax(action_probs, axis=-1).item())
+            action = jax.random.categorical(action_rng, action_probs).item()
 
             next_state, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
-            next_state = np.array(next_state, dtype=np.float32)
+            done          = terminated or truncated
+            next_state    = np.array(next_state, dtype=np.float32)
             total_reward += reward
 
-            states.append(state)
+            states .append(state )
             actions.append(action)
             rewards.append(reward)
-            dones.append(done)
+            dones  .append(done  )
 
             state = next_state
 
-        states = jnp.array(states)
+        states  = jnp.array(states)
         actions = jnp.array(actions)
         rewards = jnp.array(rewards)
-        dones = jnp.array(dones)
+        dones   = jnp.array(dones)
 
         advantages = calculate_gae(value_params, states, rewards, dones)
-        returns = advantages + jnp.squeeze(value_inference(value_params, states), axis=-1)
-        advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages) + 1e-6)
+        returns    = advantages + jnp.squeeze(value_inference(value_params, states), axis=-1)
+        advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages) + 1e-10)
+        advantages = jnp.clip(advantages, -5, 5)
 
         value_params, value_opt_state, value_loss = value_update(value_params, value_opt_state, states, returns)
 
-        old_params = policy_params
-        b = flatten_params(jax.grad(compute_surrogate_loss)(old_params, old_params, states, actions, advantages))
-        search_direction = conjugate_gradient(old_params, states, actions, advantages, b)
+        old_params           = policy_params
+        policy_grad          = jax.grad(compute_surrogate_loss)(old_params, old_params, states, actions, advantages)
+        flat_grad            = flatten_params(policy_grad)
+        grad_norm            = jnp.linalg.norm(flat_grad)
+        search_direction     = conjugate_gradient(old_params, states, flat_grad)
+        expected_improvement = jnp.dot(search_direction, flat_grad)
+        policy_params        = linesearch(old_params, search_direction, states, actions, advantages, expected_improvement)
 
-        expected_improvement = compute_surrogate_loss(old_params, old_params, states, actions, advantages) + 1e-6
+        kl_divergence = jnp.max(calculate_kl_divergence(old_params, policy_params, states))
 
-        # Update policy parameters
-        policy_params = linesearch(old_params, search_direction, states, actions, advantages, expected_improvement)
-
-        # Calculate KL divergence after the update
-        kl_divergence = calculate_kl_divergence(old_params, policy_params, states)
-        if kl_divergence > 1.5 * kl_target:
-            print(f'Episode {episode}: Early stopping due to high KL divergence: {kl_divergence}')
-
-        print(f"Episode: {episode}, Total Reward: {total_reward}, Value Loss: {value_loss:.4f}, KL Divergence: {kl_divergence:.4f}, Epsilon: {epsilon:.4f}")
+        print(f"Episode: {episode}, Total Reward: {total_reward}, "
+              f"Value Loss: {value_loss:.4f}, KL Divergence: {kl_divergence:.4f}, "
+              f"Grad Norm: {grad_norm:.4f}")
 
 finally:
     env.close()
