@@ -135,7 +135,8 @@ def gaussian_likelihood(noise, mean, log_std):
     return pre_sum
 
 
-env = gym.make('MountainCarContinuous-v0', render_mode="human")
+# Other envs MountainCarContinuous-v0
+env = gym.make('Pendulum-v1', render_mode="human")
 state, info = env.reset()
 state       = np.array(state, dtype=np.float32)
 action_dim  = env.action_space.shape[0]
