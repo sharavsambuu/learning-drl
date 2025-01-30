@@ -9,7 +9,7 @@ from jax.scipy.sparse.linalg import cg as jax_cg
 from functools import partial
 
 
-num_episodes  = 500
+num_episodes  = 5000
 learning_rate = 0.003
 gamma         = 0.99
 kl_target     = 0.01
@@ -40,7 +40,6 @@ class ValueNetwork(nn.Module):
         return x
 
 
-
 env = gym.make('CartPole-v1', render_mode='human')
 
 state_dim     = env.observation_space.shape[0]
@@ -54,7 +53,6 @@ policy_params   = policy_module.init(policy_rng, dummy_input)['params']
 value_params    = value_module.init(value_rng, dummy_input)['params']
 value_optimizer = optax.adam(learning_rate)
 value_opt_state = value_optimizer.init(value_params)
-
 
 
 @jax.jit
@@ -185,15 +183,15 @@ def linesearch(old_params, new_params, states, actions, advantages, expected_imp
 try:
     for episode in range(num_episodes):
         states, actions, rewards, dones = [], [], [], []
-        state, info = env.reset()
-        state = np.array(state, dtype=np.float32)
-        done = False
+        state, info  = env.reset()
+        state        = np.array(state, dtype=np.float32)
+        done         = False
         total_reward = 0
 
         while not done:
             rng, action_rng = jax.random.split(rng)
-            action_probs = policy_inference(policy_params, jnp.array([state]))
-            action = jax.random.categorical(action_rng, action_probs).item()
+            action_probs    = policy_inference(policy_params, jnp.array([state]))
+            action          = jax.random.categorical(action_rng, action_probs).item()
 
             next_state, reward, terminated, truncated, info = env.step(action)
             done          = terminated or truncated
@@ -207,10 +205,10 @@ try:
 
             state = next_state
 
-        states  = jnp.array(states)
+        states  = jnp.array(states )
         actions = jnp.array(actions)
         rewards = jnp.array(rewards)
-        dones   = jnp.array(dones)
+        dones   = jnp.array(dones  )
 
         advantages = calculate_gae(value_params, states, rewards, dones)
         returns    = advantages + jnp.squeeze(value_inference(value_params, states), axis=-1)
@@ -227,7 +225,7 @@ try:
         expected_improvement = jnp.dot(search_direction, flat_grad)
         policy_params        = linesearch(old_params, search_direction, states, actions, advantages, expected_improvement)
 
-        kl_divergence = jnp.max(calculate_kl_divergence(old_params, policy_params, states))
+        kl_divergence        = jnp.max(calculate_kl_divergence(old_params, policy_params, states))
 
         print(f"Episode: {episode}, Total Reward: {total_reward}, "
               f"Value Loss: {value_loss:.4f}, KL Divergence: {kl_divergence:.4f}, "

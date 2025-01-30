@@ -1,14 +1,15 @@
 import os
 import random
 import math
-import gym
+import gymnasium   as gym
 from collections import deque
 
-import flax
+import flax.linen as nn
+from flax.linen import initializers
 import jax
 from jax import numpy as jnp
 import numpy as np
-
+import optax
 
 debug_render  = True
 debug         = False
@@ -24,7 +25,6 @@ epsilon_max   = 1.0
 epsilon_min   = 0.01
 
 gamma         = 0.99 # discount factor
-
 
 class SumTree:
     write = 0
@@ -89,121 +89,142 @@ class PERMemory:
         self.tree.update(idx, p)
 
 
-# References : 
-#    - https://github.com/keiohta/tf2rl/blob/master/tf2rl/networks/noisy_dense.py
-#    - https://flax.readthedocs.io/en/latest/notebooks/flax_guided_tour.html 
-#    - https://github.com/google/flax/blob/master/examples/vae/train.py
-#    - https://jax.readthedocs.io/en/latest/_modules/jax/nn/initializers.html
-def sigma_initializer(value, dtype=jnp.float32):
-    def init(key, shape, dtype=dtype):
-        return jnp.full(shape, value, dtype=dtype)
-    return init
+def uniform(scale=0.05, dtype=jnp.float_):
+  def init(key, shape, dtype=dtype):
+    return jax.random.uniform(key, shape, dtype, minval=-scale, maxval=scale)
+  return init
 
-class NoisyDense(flax.nn.Module):
-    def apply(self, x, noise_rng,
-            features,
-            sigma_init         = 0.017,
-            use_bias           = True,
-            kernel_initializer = jax.nn.initializers.orthogonal(),
-            bias_initializer   = jax.nn.initializers.zeros,
-            ):
-        input_features = x.shape[-1]
-        kernel_shape   = (input_features, features)
-        kernel         = self.param('kernel'      , kernel_shape, kernel_initializer)
-        sigma_kernel   = self.param('sigma_kernel', kernel_shape, sigma_initializer(value=sigma_init))
+class NoisyDense(nn.Module):
+    features    : int
+    use_bias    : bool  = True
+    sigma_init  : float = 0.017
+    kernel_init : initializers.Initializer = uniform()
+    bias_init   : initializers.Initializer = initializers.zeros
 
-        perturbed_kernel = jnp.add(
-                kernel,
-                jnp.multiply(
-                    sigma_kernel,
-                    jax.random.uniform(noise_rng, kernel_shape)
-                    )
-                )
-        outputs = jnp.dot(x, perturbed_kernel)
+    @nn.compact
+    def __call__(self, inputs, noise_key):
+        input_shape = inputs.shape[-1]
+        kernel = self.param('kernel', self.kernel_init, (input_shape, self.features))
+        sigma_kernel = self.param(
+            'sigma_kernel',
+            uniform(scale=self.sigma_init),
+            (input_shape, self.features),
+        )
+        kernel_noise     = jax.random.normal(noise_key, (input_shape, self.features))
+        perturbed_kernel = kernel + sigma_kernel * kernel_noise
 
-        if use_bias:
-            bias       = self.param('bias'      , (features,), bias_initializer)
-            sigma_bias = self.param('sigma_bias', (features,), sigma_initializer(value=sigma_init))
-            perturbed_bias = jnp.add(
-                    bias,
-                    jnp.multiply(
-                        sigma_bias,
-                        jax.random.uniform(noise_rng, (features,))
-                        )
-                    )
-            outputs = jnp.add(outputs, perturbed_bias)
+        outputs = jnp.dot(inputs, perturbed_kernel)
 
+        if self.use_bias:
+            bias = self.param('bias', self.bias_init, (self.features,))
+            sigma_bias = self.param(
+                'sigma_bias',
+                uniform(scale=self.sigma_init),
+                (self.features,),
+            )
+            bias_noise = jax.random.normal(jax.random.fold_in(noise_key, 1), (self.features,))
+            perturbed_bias = bias + sigma_bias * bias_noise
+            outputs = outputs + perturbed_bias
         return outputs
 
-class DeepQNetwork(flax.nn.Module):
-    def apply(self, x, noise_rng, n_actions):
-        dense_layer_1      = flax.nn.Dense(x, 64)
-        activation_layer_1 = flax.nn.relu(dense_layer_1)
-        noisy_dense_layer  = NoisyDense(activation_layer_1, noise_rng, 32)
-        activation_layer_2 = flax.nn.relu(noisy_dense_layer)
-        output_layer       = NoisyDense(activation_layer_2, noise_rng, n_actions)
-        return output_layer
+class NoisyQNetwork(nn.Module):
+    n_actions: int
+    @nn.compact
+    def __call__(self, x, noise_key):
+        x = nn.Dense(features=64)(x)
+        x = nn.relu(x)
+        x = NoisyDense(features=32)(x, noise_key)
+        x = nn.relu(x)
+        x = NoisyDense(features=self.n_actions)(x, noise_key)
+        return x
 
-
-env   = gym.make('CartPole-v1')
-state = env.reset()
+env   = gym.make('CartPole-v1', render_mode='human')
+state, info = env.reset()
+state = np.array(state, dtype=np.float32)
 
 n_actions        = env.action_space.n
 
-dqn_module       = DeepQNetwork.partial(n_actions=n_actions)
-_, params        = dqn_module.init_by_shape(
-        jax.random.PRNGKey(0),
-        [state.shape],
-        noise_rng=jax.random.PRNGKey(0))
-q_network        = flax.nn.Model(dqn_module, params)
-target_q_network = flax.nn.Model(dqn_module, params)
+# Initialize the Dueling Q-Network and the target network
+dqn_module       = NoisyQNetwork(n_actions=n_actions)
+dummy_input      = jnp.zeros(state.shape)
+params           = dqn_module.init(
+    {'params':jax.random.PRNGKey(0)}, # Initialize only 'params' collection
+    dummy_input,
+    noise_key=jax.random.PRNGKey(0))
+q_network_params        = params['params']
+target_q_network_params = params['params']
 
-optimizer        = flax.optim.Adam(learning_rate).create(q_network)
+optimizer        = optax.adam(learning_rate)
+opt_state        = optimizer.init(q_network_params)
 
 per_memory       = PERMemory(memory_length)
 
+
 @jax.jit
-def policy(model, x, rng):
-    predicted_q_values = model(x, noise_rng=rng)
+def policy(params, x, noise_key):
+    predicted_q_values = dqn_module.apply(
+        {'params': params}, 
+        x,
+        noise_key=noise_key) # noise_key is passed as keyword argument
     max_q_action       = jnp.argmax(predicted_q_values)
     return max_q_action, predicted_q_values
 
-
-@jax.vmap
 def calculate_td_error(q_value_vec, target_q_value_vec, action, reward):
-    td_target = reward + gamma*jnp.amax(target_q_value_vec)
-    td_error  = td_target - q_value_vec[action]
+    one_hot_actions    = jax.nn.one_hot(action, n_actions)
+    q_value            = jnp.sum(one_hot_actions*q_value_vec)
+    td_target          = reward + gamma*jnp.max(target_q_value_vec)
+    td_error           = td_target - q_value
     return jnp.abs(td_error)
 
+calculate_td_error_vmap = jax.vmap(calculate_td_error, in_axes=(0, 0, 0, 0), out_axes=0)
+
 @jax.jit
-def td_error(model, target_model, batch, rng):
+def td_error_batch(q_network_params, target_q_network_params, batch, noise_key):
     # batch[0] - states
     # batch[1] - actions
     # batch[2] - rewards
     # batch[3] - next_states
-    predicted_q_values = model(batch[0], noise_rng=rng)
-    target_q_values    = target_model(batch[3], noise_rng=rng)
-    return calculate_td_error(predicted_q_values, target_q_values, batch[1], batch[2])
+    predicted_q_values = dqn_module.apply(
+        {'params': q_network_params}, 
+        batch[0],
+        noise_key=noise_key
+        )
+    target_q_values = dqn_module.apply(
+        {'params': target_q_network_params}, 
+        batch[3],
+        noise_key=noise_key
+        )
+    return calculate_td_error_vmap(predicted_q_values, target_q_values, batch[1], batch[2])
 
-
-@jax.vmap
 def q_learning_loss(q_value_vec, target_q_value_vec, action, reward, done):
-    td_target = reward + gamma*jnp.amax(target_q_value_vec)*(1.-done)
-    td_error  = jax.lax.stop_gradient(td_target) - q_value_vec[action]
+    one_hot_actions    = jax.nn.one_hot(action, n_actions)
+    q_value            = jnp.sum(one_hot_actions*q_value_vec)
+    td_target          = reward + gamma*jnp.max(target_q_value_vec)*(1.-done)
+    td_error           = jax.lax.stop_gradient(td_target) - q_value
     return jnp.square(td_error)
 
+q_learning_loss_vmap = jax.vmap(q_learning_loss, in_axes=(0, 0, 0, 0, 0), out_axes=0)
+
 @jax.jit
-def train_step(optimizer, target_model, batch, rng):
+def train_step(q_network_params, target_q_network_params, opt_state, batch, noise_key):
     # batch[0] - states
     # batch[1] - actions
     # batch[2] - rewards
     # batch[3] - next_states
     # batch[4] - dones
-    def loss_fn(model):
-        predicted_q_values = model(batch[0], noise_rng=rng)
-        target_q_values    = target_model(batch[3], noise_rng=rng)
+    def loss_fn(params):
+        predicted_q_values = dqn_module.apply(
+            {'params': params},
+            batch[0],
+            noise_key=noise_key
+            )
+        target_q_values = dqn_module.apply(
+            {'params': target_q_network_params}, 
+            batch[3],
+            noise_key=noise_key
+            )
         return jnp.mean(
-                q_learning_loss(
+                q_learning_loss_vmap(
                     predicted_q_values,
                     target_q_values,
                     batch[1],
@@ -211,91 +232,101 @@ def train_step(optimizer, target_model, batch, rng):
                     batch[4]
                     )
                 )
-    loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
-    optimizer       = optimizer.apply_gradient(gradients)
-    return optimizer, loss, td_error(optimizer.target, target_model, batch, rng)
+    loss, gradients = jax.value_and_grad(loss_fn)(q_network_params)
+    updates, opt_state = optimizer.update(gradients, opt_state, q_network_params)
+    q_network_params = optax.apply_updates(q_network_params, updates)
+    current_td_errors = td_error_batch(
+        q_network_params,
+        target_q_network_params,
+        batch,
+        noise_key
+        )
+    return q_network_params, opt_state, loss, current_td_errors
 
-
-rng      = jax.random.PRNGKey(0)
-rng, key = jax.random.split(rng)
+rng = jax.random.PRNGKey(0)
+# Noisy networks use PRNG keys differently
+# Reference - https://github.com/google/flax/discussions/1742
+# Here this key will be used to generate new keys for each layer to sample noises
+noise_key = jax.random.PRNGKey(0)
 
 global_steps = 0
 try:
     for episode in range(num_episodes):
         episode_rewards = []
-        state = env.reset()
+        state, info = env.reset()
+        state = np.array(state, dtype=np.float32)
         while True:
             global_steps = global_steps+1
 
-            if np.random.rand() <= epsilon:
-                action = env.action_space.sample()
-            else:
-                action, q_values = policy(optimizer.target, state, rng=key)
-                if debug:
-                    print("q утгууд :"       , q_values)
-                    print("сонгосон action :", action  )
+            # action = env.action_space.sample()
+            rng, key = jax.random.split(rng)
+            noise_key, n_key = jax.random.split(noise_key)
+            action, q_values = policy(q_network_params, state, noise_key=n_key)
+            action = int(action) # convert jax array to integer
+            if debug:
+                print("q values :", q_values)
+                print("selected action :", action)
 
-            if epsilon>epsilon_min:
-                epsilon = epsilon_min+(epsilon_max-epsilon_min)*math.exp(-epsilon_decay*global_steps)
-                if debug:
-                    #print("epsilon :", epsilon)
-                    pass
+            new_state, reward, terminated, truncated, info = env.step(int(action))
+            done = terminated or truncated
+            new_state = np.array(new_state, dtype=np.float32)
 
-            new_state, reward, done, _ = env.step(int(action))
-
-            # sample нэмэхдээ temporal difference error-ийг тооцож нэмэх
-            temporal_difference = float(td_error(optimizer.target, target_q_network, (
+            noise_key, n_key = jax.random.split(noise_key)
+            temporal_difference = float(td_error_batch(
+                q_network_params,
+                target_q_network_params,
+                (
                     jnp.asarray([state    ]),
                     jnp.asarray([action   ]),
                     jnp.asarray([reward   ]),
                     jnp.asarray([new_state])
-                ), key)[0])
-            per_memory.add(temporal_difference, (state, action, reward, new_state, int(done)))
+                ),
+                noise_key=n_key)[0])
+            per_memory.add(temporal_difference, (state, action, reward, new_state, float(done)))
 
-            # Prioritized Experience Replay санах ойгоос batch үүсгээд DQN сүлжээг сургах
-            batch = per_memory.sample(batch_size)
-            states, actions, rewards, next_states, dones = [], [], [], [], []
-            for i in range(batch_size):
-                states.append     (batch[i][1][0])
-                actions.append    (batch[i][1][1])
-                rewards.append    (batch[i][1][2])
-                next_states.append(batch[i][1][3])
-                dones.append      (batch[i][1][4])
+            if (len(per_memory.tree.data)>batch_size):
+                batch = per_memory.sample(batch_size)
+                idxs, segment_data = zip(*batch)
+                states, actions, rewards, next_states, dones = [], [], [], [], []
+                for data in segment_data:
+                    states     .append(data[0])
+                    actions    .append(data[1])
+                    rewards    .append(data[2])
+                    next_states.append(data[3])
+                    dones      .append(data[4])
 
-            rng, key = jax.random.split(rng)
-            optimizer, loss, new_td_errors = train_step(
-                                        optimizer,
-                                        target_q_network,
-                                        (   # sample-дсэн batch өгөгдлүүдийг хурдасгуур 
-                                            # төхөөрөмийн санах ойруу хуулах
-                                            jnp.asarray(states),
-                                            jnp.asarray(actions),
-                                            jnp.asarray(rewards),
-                                            jnp.asarray(next_states),
-                                            jnp.asarray(dones)
-                                        ),
-                                        key
-                                    )
-            # batch-аас бий болсон temporal difference error-ийн дагуу санах ойг шинэчлэх
-            new_td_errors = np.array(new_td_errors)
-            for i in range(batch_size):
-                idx = batch[i][0]
-                per_memory.update(idx, new_td_errors[i])
+                noise_key, n_key = jax.random.split(noise_key)
+                q_network_params, opt_state, loss, new_td_errors = train_step(
+                    q_network_params,
+                    target_q_network_params,
+                    opt_state,
+                    (
+                        jnp.asarray(list(states)),
+                        jnp.asarray(list(actions), dtype=jnp.int32),
+                        jnp.asarray(list(rewards), dtype=jnp.float32),
+                        jnp.asarray(list(next_states)),
+                        jnp.asarray(list(dones), dtype=jnp.float32)
+                    ),
+                    noise_key=n_key
+                )
+                new_td_errors_np = np.array(new_td_errors)
+                for i in range(batch_size):
+                    idx = idxs[i]
+                    per_memory.update(idx, new_td_errors_np[i])
 
             episode_rewards.append(reward)
             state = new_state
 
-            # Тодорхой алхам тутамд target неорон сүлжээний жингүүдийг сайжирсан хувилбараар солих
             if global_steps%sync_steps==0:
-                target_q_network = target_q_network.replace(params=optimizer.target.params)
+                target_q_network_params = q_network_params
                 if debug:
-                    print("сайжруулсан жингүүдийг target неорон сүлжээрүү хууллаа")
+                    print("copied updated weights to the target network")
 
             if debug_render:
                 env.render()
 
             if done:
-                print("{} - нийт reward : {}".format(episode, sum(episode_rewards)))
+                print("{} - total reward : {}".format(episode, sum(episode_rewards)))
                 break
 finally:
     env.close()

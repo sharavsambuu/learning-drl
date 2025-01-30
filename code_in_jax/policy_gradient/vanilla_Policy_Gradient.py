@@ -10,7 +10,7 @@ import optax
 
 debug_render  = True
 debug         = False
-num_episodes  = 600
+num_episodes  = 5000
 learning_rate = 0.001
 gamma         = 0.99   # discount factor
 
