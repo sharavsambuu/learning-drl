@@ -15,7 +15,7 @@ debug         = False
 num_episodes  = 500
 batch_size    = 64
 learning_rate = 0.001
-sync_steps    = 50
+sync_steps    = 100
 memory_length = 4000
 
 epsilon       = 1.0
@@ -349,8 +349,7 @@ try:
 
             if global_steps%sync_steps==0:
                 target_q_network_params = q_network_params
-                if debug:
-                    print("copied updated weights to the target network")
+                print("copied updated weights to the target network")
 
             if debug_render:
                 env.render()

@@ -319,8 +319,7 @@ try:
 
             if global_steps%sync_steps==0:
                 target_q_network_params = q_network_params
-                if debug:
-                    print("copied updated weights to the target network")
+                print("copied updated weights to the target network")
 
             if debug_render:
                 env.render()
