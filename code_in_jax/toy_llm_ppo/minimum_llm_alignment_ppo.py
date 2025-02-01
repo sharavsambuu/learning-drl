@@ -221,32 +221,34 @@ def train_step(actor_params, actor_opt_state, critic_params, critic_opt_state, b
     def actor_loss_fn(actor_params):
         logits, _ = toy_llm_module.apply({'params': actor_params}, states, initial_hidden_state_actor)
         action_probabilities = nn.softmax(logits, axis=-1)
-        log_probs = jnp.log(action_probabilities[jnp.arange(states.shape[0])[:, None], jnp.arange(states.shape[1]), actions]) * masks
-        ratio = jnp.exp(log_probs - old_log_probs)
-        surr1 = ratio * advantages
-        surr2 = jnp.clip(ratio, 1 - clip_ratio, 1 + clip_ratio) * advantages
+        # Clip action probabilities to avoid log(0)
+        clipped_probabilities = jnp.clip(action_probabilities, 1e-8, 1.0)
+        log_probs  = jnp.log(clipped_probabilities[jnp.arange(states.shape[0])[:, None], jnp.arange(states.shape[1]), actions]) * masks
+        ratio      = jnp.exp(log_probs - old_log_probs)
+        surr1      = ratio * advantages
+        surr2      = jnp.clip(ratio, 1 - clip_ratio, 1 + clip_ratio) * advantages
         actor_loss = -jnp.mean(jnp.sum(jnp.minimum(surr1, surr2), axis=1))
         return actor_loss
 
     def critic_loss_fn(critic_params):
-        values, _ = critic_module.apply({'params': critic_params}, states, initial_hidden_state_critic)
+        values, _   = critic_module.apply({'params': critic_params}, states, initial_hidden_state_critic)
         critic_loss = jnp.mean(jnp.sum(((values - returns)**2) * masks, axis=1))
         return critic_loss
 
     def combined_loss_fn(params):
-        actor_loss_val = actor_loss_fn(params[0])
+        actor_loss_val  = actor_loss_fn(params[0])
         critic_loss_val = critic_loss_fn(params[1])
-        combined_loss = actor_loss_val + critic_loss_val
+        combined_loss   = actor_loss_val + critic_loss_val
         return combined_loss, (actor_loss_val, critic_loss_val)
 
     (combined_loss, auxiliary_losses), grads = jax.value_and_grad(combined_loss_fn, has_aux=True)([actor_params, critic_params])
     actor_loss_val, critic_loss_val = auxiliary_losses
     actor_grads, critic_grads = grads
 
-    actor_updates, actor_opt_state = actor_optimizer.update(actor_grads, actor_opt_state, actor_params)
+    actor_updates, actor_opt_state   = actor_optimizer.update(actor_grads, actor_opt_state, actor_params)
     critic_updates, critic_opt_state = critic_optimizer.update(critic_grads, critic_opt_state, critic_params)
 
-    actor_params = optax.apply_updates(actor_params, actor_updates)
+    actor_params  = optax.apply_updates(actor_params, actor_updates)
     critic_params = optax.apply_updates(critic_params, critic_updates)
 
     return actor_params, actor_opt_state, critic_params, critic_opt_state, combined_loss, actor_loss_val, critic_loss_val
