@@ -69,7 +69,7 @@ mini_batch_size           = 16
 sentence_length           = 20
 hidden_size               = 128
 epsilon_exploration       = 0.1
-positive_example_episodes = 50
+positive_example_episodes = 500
 
 
 vocabulary_characters = [
@@ -151,6 +151,14 @@ def critic_inference(critic_params, x, hidden_state):
     return value[:, -1, :], next_hidden_state
 
 
+def reward_model_word_count(sentence, positive_keywords):
+    words = sentence.lower().split()
+    positive_word_count = 0
+    for word in words:
+        if word in positive_keywords:
+            positive_word_count += 1
+    return positive_word_count
+
 def levenshtein_edit_distance(s1, s2):
     if len(s1) < len(s2):
         return levenshtein_edit_distance(s2, s1)
@@ -180,8 +188,11 @@ def reward_model_edit_distance(sentence, positive_keywords):
     return total_reward
 
 def reward_model(sentence):
-    positive_keywords = ["good", "great", "wonderful", "amazing", "happy", "joyful", "positive"]
-    return reward_model_edit_distance(sentence=sentence, positive_keywords=positive_keywords)
+    positive_keywords    = ["good", "great", "wonderful", "amazing", "happy", "joyful", "positive"]
+    edit_distance_reward = reward_model_edit_distance(sentence=sentence, positive_keywords=positive_keywords)
+    word_count_reward    = reward_model_word_count(sentence=sentence, positive_keywords=positive_keywords)
+    combined_reward      = edit_distance_reward + 0.3 * word_count_reward  
+    return combined_reward
 
 
 def gae_advantage(rewards, values, last_value, gamma, gae_lambda):
