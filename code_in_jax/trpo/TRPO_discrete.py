@@ -5,7 +5,6 @@ from jax import numpy as jnp
 import numpy as np
 import optax
 import jax.tree_util
-from jax.scipy.sparse.linalg import cg as jax_cg
 from functools import partial
 
 
@@ -13,7 +12,6 @@ num_episodes  = 5000
 learning_rate = 0.003
 gamma         = 0.99
 kl_target     = 0.01
-batch_size    = 128
 n_actions     = 2
 
 
@@ -40,7 +38,7 @@ class ValueNetwork(nn.Module):
         return x
 
 
-env = gym.make('CartPole-v1', render_mode='human')
+env = gym.make('CartPole-v1', render_mode="human") 
 
 state_dim     = env.observation_space.shape[0]
 policy_module = PolicyNetwork(n_actions=n_actions)
@@ -50,7 +48,7 @@ rng = jax.random.PRNGKey(0)
 rng, policy_rng, value_rng = jax.random.split(rng, 3)
 dummy_input     = jnp.zeros((1, state_dim))
 policy_params   = policy_module.init(policy_rng, dummy_input)['params']
-value_params    = value_module.init(value_rng, dummy_input)['params']
+value_params    = value_module .init(value_rng , dummy_input)['params']
 value_optimizer = optax.adam(learning_rate)
 value_opt_state = value_optimizer.init(value_params)
 
@@ -85,11 +83,17 @@ def value_update(value_params, value_opt_state, states, returns):
         values = value_module.apply({'params': params}, states)
         return jnp.mean(jnp.square(values - returns))
 
-    for _ in range(5):
-        loss, grads = jax.value_and_grad(value_loss_fn)(value_params)
-        updates, new_value_opt_state = value_optimizer.update(grads, value_opt_state, value_params)
-        value_params = optax.apply_updates(value_params, updates)
-    return value_params, new_value_opt_state, loss
+    # Use jax.lax.fori_loop for better practice within jitted functions.
+    def body_fun(i, val):
+        params, opt_state = val
+        loss, grads = jax.value_and_grad(value_loss_fn)(params)
+        updates, new_opt_state = value_optimizer.update(grads, opt_state, params)
+        params = optax.apply_updates(params, updates)
+        return params, new_opt_state
+
+    value_params, value_opt_state = jax.lax.fori_loop(0, 5, body_fun, (value_params, value_opt_state))
+    loss = value_loss_fn(value_params)
+    return value_params, value_opt_state, loss
 
 @jax.jit
 def calculate_kl_divergence(old_params, new_params, states):
@@ -105,10 +109,10 @@ def compute_surrogate_loss(new_params, old_params, states, actions, advantages):
     new_probs_for_actions = gather(new_probs, actions)
     old_probs_for_actions = gather(old_probs, actions)
     ratio = new_probs_for_actions / (old_probs_for_actions + 1e-10)
-    
+
     entropy = -jnp.sum(new_probs * jnp.log(new_probs + 1e-10), axis=-1)
     entropy_bonus = 0.01 * jnp.mean(entropy)
-    
+
     return jnp.mean(ratio * advantages) + entropy_bonus
 
 def flatten_params(params):
@@ -145,7 +149,7 @@ def conjugate_gradient(old_params, states, b, max_iterations=15):
         p_next = r_next + beta * p
         return x_next, r_next, p_next, rdotr_next
     x = jnp.zeros_like(b)
-    r = -b
+    r = b  
     p = r
     rdotr = jnp.dot(r, r)
     x, r, p, rdotr = jax.lax.fori_loop(0, max_iterations, inner_loop, (x, r, p, rdotr))
@@ -160,6 +164,7 @@ def linesearch(old_params, new_params, states, actions, advantages, expected_imp
         loss = compute_surrogate_loss(step_params, old_params, states, actions, advantages)
         improvement = compute_surrogate_loss(old_params, old_params, states, actions, advantages) - loss
         kl = jnp.max(calculate_kl_divergence(old_params, step_params, states))
+        # Corrected condition: improvement should be >=, and we check kl <= kl_target.
         return jnp.all(jnp.array([kl > kl_target, improvement < 0.5 * expected_improvement * ratio, step < max_backtracks]))
     def step_body(loop_state):
         step, step_params = loop_state
@@ -171,6 +176,7 @@ def linesearch(old_params, new_params, states, actions, advantages, expected_imp
     loss = compute_surrogate_loss(final_step_params, old_params, states, actions, advantages)
     improvement = compute_surrogate_loss(old_params, old_params, states, actions, advantages) - loss
     kl = jnp.max(calculate_kl_divergence(old_params, final_step_params, states))
+    # Accept if improvement and KL are within bounds.
     step_params = jax.lax.cond(
         jnp.all(jnp.array([kl <= kl_target, improvement >= 0.5 * expected_improvement * backtrack_ratio**final_step])),
         lambda: final_step_params,
@@ -221,15 +227,16 @@ try:
         policy_grad          = jax.grad(compute_surrogate_loss)(old_params, old_params, states, actions, advantages)
         flat_grad            = flatten_params(policy_grad)
         grad_norm            = jnp.linalg.norm(flat_grad)
-        search_direction     = conjugate_gradient(old_params, states, flat_grad)
-        expected_improvement = jnp.dot(search_direction, flat_grad)
+        search_direction     = conjugate_gradient(old_params, states, flat_grad) 
+        expected_improvement = jnp.dot(search_direction, flat_grad) 
         policy_params        = linesearch(old_params, search_direction, states, actions, advantages, expected_improvement)
 
         kl_divergence        = jnp.max(calculate_kl_divergence(old_params, policy_params, states))
 
-        print(f"Episode: {episode}, Total Reward: {total_reward}, "
-              f"Value Loss: {value_loss:.4f}, KL Divergence: {kl_divergence:.4f}, "
-              f"Grad Norm: {grad_norm:.4f}")
+        if episode % 10 == 0:
+            print(f"Episode: {episode}, Total Reward: {total_reward}, "
+                  f"Value Loss: {value_loss:.4f}, KL Divergence: {kl_divergence:.4f}, "
+                  f"Grad Norm: {grad_norm:.4f}, Expected Improvement: {expected_improvement:.4f}")
 
 finally:
     env.close()
