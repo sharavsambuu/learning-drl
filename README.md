@@ -11,7 +11,7 @@
 # Other things I will learn in the near future
 
     - PPO's role in LLM alignments
-    - Try to build mini reasoner, inspired by DeepSeek R1
+    - Try to build mini reasoner, using GRPO of DeepSeek R1
 
 
 # Algo names and intuition table
