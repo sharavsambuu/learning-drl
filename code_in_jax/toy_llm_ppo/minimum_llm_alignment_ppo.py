@@ -48,7 +48,6 @@
 import os
 import random
 import math
-import gym
 from collections import deque
 import flax.linen as nn
 import jax
