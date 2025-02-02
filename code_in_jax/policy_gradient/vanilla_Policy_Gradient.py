@@ -79,9 +79,9 @@ try:
             action_probabilities /= action_probabilities.sum()
             action                = np.random.choice(n_actions, p=action_probabilities)
 
-            new_state, reward, terminated, truncated, info = env.step(int(action)) # env.step returns new values
+            new_state, reward, terminated, truncated, info = env.step(int(action)) 
             done = terminated or truncated
-            new_state = np.array(new_state, dtype=np.float32) # ensure next_state is float32
+            new_state = np.array(new_state, dtype=np.float32) 
 
             states .append(state )
             actions.append(action)

@@ -11,7 +11,7 @@ import jax
 from jax import numpy as jnp
 import numpy as np
 import optax
-import queue # For gradient queue
+import queue 
 
 
 debug_render  = False
@@ -61,15 +61,15 @@ global_critic_optimizer = optax.adam(learning_rate).init(global_critic_params)
 
 
 @jax.jit
-def actor_inference(actor_params, state): # Inference using parameters
+def actor_inference(actor_params, state): 
     return actor_module.apply({'params': actor_params}, state)
 
 @jax.jit
-def critic_inference(critic_params, state): # Inference using parameters
+def critic_inference(critic_params, state): 
     return critic_module.apply({'params': critic_params}, state)
 
 @jax.jit
-def backpropagate_critic(critic_params, critic_optimizer, states, discounted_rewards): # Backpropagate Critic
+def backpropagate_critic(critic_params, critic_optimizer, states, discounted_rewards): 
     def loss_fn(params):
         values      = critic_module.apply({'params': params}, states)
         values      = jnp.reshape(values, (values.shape[0],))
@@ -79,17 +79,17 @@ def backpropagate_critic(critic_params, critic_optimizer, states, discounted_rew
     return gradients # Return gradients
 
 @jax.jit
-def backpropagate_actor(actor_params, critic_params, states, discounted_rewards, actions): # Backpropagate Actor
+def backpropagate_actor(actor_params, critic_params, states, discounted_rewards, actions): 
     values      = jax.lax.stop_gradient(critic_inference(critic_params, states))
     values      = jnp.reshape(values, (values.shape[0],))
     advantages  = discounted_rewards - values
     def loss_fn(params):
         action_probabilities = actor_module.apply({'params': params}, states)
-        probabilities        = action_probabilities[jnp.arange(len(actions)), actions] # Efficiently gather probabilities
+        probabilities        = action_probabilities[jnp.arange(len(actions)), actions] 
         log_probabilities    = -jnp.log(probabilities)
         return jnp.mean(jnp.multiply(log_probabilities, advantages))
     loss, gradients = jax.value_and_grad(loss_fn)(actor_params)
-    return gradients # Return gradients
+    return gradients 
 
 
 episode_count     = 0
@@ -106,8 +106,8 @@ def apply_gradients_thread(): # Separate thread for applying gradients
     global training_finished
 
     try:
-        while not training_finished: # Check training_finished flag
-            actor_gradients, critic_gradients = gradient_queue.get(timeout=1) # Get gradients from queue with timeout
+        while not training_finished: 
+            actor_gradients, critic_gradients = gradient_queue.get(timeout=1) 
             if actor_gradients is None: # Sentinel value to stop thread
                 break
             with lock: # Lock only for applying gradients to global optimizers
@@ -126,11 +126,11 @@ def apply_gradients_thread(): # Separate thread for applying gradients
         print("Gradient applier thread finished.")
 
 
-gradient_applier_thread = threading.Thread(target=apply_gradients_thread, daemon=True) # Create gradient applier thread
-gradient_applier_thread.start() # Start gradient applier thread
+gradient_applier_thread = threading.Thread(target=apply_gradients_thread, daemon=True) 
+gradient_applier_thread.start() 
 
 
-def training_worker(env, thread_index): # Training worker function (modified for asynchronous updates)
+def training_worker(env, thread_index): 
     global global_actor_params
     global global_critic_params
     global gradient_queue
@@ -138,12 +138,12 @@ def training_worker(env, thread_index): # Training worker function (modified for
     global global_step
     global training_finished
 
-    local_actor_params  = global_actor_params # Initialize local parameters with global parameters
+    local_actor_params  = global_actor_params 
     local_critic_params = global_critic_params
 
-    try: # Wrap worker in try-except for Ctrl+C
+    try: 
         for episode in range(num_episodes):
-            if training_finished: # Check training_finished flag at episode start
+            if training_finished: 
                 break
 
             state, info = env.reset()
@@ -151,21 +151,20 @@ def training_worker(env, thread_index): # Training worker function (modified for
 
             while True:
                 global_step = global_step + 1
-                if training_finished: # Check training_finished flag at each step
+                if training_finished: 
                     break
 
-                # Inference using *local* parameters
-                action_probabilities  = actor_inference(local_actor_params, jnp.asarray(state)) # Use local actor parameters for inference
+                action_probabilities  = actor_inference(local_actor_params, jnp.asarray(state)) 
                 action_probabilities  = np.array(action_probabilities)
                 action                = np.random.choice(n_actions, p=action_probabilities)
 
                 next_state, reward, terminated, truncated, info = env.step(int(action))
                 done = terminated or truncated
 
-                states.append(state)
-                actions.append(action)
-                rewards.append(reward)
-                dones.append(int(done))
+                states .append(state    )
+                actions.append(action   )
+                rewards.append(reward   )
+                dones  .append(int(done))
 
                 state = next_state
 
@@ -187,39 +186,38 @@ def training_worker(env, thread_index): # Training worker function (modified for
                     discounted_rewards = (discounted_rewards - np.mean(discounted_rewards)) / (np.std(discounted_rewards)+1e-8)
 
 
-                    # Backpropagation using *local* parameters
-                    actor_gradients = backpropagate_actor( # Get actor gradients
-                        local_actor_params, # Use local actor params
-                        local_critic_params, # Use local critic params
+                    actor_gradients = backpropagate_actor( 
+                        local_actor_params, 
+                        local_critic_params, 
                         jnp.asarray(np.array(states)),
                         jnp.asarray(np.array(discounted_rewards)),
                         jnp.asarray(np.array(actions), dtype=jnp.int32)
                     )
-                    critic_gradients = backpropagate_critic( # Get critic gradients
-                        local_critic_params, # Use local critic params
-                        global_critic_optimizer, # Pass global optimizer (structure) - not really used in loss/grad calc in this version but might be in others
+                    critic_gradients = backpropagate_critic( 
+                        local_critic_params, 
+                        global_critic_optimizer, 
                         jnp.asarray(np.array(states)),
                         jnp.asarray(np.array(discounted_rewards)),
                     )
 
-                    gradient_queue.put((actor_gradients, critic_gradients)) # Enqueue gradients
+                    gradient_queue.put((actor_gradients, critic_gradients)) 
 
-                    if episode_count % 1 == 0: # Sync local params with global params periodically
-                        with lock: # Lock when accessing global parameters
-                            local_actor_params  = global_actor_params # Sync local actor params
-                            local_critic_params = global_critic_params # Sync local critic params
+                    if episode_count % 1 == 0: 
+                        with lock: 
+                            local_actor_params  = global_actor_params 
+                            local_critic_params = global_critic_params 
                     episode_count += 1
-                    break # Episode done
-        print("{} id-тэй thread ажиллаж дууслаа.".format(thread_index)) # Worker thread finished
-    except KeyboardInterrupt: # Handle Ctrl+C in workers
+                    break 
+        print("{} id-тэй thread ажиллаж дууслаа.".format(thread_index)) 
+    except KeyboardInterrupt: 
         print("{} id-тэй thread-д KeyboardInterrupt exception!".format(thread_index))
-        pass # Exit gracefully
+        pass 
 
 
-envs = [gym.make(env_name) for _ in range(n_workers)] # Create multiple environments
+envs = [gym.make(env_name) for _ in range(n_workers)] 
 
 try:
-    workers = [ # Create worker threads
+    workers = [ 
             threading.Thread(
                 target = training_worker,
                 daemon = True,
@@ -227,24 +225,24 @@ try:
             ) for i in range(n_workers)
         ]
 
-    for worker in workers: # Start worker threads
+    for worker in workers: 
         time.sleep(1)
         worker.start()
 
-    for worker in workers: # Wait for workers to finish (will be interrupted by Ctrl+C)
+    for worker in workers: 
         worker.join()
 
-except KeyboardInterrupt: # Handle Ctrl+C in main thread
+except KeyboardInterrupt: 
     print("Main thread received KeyboardInterrupt! Setting training_finished flag...")
-    training_finished = True # Signal workers and gradient thread to stop
+    training_finished = True 
 
 finally:
     print("Sending sentinel value to gradient queue...")
-    gradient_queue.put(None) # Send sentinel value to stop gradient applier thread
-    gradient_applier_thread.join(timeout=5) # Wait for gradient applier thread to finish, with timeout
-    if gradient_applier_thread.is_alive(): # Check if thread timed out
+    gradient_queue.put(None) 
+    gradient_applier_thread.join(timeout=5) 
+    if gradient_applier_thread.is_alive(): 
         print("Warning: Gradient applier thread did not finish within timeout.")
     print("Closing environments...")
-    for env in envs: # Close environments
+    for env in envs: 
         env.close()
     print("Program finished.")
