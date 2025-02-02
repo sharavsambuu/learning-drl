@@ -249,7 +249,7 @@ for episode in range(num_episodes):
             actor_params, actor_opt_state, actor_loss = update_actor(
                 actor_params, actor_opt_state, critic_params, jnp.array(state_batch, dtype=jnp.float32)
             )
-            actor_target_params = soft_update(actor_target_params, actor_params, tau)
+            actor_target_params  = soft_update(actor_target_params, actor_params, tau)
             critic_target_params = soft_update(critic_target_params, critic_params, tau)
         if debug_render:
             env.render()
