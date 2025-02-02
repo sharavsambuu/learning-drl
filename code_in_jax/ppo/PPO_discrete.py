@@ -50,7 +50,6 @@ actor_critic_params = actor_critic_module.init(jax.random.PRNGKey(0), dummy_inpu
 optimizer           = optax.adam(learning_rate)
 opt_state           = optimizer.init(actor_critic_params)
 
-
 @jax.jit
 def policy_inference(params, x):
     action_probs, _ = actor_critic_module.apply({'params': params}, x)
@@ -72,13 +71,13 @@ def calculate_gae(rewards, values, next_values, dones):
     return jnp.array(advantages)
 
 @jax.jit
-def ppo_update(params, opt_state, states, actions, old_log_probs, advantages, returns):
+def ppo_update(params, opt_state, states, actions, old_log_probs, advantages, returns, rng_key):
     def loss_fn(params, states, actions, old_log_probs, advantages, returns):
         action_probs, values = actor_critic_module.apply({'params': params}, states)
         values = values.squeeze()
 
         # Actor loss
-        log_probs = jnp.log(gather(action_probs, actions) + 1e-6)
+        log_probs = jnp.log(jnp.clip(gather(action_probs, actions), 1e-8, 1.0)) # Clip probabilities
         ratio = jnp.exp(log_probs - old_log_probs)
         pg_loss1 = -advantages * ratio
         pg_loss2 = -advantages * jnp.clip(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon)
@@ -88,7 +87,7 @@ def ppo_update(params, opt_state, states, actions, old_log_probs, advantages, re
         critic_loss = jnp.square(returns - values).mean()
 
         # Entropy loss
-        entropy = -jnp.sum(action_probs * jnp.log(action_probs + 1e-6), axis=-1).mean()
+        entropy = -jnp.sum(action_probs * jnp.log(jnp.clip(action_probs, 1e-9, 1.0)), axis=-1).mean() # Clip probabilities
 
         # Total loss
         total_loss = actor_loss + value_coeff * critic_loss - entropy_coeff * entropy
@@ -96,20 +95,21 @@ def ppo_update(params, opt_state, states, actions, old_log_probs, advantages, re
         return total_loss, (actor_loss, critic_loss, entropy)
 
     for _ in range(epochs_per_update):
+        rng_key, permutation_rng_key = jax.random.split(rng_key)
         num_samples = len(states)
         indices = jnp.arange(num_samples)
-        indices = jax.random.permutation(jax.random.PRNGKey(0), indices)
+        indices = jax.random.permutation(permutation_rng_key, indices)
         
         for start in range(0, num_samples, mini_batch_size):
             end = start + mini_batch_size
             batch_indices = indices[start:end]
             
-            mini_batch_states       = states      [batch_indices]
-            mini_batch_actions      = actions     [batch_indices]
+            mini_batch_states        = states       [batch_indices]
+            mini_batch_actions       = actions      [batch_indices]
             mini_batch_old_log_probs = old_log_probs[batch_indices]
-            mini_batch_advantages   = advantages  [batch_indices]
-            mini_batch_returns      = returns     [batch_indices]
-            
+            mini_batch_advantages    = advantages   [batch_indices]
+            mini_batch_returns       = returns      [batch_indices]
+
             (total_loss, (actor_loss, critic_loss, entropy)), grads = jax.value_and_grad(loss_fn, has_aux=True)(
                 params, mini_batch_states, mini_batch_actions, mini_batch_old_log_probs, mini_batch_advantages, mini_batch_returns
             )
@@ -117,7 +117,7 @@ def ppo_update(params, opt_state, states, actions, old_log_probs, advantages, re
             updates, new_opt_state = optimizer.update(grads, opt_state, params)
             params                 = optax.apply_updates(params, updates)
 
-    return params, new_opt_state, total_loss, actor_loss, critic_loss, entropy
+    return params, new_opt_state, total_loss, actor_loss, critic_loss, entropy, rng_key
 
 @jax.vmap
 def gather(probability_vec, action_index):
@@ -141,7 +141,7 @@ try:
             action_probs = policy_inference(actor_critic_params, jnp.array([state]))
             value        = get_values(actor_critic_params, jnp.array([state]))
             action       = jax.random.categorical(action_rng, action_probs[0])
-            log_prob     = jnp.log(action_probs[0][action] + 1e-6)
+            log_prob     = jnp.log(jnp.clip(action_probs[0][action], 1e-9, 1.0)) # Clip probabilities
 
             next_state, reward, terminated, truncated, info = env.step(int(action))
             done          = terminated or truncated
@@ -161,14 +161,16 @@ try:
         advantages = calculate_gae(jnp.array(rewards), jnp.array(values), next_value, jnp.array(dones))
         returns    = advantages + jnp.array(values)
 
-        actor_critic_params, opt_state, total_loss, actor_loss, critic_loss, entropy = ppo_update(
+        master_rng, update_rng = jax.random.split(master_rng)
+        actor_critic_params, opt_state, total_loss, actor_loss, critic_loss, entropy, master_rng = ppo_update(
             actor_critic_params,
             opt_state,
             jnp.array(states),
             jnp.array(actions),
             jnp.array(log_probs),
             advantages,
-            returns
+            returns,
+            update_rng
         )
 
         print(f"Episode: {episode}, Total Reward: {total_reward}, Total Loss: {total_loss:.4f}, Actor Loss: {actor_loss:.4f}, Critic Loss: {critic_loss:.4f}, Entropy: {entropy:.4f}")
