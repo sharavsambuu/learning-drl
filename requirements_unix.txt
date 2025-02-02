@@ -9,3 +9,7 @@ flax
 ray[default]
 matplotlib
 tk
+pandas
+numpy
+jupyter
+matplotlib
