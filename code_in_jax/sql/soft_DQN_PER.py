@@ -1,20 +1,21 @@
-# Soft Q-Learning
-# References : 
+# Soft Q-Learning (SQL) - Updated for Flax Linen and Optax
+# References :
 #   - https://bair.berkeley.edu/blog/2017/10/06/soft-q-learning/
 #   - https://arxiv.org/pdf/1702.08165.pdf
 #   - https://zhuanlan.zhihu.com/p/150527098
 #   - https://en.wikipedia.org/wiki/LogSumExp
 
+
 import os
 import random
 import math
-import gym
+import gymnasium as gym
 from collections import deque
-
-import flax
+import flax.linen as nn
 import jax
 from jax import numpy as jnp
 import numpy as np
+import optax
 
 
 debug_render  = True
@@ -24,13 +25,8 @@ batch_size    = 64
 learning_rate = 0.001
 sync_steps    = 100
 memory_length = 4000
-
-epsilon       = 1.0
-epsilon_decay = 0.001
-epsilon_max   = 1.0
-epsilon_min   = 0.01
-
-gamma         = 0.99 # discount factor
+tau           = 0.005   # Temperature parameter for Soft Q-Learning
+gamma         = 0.99    # Discount factor
 
 
 class SumTree:
@@ -96,175 +92,196 @@ class PERMemory:
         self.tree.update(idx, p)
 
 
-class DeepQNetwork(flax.nn.Module):
-    def apply(self, x, n_actions):
-        dense_layer_1      = flax.nn.Dense(x, 64)
-        activation_layer_1 = flax.nn.relu(dense_layer_1)
-        dense_layer_2      = flax.nn.Dense(activation_layer_1, 32)
-        activation_layer_2 = flax.nn.relu(dense_layer_2)
-        output_layer       = flax.nn.Dense(activation_layer_2, n_actions)
-        return output_layer
+class SoftQNetwork(nn.Module):
+    n_actions: int
+    @nn.compact
+    def __call__(self, x):
+        x = nn.Dense(features=64)(x)
+        x = nn.relu(x)
+        x = nn.Dense(features=32)(x)
+        x = nn.relu(x)
+        q_values = nn.Dense(features=self.n_actions)(x)
+        return q_values
 
 
-env   = gym.make('CartPole-v1')
-state = env.reset()
+env = gym.make('CartPole-v1', render_mode='human')
+state, info = env.reset()
+state = np.array(state, dtype=np.float32)
+n_actions = env.action_space.n
 
-n_actions        = env.action_space.n
+# Initialize the Soft Q-Network
+dqn_module  = SoftQNetwork(n_actions=n_actions)
+dummy_input = jnp.zeros(state.shape)
+params      = dqn_module.init(jax.random.PRNGKey(0), dummy_input)
+q_network_params        = params['params']
+target_q_network_params = params['params']
 
-dqn_module       = DeepQNetwork.partial(n_actions=n_actions)
-_, params        = dqn_module.init_by_shape(jax.random.PRNGKey(0), [state.shape])
-q_network        = flax.nn.Model(dqn_module, params)
-target_q_network = flax.nn.Model(dqn_module, params)
+optimizer = optax.adam(learning_rate)
+opt_state = optimizer.init(q_network_params)
 
-optimizer        = flax.optim.Adam(learning_rate).create(q_network)
-
-per_memory       = PERMemory(memory_length)
+per_memory = PERMemory(memory_length)
 
 
 @jax.jit
-def policy(model, x):
-    predicted_q_values = model(x)
-    values             = get_values(predicted_q_values)
-    alpha              = 4
-    distribution       = jnp.exp((predicted_q_values-values)/alpha)
-    return distribution, predicted_q_values
+def policy(params, x):
+    q_values = dqn_module.apply({'params': params}, x)
+    policy_probabilities = nn.softmax(q_values/tau)
+    # Due to some errors like NaN values because of small tau in softmax, I will use log_softmax
+    # log_policy_probabilities = nn.log_softmax(q_values/tau)
+    return policy_probabilities
 
-
-@jax.vmap
-def calculate_td_error(q_value_vec, target_q_value_vec, action, reward):
-    td_target = reward + gamma*jnp.amax(target_q_value_vec)
-    td_error  = td_target - q_value_vec[action]
+def calculate_td_error(q_value_vec, target_q_value, action, reward):
+    one_hot_actions = jax.nn.one_hot(action, n_actions)
+    q_value = jnp.sum(one_hot_actions * q_value_vec)
+    td_error = reward + gamma * target_q_value - q_value
     return jnp.abs(td_error)
 
+calculate_td_error_vmap = jax.vmap(calculate_td_error, in_axes=(0, 0, 0, 0), out_axes=0)
+
 @jax.jit
-def td_error(model, target_model, batch):
+def td_error_batch(q_network_params, target_q_network_params, batch):
     # batch[0] - states
     # batch[1] - actions
     # batch[2] - rewards
     # batch[3] - next_states
-    predicted_q_values = model(batch[0])
-    target_q_values    = target_model(batch[3])
-    return calculate_td_error(predicted_q_values, target_q_values, batch[1], batch[2])
+    predicted_q_values = dqn_module.apply({'params': q_network_params}, batch[0])
+    target_q_values = dqn_module.apply({'params': target_q_network_params}, batch[3])
 
+    # Calculate target based on log-sum-exp
+    target_v = jax.scipy.special.logsumexp(target_q_values / tau, axis=1) - jnp.log(n_actions)
+    target_q_value = tau * target_v
+    # The above 2 lines are used instead of:
+    # target_q_values = jax.nn.softmax(target_q_values / tau)
+    # target_q_value = jnp.sum(target_q_values * (target_q_values - tau * jnp.log(target_q_values)), axis=1)
 
-@jax.jit
-def get_values(q_value_batch):
-    # https://en.wikipedia.org/wiki/Normal_distribution#Maximum_entropy
-    # https://bair.berkeley.edu/blog/2017/10/06/soft-q-learning/ Soft Bellman equation
-    # https://arxiv.org/pdf/1805.00909.pdf
-    # Тайлбар :
-    # alpha - энтропиний темпертур
-    alpha  = 4.
-    values = alpha*jnp.log(jnp.sum(jnp.exp(q_value_batch/alpha), axis=1, keepdims=True))
-    return values
+    return calculate_td_error_vmap(predicted_q_values, target_q_value, batch[1], batch[2])
 
-@jax.vmap
-def q_learning_loss(q_value_vec, target_value, action, reward, done):
-    # Soft Bellman
-    # Q(s,a)          = r + gamma*sofmax(Q(s',a'))
-    # softmax(Q(s,a)) = log∫exp(Q(s,a))da
-    # Q(s,a)          = r + log(sum(exp(Q(s',a')))
-    td_target = reward + gamma*target_value*(1.-done)
-    td_error  = jax.lax.stop_gradient(td_target) - q_value_vec[action]
+def soft_q_learning_loss(q_value_vec, target_q_value, action, reward, done):
+    one_hot_actions = jax.nn.one_hot(action, n_actions)
+    q_value = jnp.sum(one_hot_actions * q_value_vec)
+    
+    # Calculate target based on log-sum-exp
+    # target_v = jax.scipy.special.logsumexp(target_q_value / tau, axis=1) - jnp.log(n_actions)
+    # target_q = tau * target_v
+    # The above 2 lines are used instead of:
+    # target_q_values = jax.nn.softmax(target_q_value / tau)
+    # target_q = jnp.sum(target_q_values * (target_q_values - tau * jnp.log(target_q_values)), axis=1)
+
+    td_target = reward + gamma * target_q_value * (1. - done)
+    td_error = jax.lax.stop_gradient(td_target) - q_value
     return jnp.square(td_error)
 
+soft_q_learning_loss_vmap = jax.vmap(soft_q_learning_loss, in_axes=(0, 0, 0, 0, 0), out_axes=0)
+
 @jax.jit
-def train_step(optimizer, target_model, batch):
+def train_step(q_network_params, target_q_network_params, opt_state, batch):
     # batch[0] - states
     # batch[1] - actions
     # batch[2] - rewards
     # batch[3] - next_states
     # batch[4] - dones
-    def loss_fn(model):
-        predicted_q_values = model(batch[0])
-        target_q_values    = target_model(batch[3])
-        target_values      = get_values(target_q_values)
+    def loss_fn(params):
+        predicted_q_values = dqn_module.apply({'params': params}, batch[0])
+        target_q_values = dqn_module.apply({'params': target_q_network_params}, batch[3])
+
+        # Calculate target based on log-sum-exp
+        target_v = jax.scipy.special.logsumexp(target_q_values / tau, axis=1) - jnp.log(n_actions)
+        target_q_value = tau * target_v
+        # The above 2 lines are used instead of:
+        # target_q_values = jax.nn.softmax(target_q_values / tau)
+        # target_q = jnp.sum(target_q_values * (target_q_values - tau * jnp.log(target_q_values)), axis=1)
+
         return jnp.mean(
-                q_learning_loss(
-                    predicted_q_values,
-                    target_values,
-                    batch[1],
-                    batch[2],
-                    batch[4]
-                    )
-                )
-    loss, gradients = jax.value_and_grad(loss_fn)(optimizer.target)
-    optimizer       = optimizer.apply_gradient(gradients)
-    return optimizer, loss, td_error(optimizer.target, target_model, batch)
+            soft_q_learning_loss_vmap(
+                predicted_q_values,
+                target_q_value,
+                batch[1],
+                batch[2],
+                batch[4]
+            )
+        )
+
+    loss, gradients = jax.value_and_grad(loss_fn)(q_network_params)
+    updates, opt_state = optimizer.update(gradients, opt_state, q_network_params)
+    q_network_params = optax.apply_updates(q_network_params, updates)
+    current_td_errors = td_error_batch(q_network_params, target_q_network_params, batch)
+    return q_network_params, opt_state, loss, current_td_errors
 
 
 global_steps = 0
 try:
     for episode in range(num_episodes):
         episode_rewards = []
-        state = env.reset()
+        state, info = env.reset()
+        state = np.array(state, dtype=np.float32)
         while True:
-            global_steps = global_steps+1
+            global_steps += 1
 
-            if np.random.rand() <= epsilon:
+            if global_steps < 1000:  # Encourage exploration for the first 1000 steps
                 action = env.action_space.sample()
             else:
-                distribution, q_values = policy(optimizer.target, jnp.asarray([state]))
-                distribution  = np.array(distribution[0])
-                distribution /= np.sum(distribution)
-                action        = np.random.choice(n_actions, p=distribution)
+                policy_probabilities = policy(q_network_params, state)
+                action = jax.random.choice(jax.random.PRNGKey(global_steps), n_actions, p=policy_probabilities)
+                action = int(action) 
 
-            if epsilon>epsilon_min:
-                epsilon = epsilon_min+(epsilon_max-epsilon_min)*math.exp(-epsilon_decay*global_steps)
+            new_state, reward, terminated, truncated, info = env.step(int(action))
+            done = terminated or truncated
+            new_state = np.array(new_state, dtype=np.float32)
 
-            new_state, reward, done, _ = env.step(int(action))
-
-            # sample нэмэхдээ temporal difference error-ийг тооцож нэмэх
-            temporal_difference = float(td_error(optimizer.target, target_q_network, (
-                    jnp.asarray([state]),
-                    jnp.asarray([action]),
-                    jnp.asarray([reward]),
+            temporal_difference = float(td_error_batch(
+                q_network_params,
+                target_q_network_params,
+                (
+                    jnp.asarray([state    ]),
+                    jnp.asarray([action   ]),
+                    jnp.asarray([reward   ]),
                     jnp.asarray([new_state])
-                ))[0])
-            per_memory.add(temporal_difference, (state, action, reward, new_state, int(done)))
+                )
+            )[0])
+            per_memory.add(temporal_difference, (state, action, reward, new_state, float(done)))
 
-            # Prioritized Experience Replay санах ойгоос batch үүсгээд DQN сүлжээг сургах
-            batch = per_memory.sample(batch_size)
-            states, actions, rewards, next_states, dones = [], [], [], [], []
-            for i in range(batch_size):
-                states.append     (batch[i][1][0])
-                actions.append    (batch[i][1][1])
-                rewards.append    (batch[i][1][2])
-                next_states.append(batch[i][1][3])
-                dones.append      (batch[i][1][4])
+            if len(per_memory.tree.data) > batch_size:
+                batch = per_memory.sample(batch_size)
+                idxs, segment_data = zip(*batch)
+                states, actions, rewards, next_states, dones = [], [], [], [], []
+                for data in segment_data:
+                    states     .append(data[0])
+                    actions    .append(data[1])
+                    rewards    .append(data[2])
+                    next_states.append(data[3])
+                    dones      .append(data[4])
 
-            optimizer, loss, new_td_errors = train_step(
-                                        optimizer,
-                                        target_q_network,
-                                        (   # sample-дсэн batch өгөгдлүүдийг хурдасгуур 
-                                            # төхөөрөмийн санах ойруу хуулах
-                                            jnp.asarray(states),
-                                            jnp.asarray(actions),
-                                            jnp.asarray(rewards),
-                                            jnp.asarray(next_states),
-                                            jnp.asarray(dones)
-                                        )
-                                    )
-            # batch-аас бий болсон temporal difference error-ийн дагуу санах ойг шинэчлэх
-            new_td_errors = np.array(new_td_errors)
-            for i in range(batch_size):
-                idx = batch[i][0]
-                per_memory.update(idx, new_td_errors[i])
+                q_network_params, opt_state, loss, new_td_errors = train_step(
+                    q_network_params,
+                    target_q_network_params,
+                    opt_state,
+                    (
+                        jnp.asarray(list(states)),
+                        jnp.asarray(list(actions), dtype=jnp.int32),
+                        jnp.asarray(list(rewards), dtype=jnp.float32),
+                        jnp.asarray(list(next_states)),
+                        jnp.asarray(list(dones), dtype=jnp.float32)
+                    )
+                )
+
+                new_td_errors_np = np.array(new_td_errors)
+                for i in range(batch_size):
+                    idx = idxs[i]
+                    per_memory.update(idx, new_td_errors_np[i])
 
             episode_rewards.append(reward)
             state = new_state
 
-            # Тодорхой алхам тутамд target неорон сүлжээний жингүүдийг сайжирсан хувилбараар солих
-            if global_steps%sync_steps==0:
-                target_q_network = target_q_network.replace(params=optimizer.target.params)
+            if global_steps % sync_steps == 0:
+                target_q_network_params = q_network_params
                 if debug:
-                    print("сайжруулсан жингүүдийг target неорон сүлжээрүү хууллаа")
+                    print("Updated target network weights")
 
             if debug_render:
                 env.render()
 
             if done:
-                print("{} - нийт reward : {}".format(episode, sum(episode_rewards)))
+                print(f"{episode} - Total reward: {sum(episode_rewards)}")
                 break
 finally:
     env.close()
