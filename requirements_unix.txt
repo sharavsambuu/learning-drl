@@ -1,5 +1,8 @@
+swig
 gymnasium
 gymnasium[classic-control]
+gymnasium[all]
+gymnasium[mujoco]
 jax
 jaxlib
 flax

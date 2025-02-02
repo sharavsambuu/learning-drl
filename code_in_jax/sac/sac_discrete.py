@@ -119,7 +119,8 @@ class DiscretePolicyNetwork(nn.Module):
         return x
 
 
-env         = gym.make('CartPole-v1', render_mode='human')
+#env         = gym.make('CartPole-v1', render_mode='human')
+env         = gym.make('LunarLander-v3', render_mode='human')
 state, info = env.reset()
 state       = np.array(state, dtype=np.float32)
 n_actions   = env.action_space.n
