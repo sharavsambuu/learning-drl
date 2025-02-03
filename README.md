@@ -5,14 +5,13 @@
 
 # Tasks
 
-    Fix code with older deprecated API
+    - Find some environments with Sparse Rewards settings
+    - Mess with sequential decision making with sparse rewards using PPO or other Policy Iterators
+    - Try to implement GRPO in general sparse rewards settings
 
 
 # Other things I will learn in the near future
 
-    - Find some environments with Sparse Rewards settings
-    - Mess with sequential decision making using PPO
-    - Try to implement GRPO in general sparse rewards settings
     - Align some small LLMs to some preference texts using PPO
     - Try to build minimum viable reasoner, using GRPO of DeepSeek R1
 
