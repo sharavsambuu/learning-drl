@@ -12,17 +12,20 @@ import optax
 debug_render            = True
 debug                   = True
 play_frequency          = 100
-num_episodes            = 10000
-learning_rate           = 0.001
+num_episodes            = 20000 
+learning_rate           = 0.0005          
 gamma                   = 0.99
-env_name                = "CartPole-v1" 
-group_size              = 8
+env_name                = "CartPole-v1"
+group_size              = 8               # diverse experiences
 max_steps               = 500
-sparse_reward_threshold = 120             # Minimum steps to get a reward for sparse env
-sparse_reward_value     = 5               # Reward value for successful episodes for sparse env
+sparse_reward_threshold = 90              # Minimum steps to get a reward for sparse env
+sparse_reward_value     = 1.0             # Increased sparse reward value
+epsilon_start           = 1.0             # Epsilon start value
+epsilon_end             = 0.01            # Epsilon end value
+epsilon_decay_episodes  = num_episodes/2  # Decay epsilon over some episodes
 
 
-class SparseCartPoleEnv(gym.Env): 
+class SparseCartPoleEnv(gym.Env):
     metadata = {
         "render_modes": ["human", "rgb_array"],
         "render_fps"  : 50,
@@ -70,8 +73,8 @@ class ActorNetwork(nn.Module):
         return output_layer
 
 
-env_array   = [SparseCartPoleEnv(render_mode=None, sparse_reward_threshold=sparse_reward_threshold, sparse_reward_value=sparse_reward_value) for _ in range(group_size)] 
-env         = SparseCartPoleEnv(render_mode='human', sparse_reward_threshold=sparse_reward_threshold, sparse_reward_value=sparse_reward_value) 
+env_array   = [SparseCartPoleEnv(render_mode=None, sparse_reward_threshold=sparse_reward_threshold, sparse_reward_value=sparse_reward_value) for _ in range(group_size)]
+env         = SparseCartPoleEnv(render_mode='human', sparse_reward_threshold=sparse_reward_threshold, sparse_reward_value=sparse_reward_value)
 state, info = env.reset()
 state       = np.array(state, dtype=np.float32)
 state_shape = state.shape
@@ -110,10 +113,10 @@ def backpropagate_actor(optimizer_state, actor_model_params, props):
     return new_optimizer_state, new_actor_model_params, loss
 
 
-def rollout_trajectory(group_member_id, actor_model_params):
+def rollout_trajectory(group_member_id, actor_model_params, epsilon): 
     group_reward    = 0.0
     states          = np.zeros(shape=(max_steps,) + state_shape, dtype=np.float32)
-    actions         = np.zeros(shape=(max_steps,), dtype=np.int32  ) 
+    actions         = np.zeros(shape=(max_steps,), dtype=np.int32  )
     rewards         = np.zeros(shape=(max_steps,), dtype=np.float32)
     dones           = np.zeros(shape=(max_steps,), dtype=np.float32)
     step            = 0
@@ -121,9 +124,13 @@ def rollout_trajectory(group_member_id, actor_model_params):
     state, info     = env.reset()
     state           = np.array(state, dtype=np.float32)
     for _ in range(max_steps):
-        action_probabilities = actor_inference(actor_model_params, jnp.asarray([state]))
-        action_probabilities = np.array(action_probabilities[0])
-        action               = np.random.choice(n_actions, p=action_probabilities)
+        if random.random() < epsilon: # Epsilon-greedy action selection
+            action = env.action_space.sample()
+        else:
+            action_probabilities = actor_inference(actor_model_params, jnp.asarray([state]))
+            action_probabilities = np.array(action_probabilities[0])
+            action               = np.random.choice(n_actions, p=action_probabilities)
+
         next_state, reward, terminated, truncated, info = env.step(int(action))
         done                    = terminated or truncated
         next_state              = np.array(next_state, dtype=np.float32)
@@ -134,7 +141,7 @@ def rollout_trajectory(group_member_id, actor_model_params):
         step                   +=1
         if done:
             trajectory_length  = step
-            discounted_rewards = np.zeros(trajectory_length) 
+            discounted_rewards = np.zeros(trajectory_length)
             for t in range(0, trajectory_length):
                 G_t = 0.0
                 for idx, j in enumerate(range(t, trajectory_length)):
@@ -149,7 +156,7 @@ def rollout_trajectory(group_member_id, actor_model_params):
     return group_member_id, group_reward, step, states, actions
 
 
-def rollout_group(actor_model_params):
+def rollout_group(actor_model_params, epsilon): # Added epsilon parameter
     group_rewards        = np.zeros(shape=(group_size,)                         , dtype=np.float32)
     group_lengths        = np.zeros(shape=(group_size,)                         , dtype=np.float32)
     group_states         = np.zeros(shape=(group_size,)+(max_steps,)+state_shape, dtype=np.float32)
@@ -157,7 +164,8 @@ def rollout_group(actor_model_params):
     for group_member_id in range(group_size):
         member_id, group_reward, trajectory_length, states, actions = rollout_trajectory(
             group_member_id=group_member_id,
-            actor_model_params=actor_model_params
+            actor_model_params=actor_model_params,
+            epsilon=epsilon # Pass epsilon to rollout_trajectory
             )
         group_rewards       [member_id   ] = group_reward
         group_lengths       [member_id   ] = trajectory_length
@@ -167,11 +175,15 @@ def rollout_group(actor_model_params):
     return group_lengths, group_states, group_actions, group_advantages
 
 
+epsilon = epsilon_start 
+
 try:
     for episode in range(num_episodes):
+        # Decay epsilon
+        epsilon = epsilon_end + (epsilon_start - epsilon_end) * math.exp(-episode / epsilon_decay_episodes)
 
-        # Rollout multiple trajectories for GRPO advantage extractions
-        group_lengths, group_states, group_actions, group_advantages = rollout_group(actor_model_params=actor_model_params)
+        # Rollout multiple trajectories for GRPO advantage extractions, passing epsilon
+        group_lengths, group_states, group_actions, group_advantages = rollout_group(actor_model_params=actor_model_params, epsilon=epsilon) 
 
         # Training on rollout data with advantages
         for member_id in range(group_size):
@@ -227,7 +239,7 @@ try:
                             jnp.asarray(discounted_rewards, dtype=jnp.float32)
                         )
                     )
-                    print(f"Episode {episode}, reward : {round(discounted_rewards[0], 2)}") 
+                    print(f"Episode {episode}, reward : {round(np.sum(rewards), 2)}, epsilon: {epsilon:.2f}")
                     break
 finally:
     env.close()
