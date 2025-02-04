@@ -11,14 +11,13 @@ import optax
 
 debug_render   = True
 debug          = True
-play_frequency = 30
+play_frequency = 50
 num_episodes   = 1500
 learning_rate  = 0.001
 gamma          = 0.99
 env_name       = "CartPole-v1"
-group_size     = 1              #8
-max_steps      = 120
-
+group_size     = 2     
+max_steps      = 500
 
 
 class ActorNetwork(nn.Module):
@@ -34,12 +33,12 @@ class ActorNetwork(nn.Module):
         return output_layer
 
 
+env_array   = [gym.make(env_name, render_mode=None) for _ in range(group_size)]
 env         = gym.make(env_name, render_mode='human')
 state, info = env.reset()
 state       = np.array(state, dtype=np.float32)
+state_shape = state.shape
 n_actions   = env.action_space.n
-
-env_array   = [gym.make(env_name, render_mode=None) for _ in range(group_size)]
 
 
 actor_module           = ActorNetwork(n_actions=n_actions)
@@ -48,7 +47,6 @@ actor_params           = actor_module.init(jax.random.PRNGKey(0), dummy_input)['
 actor_model_params     = actor_params
 actor_optimizer_def    = optax.adam(learning_rate)
 actor_optimizer_state  = actor_optimizer_def .init(actor_model_params )
-
 
 
 def calculate_grpo(states):
@@ -67,7 +65,7 @@ def backpropagate_actor(optimizer_state, actor_model_params, props):
     # props[0] - states
     # props[1] - discounted_rewards
     # props[2] - actions
-    baselines   = jnp.asarray([calculate_grpo(state) for state in props[0]]) # Calculate baseline for each state
+    baselines   = jnp.asarray([calculate_grpo(state) for state in props[0]]) 
     advantages  = props[1] - baselines # Use baseline instead of Critic values
     def loss_fn(params):
         action_probabilities = actor_module.apply({'params': params}, props[0])
@@ -82,32 +80,45 @@ def backpropagate_actor(optimizer_state, actor_model_params, props):
 
 def rollout_trajectory(group_member_id, actor_model_params):
 
-    env         = env_array[group_member_id]
-    state, info = env.reset()
-    state       = np.array(state, dtype=np.float32)
+    group_reward   = 0.0
 
-    states  = np.zeros(shape=(max_steps, 4), dtype=np.float32) 
-    actions = np.zeros(shape=(max_steps, 1), dtype=np.float32)
-    rewards = np.zeros(shape=(max_steps, 1), dtype=np.float32)
-    dones   = np.zeros(shape=(max_steps, 1), dtype=np.float32)
+    states         = np.zeros(shape=(max_steps,) + state_shape, dtype=np.float32) 
+    actions        = np.zeros(shape=(max_steps, 1), dtype=np.float32)
+    rewards        = np.zeros(shape=(max_steps, 1), dtype=np.float32)
+    dones          = np.zeros(shape=(max_steps, 1), dtype=np.float32)
+    step           = 0
 
-    for step in range(max_steps):
+    env            = env_array[group_member_id]
+    state, info    = env.reset()
+    state          = np.array(state, dtype=np.float32)
+
+    for _ in range(max_steps):
         action_probabilities = actor_inference(actor_model_params, jnp.asarray([state]))
         action_probabilities = np.array(action_probabilities[0])
         action               = np.random.choice(n_actions, p=action_probabilities)
         next_state, reward, terminated, truncated, info = env.step(int(action))
-        done             = terminated or truncated
-        next_state       = np.array(next_state, dtype=np.float32)
-        states [step, :] = state
-        actions[step   ] = action
-        rewards[step   ] = reward
-        dones  [step   ] = float(done)
-        print(f"{step} running")
+        done              = terminated or truncated
+        next_state        = np.array(next_state, dtype=np.float32)
+        states [step, :]  = state
+        actions[step   ]  = action
+        rewards[step   ]  = reward
+        dones  [step   ]  = float(done)
+        step             +=1
         if done:
+            trajectory_length  = step
+            discounted_rewards = np.zeros_like(rewards[:-trajectory_length])
+            for t in range(0, trajectory_length):
+                G_t = 0.0
+                for idx, j in enumerate(range(t, trajectory_length)):
+                    G_t += (gamma**idx)*rewards[j]*(1.0-dones[j])
+                discounted_rewards[t] = G_t
+            discounted_rewards = (discounted_rewards-np.mean(discounted_rewards))/(np.std(discounted_rewards) +1e-8)
+            group_reward = discounted_rewards[0]
+
+            print(f"GROUP-{group_member_id} REWARD IS {group_reward}, STEPS {trajectory_length}")
             break
 
-        pass
-
+    return group_member_id, group_reward, step, states, actions, rewards, dones
 
     pass
 
@@ -119,12 +130,10 @@ def rollout_group(actor_model_params):
 
 try:
     for episode in range(num_episodes):
-        #print(f"Episode {episode} : doing business as usual...")
+
         rollout_group(actor_model_params=actor_model_params)
 
         if episode%play_frequency==0 and debug_render==True:
-
-            print("It is play time...")
             state, info = env.reset()
             state = np.array(state, dtype=np.float32)
             print(state.shape)
@@ -167,3 +176,5 @@ try:
                     break
 finally:
     env.close()
+    for env_item in env_array:
+        env_item.close()
