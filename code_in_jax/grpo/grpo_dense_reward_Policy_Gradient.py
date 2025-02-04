@@ -9,11 +9,16 @@ import numpy as np
 import optax
 
 
-debug_render  = True
-debug         = False
-num_episodes  = 1500
-learning_rate = 0.001
-gamma         = 0.99
+debug_render   = True
+debug          = True
+play_frequency = 30
+num_episodes   = 1500
+learning_rate  = 0.001
+gamma          = 0.99
+env_name       = "CartPole-v1"
+group_size     = 1              #8
+max_steps      = 120
+
 
 
 class ActorNetwork(nn.Module):
@@ -29,51 +34,41 @@ class ActorNetwork(nn.Module):
         return output_layer
 
 
-def calculate_grpo(states):
-    """
-    Calculates the GRPO baseline value.
-    For now, it returns a fixed scalar value (0).
-    You can customize this function to implement your desired baseline.
-    """
-    return 0.4 # A simple fixed baseline of 0
-
-
-env   = gym.make('CartPole-v1', render_mode='human')
+env         = gym.make(env_name, render_mode='human')
 state, info = env.reset()
 state       = np.array(state, dtype=np.float32)
 n_actions   = env.action_space.n
+
+env_array   = [gym.make(env_name, render_mode=None) for _ in range(group_size)]
 
 
 actor_module           = ActorNetwork(n_actions=n_actions)
 dummy_input            = jnp.zeros(state.shape)
 actor_params           = actor_module.init(jax.random.PRNGKey(0), dummy_input)['params']
 actor_model_params     = actor_params
-
 actor_optimizer_def    = optax.adam(learning_rate)
 actor_optimizer_state  = actor_optimizer_def .init(actor_model_params )
 
 
+
+def calculate_grpo(states):
+    return 0.4 
+
 @jax.jit
 def actor_inference(params, x):
     return actor_module.apply({'params': params}, x)
-
 
 @jax.vmap
 def gather(probability_vec, action_index):
     return probability_vec[action_index]
 
 @jax.jit
-def backpropagate_actor(optimizer_state, actor_model_params, props): # Removed critic_model_params
+def backpropagate_actor(optimizer_state, actor_model_params, props): 
     # props[0] - states
     # props[1] - discounted_rewards
     # props[2] - actions
-
-    # Calculate baseline using your custom function
-    # values      = jax.lax.stop_gradient(critic_module.apply({'params': critic_model_params}, props[0])) # Removed Critic inference
-    # values      = jnp.reshape(values, (values.shape[0],)) # Removed Critic reshape
     baselines   = jnp.asarray([calculate_grpo(state) for state in props[0]]) # Calculate baseline for each state
     advantages  = props[1] - baselines # Use baseline instead of Critic values
-
     def loss_fn(params):
         action_probabilities = actor_module.apply({'params': params}, props[0])
         probabilities        = gather(action_probabilities, props[2])
@@ -85,59 +80,90 @@ def backpropagate_actor(optimizer_state, actor_model_params, props): # Removed c
     return new_optimizer_state, new_actor_model_params, loss
 
 
-global_step = 0
+def rollout_trajectory(group_member_id, actor_model_params):
+
+    env         = env_array[group_member_id]
+    state, info = env.reset()
+    state       = np.array(state, dtype=np.float32)
+
+    states  = np.zeros(shape=(max_steps, 4), dtype=np.float32) 
+    actions = np.zeros(shape=(max_steps, 1), dtype=np.float32)
+    rewards = np.zeros(shape=(max_steps, 1), dtype=np.float32)
+    dones   = np.zeros(shape=(max_steps, 1), dtype=np.float32)
+
+    for step in range(max_steps):
+        action_probabilities = actor_inference(actor_model_params, jnp.asarray([state]))
+        action_probabilities = np.array(action_probabilities[0])
+        action               = np.random.choice(n_actions, p=action_probabilities)
+        next_state, reward, terminated, truncated, info = env.step(int(action))
+        done             = terminated or truncated
+        next_state       = np.array(next_state, dtype=np.float32)
+        states [step, :] = state
+        actions[step   ] = action
+        rewards[step   ] = reward
+        dones  [step   ] = float(done)
+        print(f"{step} running")
+        if done:
+            break
+
+        pass
+
+
+    pass
+
+def rollout_group(actor_model_params):
+    for group_member_id in range(group_size):
+        rollout_trajectory(group_member_id=group_member_id, actor_model_params=actor_model_params)
+    pass
+
 
 try:
     for episode in range(num_episodes):
-        state, info = env.reset()
-        state = np.array(state, dtype=np.float32)
-        states, actions, rewards, dones = [], [], [], []
-        while True:
-            global_step = global_step+1
+        #print(f"Episode {episode} : doing business as usual...")
+        rollout_group(actor_model_params=actor_model_params)
 
-            action_probabilities  = actor_inference(actor_model_params, jnp.asarray([state]))
-            action_probabilities  = np.array(action_probabilities[0])
-            action                = np.random.choice(n_actions, p=action_probabilities)
+        if episode%play_frequency==0 and debug_render==True:
 
-            next_state, reward, terminated, truncated, info = env.step(int(action))
-            done = terminated or truncated
-            next_state = np.array(next_state, dtype=np.float32)
+            print("It is play time...")
+            state, info = env.reset()
+            state = np.array(state, dtype=np.float32)
+            print(state.shape)
+            states, actions, rewards, dones = [], [], [], []
+            while True:
+                action_probabilities  = actor_inference(actor_model_params, jnp.asarray([state]))
+                action_probabilities  = np.array(action_probabilities[0])
+                action                = np.random.choice(n_actions, p=action_probabilities)
+                next_state, reward, terminated, truncated, info = env.step(int(action))
+                done = terminated or truncated
+                next_state = np.array(next_state, dtype=np.float32)
+                states .append(state    )
+                actions.append(action   )
+                rewards.append(reward   )
+                dones  .append(int(done))
+                state = next_state
 
-            states .append(state    )
-            actions.append(action   )
-            rewards.append(reward   )
-            dones  .append(int(done))
-
-            state = next_state
-
-            if debug_render:
                 env.render()
 
-            if done:
-                print(episode, " - reward :", sum(rewards))
-
-                episode_length = len(rewards)
-
-                discounted_rewards = np.zeros_like(rewards)
-                for t in range(0, episode_length):
-                    G_t = 0
-                    for idx, j in enumerate(range(t, episode_length)):
-                        G_t = G_t + (gamma**idx)*rewards[j]*(1-dones[j])
-                    discounted_rewards[t] = G_t
-                discounted_rewards = discounted_rewards - np.mean(discounted_rewards)
-                discounted_rewards = discounted_rewards / (np.std(discounted_rewards)+1e-5)
-
-                actor_optimizer_state, actor_model_params, _  = backpropagate_actor(
-                    actor_optimizer_state,
-                    actor_model_params   ,
-                    (
-                        jnp.asarray(states),
-                        jnp.asarray(discounted_rewards),
-                        jnp.asarray(actions)
+                if done:
+                    print(episode, " - reward :", sum(rewards))
+                    episode_length = len(rewards)
+                    discounted_rewards = np.zeros_like(rewards)
+                    for t in range(0, episode_length):
+                        G_t = 0
+                        for idx, j in enumerate(range(t, episode_length)):
+                            G_t = G_t + (gamma**idx)*rewards[j]*(1-dones[j])
+                        discounted_rewards[t] = G_t
+                    discounted_rewards = discounted_rewards - np.mean(discounted_rewards)
+                    discounted_rewards = discounted_rewards / (np.std(discounted_rewards)+1e-5)
+                    actor_optimizer_state, actor_model_params, _  = backpropagate_actor(
+                        actor_optimizer_state,
+                        actor_model_params   ,
+                        (
+                            jnp.asarray(states),
+                            jnp.asarray(discounted_rewards),
+                            jnp.asarray(actions)
+                        )
                     )
-                )
-
-
-                break
+                    break
 finally:
     env.close()
