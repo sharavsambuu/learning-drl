@@ -9,15 +9,52 @@ import numpy as np
 import optax
 
 
-debug_render   = True
-debug          = True
-play_frequency = 100
-num_episodes   = 10000
-learning_rate  = 0.001
-gamma          = 0.99
-env_name       = "CartPole-v1"
-group_size     = 6
-max_steps      = 500
+debug_render            = True
+debug                   = True
+play_frequency          = 100
+num_episodes            = 10000
+learning_rate           = 0.001
+gamma                   = 0.99
+env_name                = "CartPole-v1" 
+group_size              = 8
+max_steps               = 500
+sparse_reward_threshold = 120             # Minimum steps to get a reward for sparse env
+sparse_reward_value     = 5               # Reward value for successful episodes for sparse env
+
+
+class SparseCartPoleEnv(gym.Env): 
+    metadata = {
+        "render_modes": ["human", "rgb_array"],
+        "render_fps"  : 50,
+    }
+    def __init__(self, render_mode='human', sparse_reward_threshold=40, sparse_reward_value=10):
+        super().__init__()
+        self.env = gym.make('CartPole-v1', render_mode=render_mode if debug_render else None)
+        self.sparse_reward_threshold = sparse_reward_threshold
+        self.sparse_reward_value     = sparse_reward_value
+        self.current_steps           = 0
+        self.action_space            = self.env.action_space
+        self.observation_space       = self.env.observation_space
+
+    def reset(self, seed=None, options=None):
+        self.current_steps = 0
+        observation, info  = self.env.reset(seed=seed, options=options)
+        return np.array(observation, dtype=np.float32), info
+
+    def step(self, action):
+        observation, reward, terminated, truncated, info = self.env.step(action)
+        self.current_steps += 1
+        sparse_reward       = 0
+        done                = terminated or truncated
+        if terminated and self.current_steps >= self.sparse_reward_threshold:
+            sparse_reward = self.sparse_reward_value
+            if debug:
+                print(f"Sparse reward given: {sparse_reward} at step {self.current_steps}")
+        return np.array(observation, dtype=np.float32), sparse_reward, terminated, truncated, info
+    def render(self, mode='human'):
+        return self.env.render()
+    def close(self):
+        self.env.close()
 
 
 class ActorNetwork(nn.Module):
@@ -33,8 +70,8 @@ class ActorNetwork(nn.Module):
         return output_layer
 
 
-env_array   = [gym.make(env_name, render_mode=None) for _ in range(group_size)]
-env         = gym.make(env_name, render_mode='human')
+env_array   = [SparseCartPoleEnv(render_mode=None, sparse_reward_threshold=sparse_reward_threshold, sparse_reward_value=sparse_reward_value) for _ in range(group_size)] 
+env         = SparseCartPoleEnv(render_mode='human', sparse_reward_threshold=sparse_reward_threshold, sparse_reward_value=sparse_reward_value) 
 state, info = env.reset()
 state       = np.array(state, dtype=np.float32)
 state_shape = state.shape
@@ -97,7 +134,7 @@ def rollout_trajectory(group_member_id, actor_model_params):
         step                   +=1
         if done:
             trajectory_length  = step
-            discounted_rewards = np.zeros(trajectory_length)
+            discounted_rewards = np.zeros(trajectory_length) 
             for t in range(0, trajectory_length):
                 G_t = 0.0
                 for idx, j in enumerate(range(t, trajectory_length)):
@@ -116,7 +153,7 @@ def rollout_group(actor_model_params):
     group_rewards        = np.zeros(shape=(group_size,)                         , dtype=np.float32)
     group_lengths        = np.zeros(shape=(group_size,)                         , dtype=np.float32)
     group_states         = np.zeros(shape=(group_size,)+(max_steps,)+state_shape, dtype=np.float32)
-    group_actions        = np.zeros(shape=(group_size,)+(max_steps,            ), dtype=np.int32  ) 
+    group_actions        = np.zeros(shape=(group_size,)+(max_steps,            ), dtype=np.int32  )
     for group_member_id in range(group_size):
         member_id, group_reward, trajectory_length, states, actions = rollout_trajectory(
             group_member_id=group_member_id,
@@ -172,7 +209,6 @@ try:
                 env.render()
 
                 if done:
-                    print(episode, " - reward :", sum(rewards))
                     episode_length = len(rewards)
                     discounted_rewards = np.zeros(episode_length)
                     for t in range(0, episode_length):
@@ -191,6 +227,7 @@ try:
                             jnp.asarray(discounted_rewards, dtype=jnp.float32)
                         )
                     )
+                    print(f"Episode {episode}, reward : {round(discounted_rewards[0], 2)}") 
                     break
 finally:
     env.close()
