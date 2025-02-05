@@ -5,9 +5,9 @@
 
 # Tasks
 
-    - Find some environments with Sparse Rewards settings
-    - Mess with sequential decision making with sparse rewards using PPO or other Policy Iterators
-    - Try to implement GRPO in general sparse rewards settings
+    - Fix TRPO
+    - Fix PPO
+    - Apply GRPO to PPO
 
 
 # Other things I will learn in the near future
