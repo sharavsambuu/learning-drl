@@ -1,0 +1,12 @@
+gymnasium
+gymnasium[classic-control]
+jax
+jaxlib
+flax
+matplotlib
+tk
+pandas
+numpy
+jupyter
+matplotlib
+scipy
