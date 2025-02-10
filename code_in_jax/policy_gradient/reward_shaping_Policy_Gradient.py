@@ -1,3 +1,21 @@
+#
+# Reward shaping is techniques to give extra guidance in the sparse reward env.
+# This adjustment preserves the optimal policy while giving the agent more frequent signals.
+#
+#   r'(s,a,s')=r(s,a,s')+γϕ(s')−ϕ(s)
+#
+#
+# Potential Function :
+# Is it one way to help on reward shaping 
+#
+#   potential(state, goal) 
+# 
+# returns the negative Manhattan distance or L1 norm
+# so being closer to the goal yields a higher (less negative) value.
+#
+#
+
+
 import random
 import math
 import gymnasium as gym
@@ -7,13 +25,21 @@ from jax import numpy as jnp
 import numpy as np
 import optax
 
-debug_render            = True  
-debug                   = True 
-num_episodes            = 5000
-learning_rate           = 0.001
-gamma                   = 0.99  # Discount factor
-sparse_reward_threshold = 50    # Minimum steps to get a reward
-sparse_reward_value     = 10    # Reward value for successful episodes
+debug_render                 = True
+debug                        = True
+num_episodes                 = 5000
+learning_rate                = 0.001
+gamma                        = 0.99  # Discount factor
+sparse_reward_threshold      = 50    # Minimum steps to get a reward
+sparse_reward_value          = 10    # Reward value for successful episodes
+
+potential_scale_factor_start = 1.0
+potential_scale_factor_end   = 0.1
+decay_episodes_potential     = num_episodes // 3 
+
+epsilon_start                = 1.0
+epsilon_end                  = 0.01
+decay_episodes_epsilon       = num_episodes // 2 
 
 
 class SparseCartPoleEnv(gym.Env):
@@ -60,6 +86,7 @@ class PolicyNetwork(nn.Module):
         x = nn.Dense(features=self.n_actions)(x)
         return nn.softmax(x)
 
+
 env         = SparseCartPoleEnv(render_mode='human', sparse_reward_threshold=sparse_reward_threshold, sparse_reward_value=sparse_reward_value)
 state, info = env.reset()
 state       = np.array(state, dtype=np.float32)
@@ -73,12 +100,22 @@ optimizer_def         = optax.adam(learning_rate)
 optimizer_state       = optimizer_def.init(policy_network_params)
 
 
-def potential(state):
-    # A potential function that encourages the cart to remain near center and the pole to stay upright. 
-    # state[0] - cart position
-    # state[2] - pole angle
-    # You can adjust the weighting factors as needed.
-    return -(abs(state[0]) + abs(state[2]))
+def potential(state, scale_factor):
+    #
+    # A potential function that encourages the cart to remain near center and the pole to stay upright.
+    #   state[0] - cart position
+    #   state[2] - pole angle
+    #
+    # Scale factor behaviour
+    #   0.0 - No shaping, baseline with just sparse reward
+    #   0.1 - Very weak shaping
+    #   0.5 - Weak shaping
+    #   1.0 - Moderate shaping - Current baseline
+    #   2.0 - Strong shaping
+    #   5.0 - Very strong shaping
+    #
+    return scale_factor * -(abs(state[0]) + abs(state[2]))
+
 @jax.jit
 def policy_inference(params, x):
     return pg_module.apply({'params': params}, x)
@@ -101,34 +138,40 @@ def train_step(optimizer_state, policy_network_params, batch):
     return new_optimizer_state, new_policy_network_params, loss
 
 
-global_steps    = 0
-episode_rewards = []  
+global_steps            = 0
+episode_rewards         = []
+potential_scale_factor  = potential_scale_factor_start 
+epsilon                 = epsilon_start 
 
 try:
     for episode in range(num_episodes):
         states, actions, rewards, dones = [], [], [], []
         state, info    = env.reset()
         state          = np.array(state, dtype=np.float32)
-        episode_reward = 0  
+        episode_reward = 0
         while True:
             global_steps += 1
             action_probabilities = policy_inference(policy_network_params, jnp.asarray([state]))
             action_probabilities = np.array(action_probabilities[0])
             action_probabilities /= action_probabilities.sum()
-            action = np.random.choice(n_actions, p=action_probabilities)
+
+            if random.random() < epsilon:
+                action = env.action_space.sample() # Exploration
+            else:
+                action = np.random.choice(n_actions, p=action_probabilities) 
 
             new_state, reward, terminated, truncated, info = env.step(int(action))
             done      = terminated or truncated
             new_state = np.array(new_state, dtype=np.float32)
 
-            # Apply potential-based reward shaping:
-            shaped_reward   = reward + gamma * potential(new_state) - potential(state)
-            episode_reward += shaped_reward  
+            # Apply potential-based reward shaping with tunable and decaying scale factor:
+            shaped_reward   = reward + gamma * potential(new_state, potential_scale_factor) - potential(state, potential_scale_factor)
+            episode_reward += shaped_reward
 
-            states.append(state)
+            states .append(state)
             actions.append(action)
             rewards.append(shaped_reward)
-            dones.append(done)
+            dones  .append(done)
 
             state = new_state
 
@@ -166,9 +209,26 @@ try:
                     print(f"Episode {episode}: Loss = {loss:.4f}")
                 break
 
+        # potential_scale_factor with linear decay 
+        if episode < decay_episodes_potential:
+            decay_rate_potential = (potential_scale_factor_start - potential_scale_factor_end) / decay_episodes_potential
+            potential_scale_factor = potential_scale_factor_start - decay_rate_potential * episode
+            potential_scale_factor = max(potential_scale_factor, potential_scale_factor_end)
+        else:
+            potential_scale_factor = potential_scale_factor_end
+
+        # epsilon decay to add exploration
+        if episode < decay_episodes_epsilon:
+            decay_rate_epsilon = (epsilon_start - epsilon_end) / decay_episodes_epsilon
+            epsilon = epsilon_start - decay_rate_epsilon * episode
+            epsilon = max(epsilon, epsilon_end)
+        else:
+            epsilon = epsilon_end
+
+
         if episode % 10 == 0:
             avg_reward = np.mean(episode_rewards[-10:])
-            print(f"Episode {episode}: Average shaped reward over last 10 episodes = {avg_reward:.2f}")
+            print(f"Episode {episode}: Average shaped reward over last 10 episodes = {avg_reward:.2f}, Potential Scale Factor: {potential_scale_factor:.3f}, Epsilon: {epsilon:.3f}")
 
 finally:
     env.close()
