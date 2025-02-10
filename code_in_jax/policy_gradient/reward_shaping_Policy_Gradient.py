@@ -100,11 +100,7 @@ optimizer_def         = optax.adam(learning_rate)
 optimizer_state       = optimizer_def.init(policy_network_params)
 
 
-def potential(state, scale_factor):
-    #
-    # A potential function that encourages the cart to remain near center and the pole to stay upright.
-    #   state[0] - cart position
-    #   state[2] - pole angle
+def potential(state, scale_factor, angle_threshold=0.2):
     #
     # Scale factor behaviour
     #   0.0 - No shaping, baseline with just sparse reward
@@ -114,7 +110,11 @@ def potential(state, scale_factor):
     #   2.0 - Strong shaping
     #   5.0 - Very strong shaping
     #
-    return scale_factor * -(abs(state[0]) + abs(state[2]))
+    angle = state[2] # pole angle
+    if abs(angle) < angle_threshold:
+        return scale_factor * (jnp.cos(angle) - 1)
+    else:
+        return -0.001 
 
 @jax.jit
 def policy_inference(params, x):
