@@ -7,7 +7,6 @@ from jax import numpy as jnp
 import numpy as np
 import optax
 
-
 debug_render            = True  
 debug                   = True 
 num_episodes            = 5000
@@ -16,17 +15,6 @@ gamma                   = 0.99  # Discount factor
 sparse_reward_threshold = 50    # Minimum steps to get a reward
 sparse_reward_value     = 10    # Reward value for successful episodes
 
-
-class PolicyNetwork(nn.Module):
-    n_actions: int
-    @nn.compact
-    def __call__(self, x):
-        x = nn.Dense(features=64)(x)
-        x = nn.relu(x)
-        x = nn.Dense(features=32)(x)
-        x = nn.relu(x)
-        x = nn.Dense(features=self.n_actions)(x)
-        return nn.softmax(x)
 
 class SparseCartPoleEnv(gym.Env):
     metadata = {
@@ -41,18 +29,15 @@ class SparseCartPoleEnv(gym.Env):
         self.current_steps           = 0
         self.action_space            = self.env.action_space
         self.observation_space       = self.env.observation_space
-
     def reset(self, seed=None, options=None):
         self.current_steps = 0
         observation, info  = self.env.reset(seed=seed, options=options)
         return np.array(observation, dtype=np.float32), info
-
     def step(self, action):
         observation, reward, terminated, truncated, info = self.env.step(action)
         self.current_steps += 1
-        sparse_reward       = 0
-        done                = terminated or truncated
-        # Only reward if truly terminated (not truncated due to max steps)
+        sparse_reward = 0
+        done = terminated or truncated
         if terminated and self.current_steps >= self.sparse_reward_threshold:
             sparse_reward = self.sparse_reward_value
             if debug:
@@ -63,6 +48,17 @@ class SparseCartPoleEnv(gym.Env):
     def close(self):
         self.env.close()
 
+
+class PolicyNetwork(nn.Module):
+    n_actions: int
+    @nn.compact
+    def __call__(self, x):
+        x = nn.Dense(features=64)(x)
+        x = nn.relu(x)
+        x = nn.Dense(features=32)(x)
+        x = nn.relu(x)
+        x = nn.Dense(features=self.n_actions)(x)
+        return nn.softmax(x)
 
 env         = SparseCartPoleEnv(render_mode='human', sparse_reward_threshold=sparse_reward_threshold, sparse_reward_value=sparse_reward_value)
 state, info = env.reset()
@@ -77,6 +73,12 @@ optimizer_def         = optax.adam(learning_rate)
 optimizer_state       = optimizer_def.init(policy_network_params)
 
 
+def potential(state):
+    # A potential function that encourages the cart to remain near center and the pole to stay upright. 
+    # state[0] - cart position
+    # state[2] - pole angle
+    # You can adjust the weighting factors as needed.
+    return -(abs(state[0]) + abs(state[2]))
 @jax.jit
 def policy_inference(params, x):
     return pg_module.apply({'params': params}, x)
@@ -100,7 +102,8 @@ def train_step(optimizer_state, policy_network_params, batch):
 
 
 global_steps    = 0
-episode_rewards = []  # Store rewards for each episode
+episode_rewards = []  
+
 try:
     for episode in range(num_episodes):
         states, actions, rewards, dones = [], [], [], []
@@ -109,19 +112,23 @@ try:
         episode_reward = 0  
         while True:
             global_steps += 1
-            action_probabilities  = policy_inference(policy_network_params, jnp.asarray([state]))
-            action_probabilities  = np.array(action_probabilities[0])
+            action_probabilities = policy_inference(policy_network_params, jnp.asarray([state]))
+            action_probabilities = np.array(action_probabilities[0])
             action_probabilities /= action_probabilities.sum()
             action = np.random.choice(n_actions, p=action_probabilities)
 
             new_state, reward, terminated, truncated, info = env.step(int(action))
-            done            = terminated or truncated
-            new_state       = np.array(new_state, dtype=np.float32)
-            episode_reward += reward  # Accumulate reward
-            states .append(state )
+            done      = terminated or truncated
+            new_state = np.array(new_state, dtype=np.float32)
+
+            # Apply potential-based reward shaping:
+            shaped_reward   = reward + gamma * potential(new_state) - potential(state)
+            episode_reward += shaped_reward  
+
+            states.append(state)
             actions.append(action)
-            rewards.append(reward)
-            dones  .append(done  )
+            rewards.append(shaped_reward)
+            dones.append(done)
 
             state = new_state
 
@@ -129,24 +136,22 @@ try:
                 env.render()
 
             if done:
-                episode_rewards.append(episode_reward)  # Store total reward for this episode
+                episode_rewards.append(episode_reward)
                 if debug:
                     if episode_reward > 0:
-                        print(f"{episode} - Sparse Reward Success! Total reward: {episode_reward}, Steps: {len(rewards)}")
+                        print(f"{episode} - Sparse Reward Success! Total shaped reward: {episode_reward}, Steps: {len(rewards)}")
                     else:
-                        print(f"{episode} - Sparse Reward Failure. Total reward: {episode_reward}, Steps: {len(rewards)}")
+                        print(f"{episode} - Sparse Reward Failure. Total shaped reward: {episode_reward}, Steps: {len(rewards)}")
 
-                # Calculate discounted rewards (only if episode is done)
-                episode_length = len(rewards)
+                episode_length     = len(rewards)
                 discounted_rewards = np.zeros_like(rewards)
-                for t in range(0, episode_length):
+                for t in range(episode_length):
                     G_t = 0
                     for idx, j in enumerate(range(t, episode_length)):
                         G_t += (gamma ** idx) * rewards[j] * (1 - dones[j])
                     discounted_rewards[t] = G_t
                 discounted_rewards = (discounted_rewards - np.mean(discounted_rewards)) / (np.std(discounted_rewards) + 1e-5)
 
-                # Train on the collected trajectory
                 optimizer_state, policy_network_params, loss = train_step(
                     optimizer_state,
                     policy_network_params,
@@ -163,7 +168,7 @@ try:
 
         if episode % 10 == 0:
             avg_reward = np.mean(episode_rewards[-10:])
-            print(f"Episode {episode}: Average reward over last 10 episodes = {avg_reward:.2f}")
+            print(f"Episode {episode}: Average shaped reward over last 10 episodes = {avg_reward:.2f}")
 
 finally:
     env.close()
