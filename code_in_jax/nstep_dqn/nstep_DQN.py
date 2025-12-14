@@ -1,41 +1,39 @@
-import os
 import random
 import math
-import gymnasium   as gym
-from collections import deque
-
-import flax.linen as nn
 import jax
-from jax import numpy as jnp
-import numpy as np
-import optax                      
-import time
+import optax
+from   collections import deque
+from   jax         import numpy as jnp
+import numpy       as np
+import gymnasium   as gym
+import flax.linen  as nn
 
-debug_render  = True
+
+debug_render  = True   
 debug         = False
+
 num_episodes  = 500
 batch_size    = 64
-learning_rate = 0.001
+learning_rate = 1e-3
 sync_steps    = 100
 memory_length = 4000
-n_steps       = 3      # N-step lookahead
 
-epsilon       = 1.0
-epsilon_decay = 0.001
+n_steps       = 3
+gamma         = 0.99
+
 epsilon_max   = 1.0
 epsilon_min   = 0.01
-
-gamma         = 0.99 # discount factor
+epsilon_decay = 0.001
 
 
 class SumTree:
     write = 0
     def __init__(self, capacity):
         self.capacity = capacity
-        self.tree     = np.zeros(2*capacity - 1)
+        self.tree     = np.zeros(2 * capacity - 1, dtype=np.float32)
         self.data     = np.zeros(capacity, dtype=object)
     def _propagate(self, idx, change):
-        parent             = (idx - 1) // 2
+        parent = (idx - 1) // 2
         self.tree[parent] += change
         if parent != 0:
             self._propagate(parent, change)
@@ -46,275 +44,257 @@ class SumTree:
             return idx
         if s <= self.tree[left]:
             return self._retrieve(left, s)
-        else:
-            return self._retrieve(right, s-self.tree[left])
+        return self._retrieve(right, s - self.tree[left])
     def total(self):
-        return self.tree[0]
+        return float(self.tree[0])
     def add(self, p, data):
-        idx                   = self.write + self.capacity - 1
+        idx = self.write + self.capacity - 1
         self.data[self.write] = data
         self.update(idx, p)
-        self.write           += 1
+        self.write += 1
         if self.write >= self.capacity:
             self.write = 0
     def update(self, idx, p):
-        change         = p - self.tree[idx]
+        change = p - self.tree[idx]
         self.tree[idx] = p
         self._propagate(idx, change)
     def get(self, s):
-        idx     = self._retrieve(0, s)
-        dataIdx = idx - self.capacity + 1
-        return (idx, self.tree[idx], self.data[dataIdx])
+        idx = self._retrieve(0, s)
+        data_idx = idx - self.capacity + 1
+        return idx, float(self.tree[idx]), self.data[data_idx]
 
 class PERMemory:
     e = 0.01
     a = 0.6
     def __init__(self, capacity):
+        self.capacity = capacity
         self.tree = SumTree(capacity)
+        self.size = 0  # track filled count
     def _get_priority(self, error):
-        return (error+self.e)**self.a
+        return float((error + self.e) ** self.a)
     def add(self, error, sample):
         p = self._get_priority(error)
         self.tree.add(p, sample)
+        self.size = min(self.size + 1, self.capacity)
     def sample(self, n):
-        batch   = []
-        segment = self.tree.total()/n
+        batch = []
+        total = self.tree.total()
+        if total <= 0:
+            return batch
+        segment = total / n
         for i in range(n):
-            a = segment*i
-            b = segment*(i+1)
+            a = segment * i
+            b = segment * (i + 1)
             s = random.uniform(a, b)
-            (idx, p, data) = self.tree.get(s)
+            idx, p, data = self.tree.get(s)
             batch.append((idx, data))
         return batch
     def update(self, idx, error):
         p = self._get_priority(error)
         self.tree.update(idx, p)
 
-class DeepQNetwork(nn.Module): 
-    n_actions: int 
-    @nn.compact 
-    def __call__(self, x): 
-        x = nn.Dense(features=64)(x) 
-        activation_layer_1 = nn.relu(x)
-        dense_layer_2      = nn.Dense(features=32)(activation_layer_1) # Use features instead of out_dim
-        activation_layer_2 = nn.relu(dense_layer_2)
-        output_layer       = nn.Dense(features=self.n_actions)(activation_layer_2) # Use features instead of out_dim, and self.n_actions
-        return output_layer
+
+class DeepQNetwork(nn.Module):
+    n_actions: int
+    @nn.compact
+    def __call__(self, x):
+        x = nn.Dense(64)(x)
+        x = nn.relu(x)
+        x = nn.Dense(32)(x)
+        x = nn.relu(x)
+        x = nn.Dense(self.n_actions)(x)
+        return x
 
 
-env              = gym.make('CartPole-v1', render_mode="human") 
-state, info      = env.reset()
+env           = gym.make("CartPole-v1", render_mode="human" if debug_render else None)
+state, info   = env.reset()
+state         = np.array(state, dtype=np.float32)
+n_actions     = env.action_space.n
 
-n_actions        = env.action_space.n
+dqn_module    = DeepQNetwork(n_actions=n_actions)
+params        = dqn_module.init(jax.random.PRNGKey(0), jnp.zeros(state.shape))["params"]
+q_params      = params
+tgt_params    = params
 
-dqn_module       = DeepQNetwork(n_actions=n_actions)
-dummy_input      = jnp.zeros(state.shape)
-params           = dqn_module.init(jax.random.PRNGKey(0), dummy_input)
+optimizer     = optax.adam(learning_rate)
+opt_state     = optimizer.init(q_params)
 
-q_network_params        = params['params']
-target_q_network_params = params['params']
-
-optimizer  = optax.adam(learning_rate)
-opt_state  = optimizer.init(q_network_params)
-
-per_memory     = PERMemory(memory_length)
-n_step_buffer  = deque(maxlen=n_steps) # N-step buffer
+per_memory    = PERMemory(memory_length)
+n_step_buffer = deque(maxlen=n_steps)  # (s, a, r, ns, done)
 
 
 @jax.jit
 def policy(params, x):
-    predicted_q_values = dqn_module.apply({'params': params}, x)
-    max_q_action       = jnp.argmax(predicted_q_values)
-    return max_q_action, predicted_q_values
+    q = dqn_module.apply({"params": params}, x)
+    a = jnp.argmax(q)
+    return a, q
 
-def calculate_n_step_td_error(q_value_vec, target_q_value_vec, action, n_step_rewards, done):
-    one_hot_actions = jax.nn.one_hot(action, n_actions)
-    q_value         = jnp.sum(one_hot_actions*q_value_vec)
 
-    # Calculate discounted N-step return
-    n_step_return = 0.
-    for i, reward in enumerate(n_step_rewards):
-        n_step_return += (gamma**i) * reward
+def make_n_step_sample(buffer, gamma, n_steps):
+    """
+    Build one sample from the LEFT of buffer.
+    Returns (s0, a0, R, s_k, done_k, gamma_pow), gamma_pow = gamma^k.
+    """
+    s0, a0, _, _, _ = buffer[0]
 
-    # Bootstrap value at the end of N steps using jnp.where for conditional logic
-    n_step_return = jnp.where(done == 0.0,
-                              n_step_return + (gamma**n_steps) * jnp.max(target_q_value_vec),
-                              n_step_return) # Use jnp.where for conditional based on 'done'
+    r      = 0.0
+    done_k = 0.0
+    s_k    = buffer[-1][3]
+    k      = 0
 
-    td_error        = n_step_return - q_value
-    return jnp.abs(td_error)
+    for i, (s, a, r, ns, d) in enumerate(buffer):
+        r     += (gamma ** i) * float(r)
+        k      = i + 1
+        s_k    = ns
+        done_k = float(d)
+        if d or k >= n_steps:
+            break
 
-calculate_n_step_td_error_vmap = jax.vmap(calculate_n_step_td_error, in_axes=(0, 0, 0, 0, 0), out_axes=0)
+    gamma_pow = float(gamma ** k)
+    return s0, a0, float(r), s_k, float(done_k), float(gamma_pow)
 
-def n_step_q_learning_loss(q_value_vec, target_q_value_vec, action, n_step_rewards, done):
-    one_hot_actions = jax.nn.one_hot(action, n_actions)
-    q_value         = jnp.sum(one_hot_actions*q_value_vec)
 
-    # Calculate discounted N-step return
-    n_step_return = 0.
-    for i, reward in enumerate(n_step_rewards):
-        n_step_return += (gamma**i) * reward
+def td_error_single(q_params, tgt_params, sample):
+    """Compute abs TD error for one n-step sample."""
+    s0, a0, r, s_k, done_k, gamma_pow = sample
+    batch = (
+        jnp.asarray([s0       ]                   ),
+        jnp.asarray([a0       ], dtype=jnp.int32  ),
+        jnp.asarray([r        ], dtype=jnp.float32),
+        jnp.asarray([s_k      ]                   ),
+        jnp.asarray([done_k   ], dtype=jnp.float32),
+        jnp.asarray([gamma_pow], dtype=jnp.float32),
+    )
+    return float(td_error_batch(q_params, tgt_params, batch)[0])
 
-    # Bootstrap value at the end of N steps using jnp.where for conditional logic
-    n_step_return = jnp.where(done == 0.0,
-                             n_step_return + (gamma**n_steps) * jnp.max(target_q_value_vec),
-                             n_step_return) # Use jnp.where for conditional based on 'done'
 
-    td_error  = jax.lax.stop_gradient(n_step_return) - q_value
-    return jnp.square(td_error)
+def calculate_n_step_td_error(q_vec, tgt_vec, action, r, done, gamma_pow):
+    q_sa      = jnp.sum(jax.nn.one_hot(action, n_actions) * q_vec)
+    bootstrap = gamma_pow * jnp.max(tgt_vec) * (1.0 - done)
+    target    = r + bootstrap
+    return jnp.abs(target - q_sa)
 
-n_step_q_learning_loss_vmap = jax.vmap(n_step_q_learning_loss, in_axes=(0, 0, 0, 0, 0), out_axes=0)
+calculate_n_step_td_error_vmap = jax.vmap(
+    calculate_n_step_td_error, in_axes=(0, 0, 0, 0, 0, 0), out_axes=0
+)
+
+
+def n_step_loss(q_vec, tgt_vec, action, r, done, gamma_pow):
+    q_sa      = jnp.sum(jax.nn.one_hot(action, n_actions) * q_vec)
+    bootstrap = gamma_pow * jnp.max(tgt_vec) * (1.0 - done)
+    target    = r + bootstrap
+    td        = jax.lax.stop_gradient(target) - q_sa
+    return jnp.square(td)
+
+n_step_loss_vmap = jax.vmap(n_step_loss, in_axes=(0, 0, 0, 0, 0, 0), out_axes=0)
+
 
 @jax.jit
-def td_error_batch(q_network_params, target_q_network_params, batch):
-    # batch[0] - states
-    # batch[1] - actions
-    # batch[2] - n_step_rewards (list of rewards for N steps)
-    # batch[3] - next_states (state after N steps)
-    # batch[4] - dones (done after N steps)
-    predicted_q_values = dqn_module.apply({'params': q_network_params}, batch[0])
-    target_q_values    = dqn_module.apply({'params': target_q_network_params}, batch[3])
-    return calculate_n_step_td_error_vmap(predicted_q_values, target_q_values, batch[1], batch[2], batch[4])
+def td_error_batch(q_params, tgt_params, batch):
+    # batch: states, actions, R, next_states, dones, gamma_pows
+    q  = dqn_module.apply({"params": q_params}, batch[0])
+    tq = dqn_module.apply({"params": tgt_params}, batch[3])
+    return calculate_n_step_td_error_vmap(q, tq, batch[1], batch[2], batch[4], batch[5])
+
 
 @jax.jit
-def train_step(q_network_params, target_q_network_params, opt_state, batch):
-    # batch[0] - states
-    # batch[1] - actions
-    # batch[2] - n_step_rewards
-    # batch[3] - next_states
-    # batch[4] - dones
-    def loss_fn(params):
-        predicted_q_values = dqn_module.apply({'params': params}, batch[0])
-        target_q_values    = dqn_module.apply({'params': target_q_network_params}, batch[3])
-        return jnp.mean(
-                n_step_q_learning_loss_vmap(
-                    predicted_q_values,
-                    target_q_values,
-                    batch[1],
-                    batch[2],
-                    batch[4]
-                    )
-                )
-    loss, gradients    = jax.value_and_grad(loss_fn)(q_network_params)
-    updates, opt_state = optimizer.update(gradients, opt_state, q_network_params)
-    q_network_params   = optax.apply_updates(q_network_params, updates)
-    current_td_errors  = td_error_batch(q_network_params, target_q_network_params, batch)
-    return q_network_params, opt_state, loss, current_td_errors
+def train_step(q_params, tgt_params, opt_state, batch):
+    def loss_fn(p):
+        q      = dqn_module.apply({"params": p}, batch[0])
+        tq     = dqn_module.apply({"params": tgt_params}, batch[3])
+        losses = n_step_loss_vmap(q, tq, batch[1], batch[2], batch[4], batch[5])
+        return jnp.mean(losses)
+
+    loss, grads        = jax.value_and_grad(loss_fn)(q_params)
+    updates, opt_state = optimizer.update(grads, opt_state, q_params)
+    q_params           = optax.apply_updates(q_params, updates)
+    td_err             = td_error_batch(q_params, tgt_params, batch)
+    return q_params, opt_state, loss, td_err
 
 
+# Training
 global_steps = 0
+epsilon      = epsilon_max
+
 try:
-    for episode in range(num_episodes):
-        episode_rewards = []
+    for ep in range(num_episodes):
         state, info = env.reset()
         state       = np.array(state, dtype=np.float32)
-        n_step_buffer.clear() # Clear n-step buffer at the start of each episode
+        n_step_buffer.clear()
+        ep_return   = 0.0
+
         while True:
             global_steps += 1
 
+            # epsilon schedule
+            if epsilon > epsilon_min:
+                epsilon = epsilon_min + (epsilon_max - epsilon_min) * math.exp(-epsilon_decay * global_steps)
+
+            # act
             if np.random.rand() <= epsilon:
                 action = env.action_space.sample()
             else:
-                action, q_values = policy(q_network_params, state)
-                if debug:
-                    print("q values :", q_values)
-                    print("selected action :", action)
+                action, q_vals = policy(q_params, jnp.asarray(state))
+                action = int(action)
 
-            if epsilon>epsilon_min:
-                epsilon = epsilon_min+(epsilon_max-epsilon_min)*math.exp(-epsilon_decay*global_steps)
-                if debug:
-                    pass
+            # step
+            next_state, reward, terminated, truncated, info = env.step(int(action))
+            done       = bool(terminated or truncated)
+            next_state = np.array(next_state, dtype=np.float32)
 
-            new_state, reward, terminated, truncated, info = env.step(int(action))
-            done      = terminated or truncated
-            new_state = np.array(new_state, dtype=np.float32)
+            ep_return += float(reward)
 
-            n_step_buffer.append((state, action, reward)) # Append step to N-step buffer
+            # push into n-step buffer
+            n_step_buffer.append((state, action, reward, next_state, done))
 
-            # Process N-step buffer and add to memory after each step
-            if len(n_step_buffer) >= 1: # Ensure there's at least one step in the buffer
-                # Prepare N-step data - take data from the *beginning* of the buffer
-                states_in_buffer = list(n_step_buffer)    # Convert deque to list for indexing
-                n_step_state     = states_in_buffer[0][0] # Initial state of the N-step sequence
-                n_step_action    = states_in_buffer[0][1] # Action taken in the initial state
+            # if buffer full, emit ONE fixed n-step sample from left
+            if len(n_step_buffer) == n_steps:
+                sample = make_n_step_sample(n_step_buffer, gamma, n_steps)
+                td = td_error_single(q_params, tgt_params, sample)
+                per_memory.add(td, sample)
+                n_step_buffer.popleft()
 
-                n_step_rewards   = []
-                for i in range(len(states_in_buffer)): # Collect rewards up to current buffer length, capped at N-steps
-                    n_step_rewards.append(states_in_buffer[i][2])
-                    if i == n_steps - 1: # collect maximum n_steps rewards
-                        break
+            # if episode ended, flush remaining partial samples (k < n)
+            if done:
+                while len(n_step_buffer) > 0:
+                    sample = make_n_step_sample(n_step_buffer, gamma, n_steps)
+                    td = td_error_single(q_params, tgt_params, sample)
+                    per_memory.add(td, sample)
+                    n_step_buffer.popleft()
 
-                n_step_next_state= new_state   # State after current step (which could be N-th step or earlier terminal state)
-                n_step_done      = float(done) # Done after current step - ensure it's float
-
-                # Calculate TD error for PER
-                temporal_difference = float(td_error_batch(
-                    q_network_params,
-                    target_q_network_params,
-                    (
-                        jnp.asarray([n_step_state     ]),
-                        jnp.asarray([n_step_action    ]),
-                        jnp.asarray([n_step_rewards   ]),  # Pass list of rewards
-                        jnp.asarray([n_step_next_state]),
-                        jnp.asarray([n_step_done      ])   # Pass done as float for JAX compatibility
-                    )
-                )[0])
-
-                per_memory.add(temporal_difference, (n_step_state, n_step_action, n_step_rewards, n_step_next_state, n_step_done)) # Store float done
-
-                if len(n_step_buffer) >= n_steps:
-                    n_step_buffer.popleft() # remove the oldest step if buffer is full, maintaining buffer size
-
-            if (len(per_memory.tree.data)>batch_size):
+            # train
+            if per_memory.size >= batch_size:
                 batch = per_memory.sample(batch_size)
-                idxs, segment_data = zip(*batch)
-                states, actions, n_step_rewards_batch, next_states, dones = [], [], [], [], []
-                max_reward_len = 0 # Find the maximum reward list length
-                for data in segment_data:
-                    states              .append(data[0])
-                    actions             .append(data[1])
-                    n_step_rewards_batch.append(data[2])
-                    next_states         .append(data[3])
-                    dones               .append(data[4])
-                    max_reward_len = max(max_reward_len, len(data[2])) # Update maximum length
+                idxs, data = zip(*batch)
+                states, actions, rewards, next_states, dones, gamma_pows = zip(*data)
 
-                # Pad the n_step_rewards_batch to have a uniform length
-                padded_rewards_batch = []
-                for rewards in n_step_rewards_batch:
-                    padding_length = max_reward_len - len(rewards)
-                    padded_rewards = rewards + [0.0] * padding_length # Pad with zeros
-                    padded_rewards_batch.append(padded_rewards)
-
-                q_network_params, opt_state, loss, new_td_errors = train_step(
-                    q_network_params,
-                    target_q_network_params,
-                    opt_state,
+                q_params, opt_state, loss, new_td = train_step(
+                    q_params, tgt_params, opt_state,
                     (
-                        jnp.asarray(list(states)),
-                        jnp.asarray(list(actions), dtype=jnp.int32),
-                        jnp.asarray(padded_rewards_batch), # Pass padded rewards
-                        jnp.asarray(list(next_states)),
-                        jnp.asarray(list(dones), dtype=jnp.float32)
+                        jnp.asarray(states                        ),
+                        jnp.asarray(actions    , dtype=jnp.int32  ),
+                        jnp.asarray(rewards    , dtype=jnp.float32),
+                        jnp.asarray(next_states                   ),
+                        jnp.asarray(dones      , dtype=jnp.float32),
+                        jnp.asarray(gamma_pows , dtype=jnp.float32),
                     )
                 )
-                new_td_errors_np = np.array(new_td_errors)
+
+                new_td_np = np.array(new_td)
                 for i in range(batch_size):
-                    idx = idxs[i]
-                    per_memory.update(idx, new_td_errors_np[i])
+                    per_memory.update(idxs[i], float(new_td_np[i]))
 
-            episode_rewards.append(reward)
-            state = new_state
-
-            if global_steps%sync_steps==0:
-                target_q_network_params = q_network_params
-                if debug:
-                    print("copied updated weights to the target network")
+            # target sync
+            if global_steps % sync_steps == 0:
+                tgt_params = q_params
 
             if debug_render:
                 env.render()
 
+            state = next_state
+
             if done:
-                print("{} - total reward : {}".format(episode, sum(episode_rewards)))
+                print(f"{ep} - total reward: {ep_return:.0f}  eps: {epsilon:.3f}")
                 break
 finally:
     env.close()
