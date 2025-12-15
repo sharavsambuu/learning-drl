@@ -261,11 +261,11 @@ global_steps = 0
 
 try:
     for update in range(updates):
-        states      = np.zeros((steps_per_batch, state_dim), dtype=np.float32)
-        next_states = np.zeros((steps_per_batch, state_dim), dtype=np.float32)
+        states      = np.zeros((steps_per_batch, state_dim ), dtype=np.float32)
+        next_states = np.zeros((steps_per_batch, state_dim ), dtype=np.float32)
         actions     = np.zeros((steps_per_batch, action_dim), dtype=np.float32)
-        rewards     = np.zeros((steps_per_batch,), dtype=np.float32)
-        dones       = np.zeros((steps_per_batch,), dtype=np.float32)
+        rewards     = np.zeros((steps_per_batch,           ), dtype=np.float32)
+        dones       = np.zeros((steps_per_batch,           ), dtype=np.float32)
 
         ep_returns = []
         ep_return  = 0.0
@@ -279,7 +279,7 @@ try:
             rng, a_rng = jax.random.split(rng)
 
             mean, log_std = policy_inference(policy_params, jnp.array([obs], dtype=jnp.float32))
-            mean    = mean[0]
+            mean    = mean   [0]
             log_std = log_std[0]
             std     = jnp.exp(log_std)
 
