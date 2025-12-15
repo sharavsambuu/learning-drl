@@ -111,7 +111,6 @@ try:
             if np.random.rand() <= epsilon:
                 action = env.action_space.sample()
             else:
-                # IMPORTANT: policy() is jitted -> feed jnp array (not numpy)
                 action, q_values = policy(q_network_params, jnp.asarray(state, dtype=jnp.float32))
                 action = int(action)
                 if debug:
