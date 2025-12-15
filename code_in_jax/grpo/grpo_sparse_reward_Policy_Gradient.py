@@ -24,7 +24,7 @@ from   jax        import numpy as jnp
 
 debug_render            = True
 debug                   = True
-play_frequency          = 100
+play_frequency          = 30
 num_episodes            = 20000
 learning_rate           = 0.0005
 gamma                   = 0.99
@@ -296,9 +296,9 @@ try:
         epsilon = epsilon_end + (epsilon_start - epsilon_end) * math.exp(-episode / epsilon_decay_episodes)
 
         group_mean_reward, group_lengths, group_states, group_actions, group_returns = rollout_group(
-            actor_model_params  = actor_model_params,
+            actor_model_params  = actor_model_params ,
             critic_model_params = critic_model_params,
-            seed                = episode,
+            seed                = episode            ,
             epsilon             = epsilon
         )
 
@@ -321,8 +321,8 @@ try:
 
             actor_optimizer_state, actor_model_params, actor_loss = backpropagate_actor(
                 actor_optimizer_state,
-                actor_model_params,
-                critic_model_params,
+                actor_model_params   ,
+                critic_model_params  ,
                 (
                     jnp.asarray(flat_states      , dtype=jnp.float32),
                     jnp.asarray(flat_actions     , dtype=jnp.int32  ),

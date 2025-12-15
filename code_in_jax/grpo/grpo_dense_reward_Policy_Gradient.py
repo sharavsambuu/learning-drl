@@ -22,7 +22,7 @@ from   jax        import numpy as jnp
 
 debug_render   = True
 debug          = True
-play_frequency = 100
+play_frequency = 30
 num_episodes   = 10000
 learning_rate  = 0.001
 gamma          = 0.99
