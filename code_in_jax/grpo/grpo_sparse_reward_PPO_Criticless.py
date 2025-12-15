@@ -1,17 +1,17 @@
 #
-# PPO-style GRPO (Critic-less) + Outcome-Based Group Advantage + Reference-KL + Entropy Bonus  (Sparse Reward)
+# PPO-style GRPO (Critic-less) + Outcome-Based Group Advantage + Reference-KL + Entropy Bonus  (Sparse Reward + Curriculum)
 #
 #    - Sparse reward wrapper on CartPole (reward only at episode end if steps >= threshold)
 #    - Group rollouts (K trajectories) per update from a frozen OLD policy (actor_old_params)
 #    - GRPO advantage (DeepSeek-style):              per-trajectory scalar A_i = (R_i - mean(R)) / (std(R)+eps)
 #                                                    expanded to every step in that trajectory
 #    - PPO-style policy update:                      ratio + clipping using OLD behavior log-probs
-#    - Reference regularization:                     beta * KL( pi_new || pi_ref )
+#    - Reference regularization:                     beta * KL( pi_new || pi_ref )   (KL warmup until first success)
 #    - Critic-less:                                  no V(s), no bootstrap on truncation
 #    - Epsilon-greedy exploration:                   behavior policy is a MIXTURE (eps*Uniform + (1-eps)*pi_old)
 #                                                    so we store logp_behavior for correct PPO ratios
-#    - Sparse reward discount fix:                   gamma = 1.0 to avoid "cash-out early" suicide behavior
-#    - Cold-start reference fix:                     update reference only when the group has at least 1 success
+#    - Sparse reward discount fix:                   gamma = 1.0 to avoid "cash-out early" behavior
+#    - Curriculum:                                   dynamic threshold keeps success-rate in a learnable band
 #    - JAX speed fix:                                drop remainder minibatch to avoid recompiles
 #
 #
@@ -27,26 +27,35 @@ import flax.linen as nn
 from   jax        import numpy as jnp
 
 
-debug_render            = True
+debug_render            = False
 debug                   = True
-play_frequency          = 30
+play_frequency          = 50
 num_episodes            = 20000
 
 learning_rate           = 0.0005
 gamma                   = 1.0
 env_name                = "CartPole-v1"
-group_size              = 8
+
+group_size              = 16
 max_steps               = 500
 
-sparse_reward_threshold = 90
 sparse_reward_value     = 1.0
 
+start_threshold         = 25
+max_threshold           = 495
+threshold_step_up       = 5
+threshold_step_down     = 5
+
+curr_window             = 30
+target_low              = 0.20
+target_high             = 0.80
+
 epsilon_start           = 1.0
-epsilon_end             = 0.01
-epsilon_decay_episodes  = num_episodes / 2
+epsilon_end             = 0.05
+epsilon_decay_episodes  = 2000
 
 clip_epsilon            = 0.2
-entropy_coefficient     = 0.01
+entropy_coefficient     = 0.02
 kl_beta                 = 0.02
 
 epochs_per_update       = 4
@@ -63,7 +72,7 @@ class SparseCartPoleEnv(gym.Env):
         "render_modes": ["human", "rgb_array"],
         "render_fps"  : 50,
     }
-    def __init__(self, render_mode='human', sparse_reward_threshold=90, sparse_reward_value=1.0):
+    def __init__(self, render_mode='human', sparse_reward_threshold=25, sparse_reward_value=1.0):
         super().__init__()
         self.env = gym.make(env_name, render_mode=render_mode if debug_render else None)
         self.sparse_reward_threshold = int(sparse_reward_threshold)
@@ -71,6 +80,9 @@ class SparseCartPoleEnv(gym.Env):
         self.current_steps           = 0
         self.action_space            = self.env.action_space
         self.observation_space       = self.env.observation_space
+
+    def set_threshold(self, new_threshold):
+        self.sparse_reward_threshold = int(new_threshold)
 
     def reset(self, seed=None, options=None):
         self.current_steps = 0
@@ -109,8 +121,10 @@ class ActorNetwork(nn.Module):
         return output_layer
 
 
-env_array   = [SparseCartPoleEnv(render_mode=None, sparse_reward_threshold=sparse_reward_threshold, sparse_reward_value=sparse_reward_value) for _ in range(group_size)]
-env         =  SparseCartPoleEnv(render_mode='human', sparse_reward_threshold=sparse_reward_threshold, sparse_reward_value=sparse_reward_value)
+current_threshold = int(start_threshold)
+
+env_array   = [SparseCartPoleEnv(render_mode=None, sparse_reward_threshold=current_threshold, sparse_reward_value=sparse_reward_value) for _ in range(group_size)]
+env         =  SparseCartPoleEnv(render_mode='human', sparse_reward_threshold=current_threshold, sparse_reward_value=sparse_reward_value)
 
 state, info = env.reset()
 state       = np.array(state, dtype=np.float32)
@@ -125,9 +139,7 @@ dummy_input            = jnp.zeros(state.shape, dtype=jnp.float32)
 actor_params           = actor_module.init(jax.random.PRNGKey(0), dummy_input)['params']
 actor_model_params     = actor_params
 
-# Reference policy is frozen (usually your SFT policy). Here: initial actor snapshot (cold start => update it on success)
 actor_ref_params       = actor_params
-
 
 actor_optimizer_def    = optax.chain(
     optax.clip_by_global_norm(max_grad_norm),
@@ -160,6 +172,10 @@ def backpropagate_actor(optimizer_state, actor_model_params, actor_ref_params, p
     # props[1] - actions    (B,)
     # props[2] - old_logp   (B,)
     # props[3] - advantages (B,)
+    # props[4] - kl_weight  (scalar)
+
+    kl_weight_dynamic = props[4]
+
     def loss_fn(params):
         action_probas_new = actor_module.apply({'params': params}, props[0])
         logp_new          = logprob_from_probs(action_probas_new, props[1])
@@ -180,7 +196,7 @@ def backpropagate_actor(optimizer_state, actor_model_params, actor_ref_params, p
         )
         kl                = kl_from_probs(action_probas_new, action_probas_ref)
 
-        total_loss        = pg_loss + kl_beta * kl - entropy_coefficient * entropy
+        total_loss        = pg_loss + kl_weight_dynamic * kl - entropy_coefficient * entropy
         return total_loss, (pg_loss, kl, entropy)
 
     (loss, (pg_loss, kl, entropy)), gradients = jax.value_and_grad(loss_fn, has_aux=True)(actor_model_params)
@@ -200,7 +216,8 @@ def compute_returns(rewards, done_terms, bootstrap):
 
 
 def rollout_trajectory(group_member_id, actor_old_params, seed, epsilon):
-    env_item       = env_array[group_member_id]
+    env_item = env_array[group_member_id]
+    env_item.set_threshold(current_threshold)
 
     state, info    = env_item.reset(seed=int(seed))
     state          = np.array(state, dtype=np.float32)
@@ -244,7 +261,6 @@ def rollout_trajectory(group_member_id, actor_old_params, seed, epsilon):
         old_logps [step   ] = float(old_logp )
 
         step += 1
-
         state = next_state
 
         if done_boundary:
@@ -253,12 +269,7 @@ def rollout_trajectory(group_member_id, actor_old_params, seed, epsilon):
     trajectory_length = step
 
     bootstrap = 0.0
-
-    returns = compute_returns(
-        rewards    [:trajectory_length],
-        done_terms [:trajectory_length],
-        bootstrap
-    )
+    returns   = compute_returns(rewards[:trajectory_length], done_terms[:trajectory_length], bootstrap)
 
     total_reward = float(np.sum(rewards[:trajectory_length])) if trajectory_length > 0 else 0.0
 
@@ -276,10 +287,10 @@ def rollout_group(actor_old_params, seed, epsilon):
 
     for group_member_id in range(group_size):
         member_id, total_reward, trajectory_length, states, actions, returns, old_logps = rollout_trajectory(
-            group_member_id     = group_member_id,
-            actor_old_params    = actor_old_params,
-            seed                = seed,
-            epsilon             = epsilon
+            group_member_id  = group_member_id,
+            actor_old_params = actor_old_params,
+            seed             = seed,
+            epsilon          = epsilon
         )
 
         group_total_rewards[member_id] = float(total_reward)
@@ -307,7 +318,10 @@ def rollout_group(actor_old_params, seed, epsilon):
     return group_mean_reward, group_std_reward, group_lengths, group_states, group_actions, group_returns, group_old_logps, group_advantages
 
 
-epsilon = epsilon_start
+epsilon              = epsilon_start
+has_succeeded_once   = False
+success_rate_history = []
+
 
 try:
     global_step = 0
@@ -324,8 +338,24 @@ try:
             epsilon          = epsilon
         )
 
-        if (kl_beta > 0.0) and (episode % ref_update_freq == 0) and (group_mean_reward > 0.0):
+        success_rate_history.append(float(group_mean_reward))
+        if len(success_rate_history) > int(curr_window):
+            success_rate_history.pop(0)
+
+        success_rate_avg = float(np.mean(success_rate_history)) if len(success_rate_history) > 0 else 0.0
+
+        if group_mean_reward > 0.0:
+            has_succeeded_once = True
+
+        if has_succeeded_once and (episode % ref_update_freq == 0) and (success_rate_avg > 0.10):
             actor_ref_params = actor_old_params
+
+        # Curriculum control: keep success-rate in a learnable band to avoid std->0 and avoid gradient vacuum
+        if len(success_rate_history) >= int(curr_window):
+            if (success_rate_avg > target_high) and (current_threshold < max_threshold):
+                current_threshold = int(min(max_threshold, current_threshold + threshold_step_up))
+            elif (success_rate_avg < target_low) and (current_threshold > start_threshold):
+                current_threshold = int(max(start_threshold, current_threshold - threshold_step_down))
 
         flat_states     = np.concatenate(group_states    , axis=0) if len(group_states    ) > 0 else np.zeros((0,) + state_shape, dtype=np.float32)
         flat_actions    = np.concatenate(group_actions   , axis=0) if len(group_actions   ) > 0 else np.zeros((0,), dtype=np.int32  )
@@ -337,6 +367,8 @@ try:
         kl_loss    = 0.0
         entropy    = 0.0
 
+        current_kl_beta = float(kl_beta) if has_succeeded_once else 0.0
+
         if flat_states.shape[0] > 0:
             batch_size  = int(flat_states.shape[0])
             global_step += batch_size
@@ -345,6 +377,7 @@ try:
             actions_j   = jnp.asarray(flat_actions   , dtype=jnp.int32  )
             old_logp_j  = jnp.asarray(flat_old_logp  , dtype=jnp.float32)
             adv_j       = jnp.asarray(flat_advantages, dtype=jnp.float32)
+            kl_beta_j   = jnp.asarray(current_kl_beta, dtype=jnp.float32)
 
             for _ in range(epochs_per_update):
                 rng, perm_rng = jax.random.split(rng)
@@ -367,17 +400,23 @@ try:
                             actions_j [mb_idx],
                             old_logp_j[mb_idx],
                             adv_j     [mb_idx],
+                            kl_beta_j
                         )
                     )
 
         if debug and (episode % 10 == 0):
             print(f"Ep {episode:6d} | Steps {global_step:9d} | "
-                  f"GroupMeanR {group_mean_reward:9.4f} | Std {group_std_reward:7.4f} | "
+                  f"Thr {current_threshold:3d} | "
+                  f"SuccAvg {success_rate_avg:6.3f} | "
+                  f"GroupMeanR {group_mean_reward:6.3f} | Std {group_std_reward:7.4f} | "
                   f"Eps {epsilon:6.3f} | "
+                  f"KLw {current_kl_beta:6.3f} | "
                   f"ActLoss {float(actor_loss):9.4f} | PG {float(pg_loss):9.4f} | "
                   f"KL {float(kl_loss):9.4f} | Ent {float(entropy):9.4f}")
 
         if episode % play_frequency == 0 and debug_render == True:
+            env.set_threshold(current_threshold)
+
             state, info = env.reset(seed=int(episode))
             state       = np.array(state, dtype=np.float32)
 
@@ -401,7 +440,7 @@ try:
                 env.render()
 
                 if done:
-                    print(f"Episode {episode}, sparse_reward_sum : {round(np.sum(rewards), 3)}, steps: {steps}, epsilon: {epsilon:.2f}")
+                    print(f"Episode {episode}, sparse_reward_sum : {round(np.sum(rewards), 3)}, steps: {steps}, epsilon: {epsilon:.2f}, thr: {current_threshold}")
                     break
 
 finally:
