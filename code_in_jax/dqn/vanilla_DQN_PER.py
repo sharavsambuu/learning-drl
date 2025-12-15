@@ -8,7 +8,7 @@ import flax.linen as nn
 import jax
 from jax import numpy as jnp
 import numpy as np
-import optax                      
+import optax
 import time
 
 
@@ -25,20 +25,22 @@ epsilon_decay = 0.001
 epsilon_max   = 1.0
 epsilon_min   = 0.01
 
-gamma         = 0.99 # discount factor
+gamma         = 0.99    # discount factor
 
 
 class SumTree:
-    write = 0
     def __init__(self, capacity):
         self.capacity = capacity
         self.tree     = np.zeros(2*capacity - 1)
         self.data     = np.zeros(capacity, dtype=object)
+        self.write    = 0  
+
     def _propagate(self, idx, change):
         parent             = (idx - 1) // 2
         self.tree[parent] += change
         if parent != 0:
             self._propagate(parent, change)
+
     def _retrieve(self, idx, s):
         left  = 2 * idx + 1
         right = left + 1
@@ -48,8 +50,10 @@ class SumTree:
             return self._retrieve(left, s)
         else:
             return self._retrieve(right, s-self.tree[left])
+
     def total(self):
         return self.tree[0]
+
     def add(self, p, data):
         idx                   = self.write + self.capacity - 1
         self.data[self.write] = data
@@ -57,25 +61,31 @@ class SumTree:
         self.write           += 1
         if self.write >= self.capacity:
             self.write = 0
+
     def update(self, idx, p):
         change         = p - self.tree[idx]
         self.tree[idx] = p
         self._propagate(idx, change)
+
     def get(self, s):
         idx     = self._retrieve(0, s)
         dataIdx = idx - self.capacity + 1
         return (idx, self.tree[idx], self.data[dataIdx])
+
 
 class PERMemory:
     e = 0.01
     a = 0.6
     def __init__(self, capacity):
         self.tree = SumTree(capacity)
+
     def _get_priority(self, error):
         return (error+self.e)**self.a
+
     def add(self, error, sample):
         p = self._get_priority(error)
         self.tree.add(p, sample)
+
     def sample(self, n):
         batch   = []
         segment = self.tree.total()/n
@@ -86,39 +96,40 @@ class PERMemory:
             (idx, p, data) = self.tree.get(s)
             batch.append((idx, data))
         return batch
+
     def update(self, idx, error):
         p = self._get_priority(error)
         self.tree.update(idx, p)
 
 
-class DeepQNetwork(nn.Module): 
-    n_actions: int 
-    @nn.compact 
-    def __call__(self, x): 
+class DeepQNetwork(nn.Module):
+    n_actions: int
+    @nn.compact
+    def __call__(self, x):
         x = nn.Dense(features=64)(x) #
         activation_layer_1 = nn.relu(x)
-        dense_layer_2      = nn.Dense(features=32)(activation_layer_1) 
+        dense_layer_2      = nn.Dense(features=32)(activation_layer_1)
         activation_layer_2 = nn.relu(dense_layer_2)
-        output_layer       = nn.Dense(features=self.n_actions)(activation_layer_2) 
+        output_layer       = nn.Dense(features=self.n_actions)(activation_layer_2)
         return output_layer
 
 
-env   = gym.make('CartPole-v1', render_mode='human')
+env   = gym.make('CartPole-v1', render_mode='human' if debug_render else None)
 state, info = env.reset()
 
-n_actions        = env.action_space.n
+n_actions             = env.action_space.n
+dqn_module            = DeepQNetwork(n_actions=n_actions)
+dummy_input           = jnp.zeros(state.shape, dtype=jnp.float32)
 
-dqn_module       = DeepQNetwork(n_actions=n_actions)
-dummy_input      = jnp.zeros(state.shape)
-params           = dqn_module.init(jax.random.PRNGKey(0), dummy_input)
-q_network_params = params['params']
+params                = dqn_module.init(jax.random.PRNGKey(0), dummy_input)
+q_network_params      = params['params']
 target_q_network_params = params['params']
 
-optimizer        = optax.adam(learning_rate)
-opt_state        = optimizer.init(q_network_params)
+optimizer             = optax.adam(learning_rate)
+opt_state             = optimizer.init(q_network_params)
 
-replay_memory = deque(maxlen=memory_length) 
-per_memory       = PERMemory(memory_length)
+replay_memory         = deque(maxlen=memory_length)
+per_memory            = PERMemory(memory_length)
 
 
 @jax.jit
@@ -128,36 +139,36 @@ def policy(params, x):
     return max_q_action, predicted_q_values
 
 
-def calculate_td_error(q_value_vec, target_q_value_vec, action, reward): 
+def q_learning_loss(q_value_vec, target_q_value_vec, action, reward, done):
     one_hot_actions = jax.nn.one_hot(action, n_actions)
     q_value         = jnp.sum(one_hot_actions*q_value_vec)
-    td_target       = reward + gamma*jnp.max(target_q_value_vec)
+    td_target       = reward + gamma*jnp.max(target_q_value_vec)*(1.-done)
+    td_error        = jax.lax.stop_gradient(td_target) - q_value
+    return jnp.square(td_error)
+
+q_learning_loss_vmap = jax.vmap(q_learning_loss, in_axes=(0, 0, 0, 0, 0), out_axes=0)
+
+
+def calculate_td_error(q_value_vec, target_q_value_vec, action, reward, done):
+    one_hot_actions = jax.nn.one_hot(action, n_actions)
+    q_value         = jnp.sum(one_hot_actions*q_value_vec)
+    td_target       = reward + gamma*jnp.max(target_q_value_vec)*(1.-done)
     td_error        = td_target - q_value
     return jnp.abs(td_error)
 
-calculate_td_error_vmap = jax.vmap(calculate_td_error, in_axes=(0, 0, 0, 0), out_axes=0) 
-
-
-def q_learning_loss(q_value_vec, target_q_value_vec, action, reward, done): 
-    one_hot_actions = jax.nn.one_hot(action, n_actions)
-    q_value         = jnp.sum(one_hot_actions*q_value_vec)
-    td_target = reward + gamma*jnp.max(target_q_value_vec)*(1.-done)
-    td_error  = jax.lax.stop_gradient(td_target) - q_value
-    return jnp.square(td_error)
-
-q_learning_loss_vmap = jax.vmap(q_learning_loss, in_axes=(0, 0, 0, 0, 0), out_axes=0) 
-
+calculate_td_error_vmap = jax.vmap(calculate_td_error, in_axes=(0, 0, 0, 0, 0), out_axes=0)
 
 
 @jax.jit
-def td_error_batch(q_network_params, target_q_network_params, batch): 
+def td_error_batch(q_network_params, target_q_network_params, batch):
     # batch[0] - states
     # batch[1] - actions
     # batch[2] - rewards
     # batch[3] - next_states
+    # batch[4] - dones
     predicted_q_values = dqn_module.apply({'params': q_network_params}, batch[0])
     target_q_values    = dqn_module.apply({'params': target_q_network_params}, batch[3])
-    return calculate_td_error_vmap(predicted_q_values, target_q_values, batch[1], batch[2]) # Use vmapped version
+    return calculate_td_error_vmap(predicted_q_values, target_q_values, batch[1], batch[2], batch[4])
 
 
 @jax.jit
@@ -177,29 +188,33 @@ def train_step(q_network_params, target_q_network_params, opt_state, batch):
                     batch[1],
                     batch[2],
                     batch[4]
-                    )
                 )
-    loss, gradients = jax.value_and_grad(loss_fn)(q_network_params)
-    updates, opt_state = optimizer.update(gradients, opt_state, q_network_params)
-    q_network_params = optax.apply_updates(q_network_params, updates)
-    current_td_errors = td_error_batch(q_network_params, target_q_network_params, batch) 
-    return q_network_params, opt_state, loss, current_td_errors 
+        )
+
+    loss, gradients      = jax.value_and_grad(loss_fn)(q_network_params)
+    updates, opt_state   = optimizer.update(gradients, opt_state, q_network_params)
+    q_network_params     = optax.apply_updates(q_network_params, updates)
+
+    current_td_errors    = td_error_batch(q_network_params, target_q_network_params, batch)
+
+    return q_network_params, opt_state, loss, current_td_errors
 
 
 global_steps = 0
 try:
     for episode in range(num_episodes):
         episode_rewards = []
-        state, info = env.reset()
-        state = np.array(state, dtype=np.float32)
+        state, info     = env.reset()
+        state           = np.array(state, dtype=np.float32)
+
         while True:
-            
             global_steps = global_steps+1
 
             if np.random.rand() <= epsilon:
                 action = env.action_space.sample()
             else:
-                action, q_values = policy(q_network_params, state)
+                action, q_values = policy(q_network_params, jnp.asarray(state, dtype=jnp.float32))
+                action = int(action)
                 if debug:
                     print("q утгууд :"       , q_values)
                     print("сонгосон action :", action  )
@@ -211,58 +226,65 @@ try:
                     pass
 
             new_state, reward, terminated, truncated, info = env.step(int(action))
-            done = terminated or truncated
-            new_state = np.array(new_state, dtype=np.float32)
+            done       = terminated or truncated
+            new_state  = np.array(new_state, dtype=np.float32)
 
             # sample нэмэхдээ temporal difference error-ийг тооцож нэмэх
-            temporal_difference = float(td_error_batch(q_network_params, target_q_network_params, ( 
-                    jnp.asarray([state    ]),
-                    jnp.asarray([action   ]),
-                    jnp.asarray([reward   ]),
-                    jnp.asarray([new_state])
-                ))[0])
-            replay_memory.append((state, action, reward, new_state, float(done))) # Append to replay_memory
+            temporal_difference = float(td_error_batch(
+                q_network_params,
+                target_q_network_params,
+                (
+                    jnp.asarray([state      ], dtype=jnp.float32),
+                    jnp.asarray([action     ], dtype=jnp.int32  ),
+                    jnp.asarray([reward     ], dtype=jnp.float32),
+                    jnp.asarray([new_state  ], dtype=jnp.float32),
+                    jnp.asarray([float(done)], dtype=jnp.float32),
+                )
+            )[0])
 
+            replay_memory.append((state, action, reward, new_state, float(done)))
             per_memory.add(temporal_difference, (state, action, reward, new_state, float(done)))
 
             # Prioritized Experience Replay санах ойгоос batch үүсгээд DQN сүлжээг сургах
-            if (len(replay_memory)>batch_size): 
+            if (len(replay_memory)>batch_size):
                 batch = per_memory.sample(batch_size)
-                idxs, segment_data = zip(*batch) # Unpack idxs and data
+                idxs, segment_data = zip(*batch)
+
                 states, actions, rewards, next_states, dones = [], [], [], [], []
-                for data in segment_data: # Iterate over segment_data
-                    states.append     (data[0])
-                    actions.append    (data[1])
-                    rewards.append    (data[2])
+                for data in segment_data:
+                    states     .append(data[0])
+                    actions    .append(data[1])
+                    rewards    .append(data[2])
                     next_states.append(data[3])
-                    dones.append      (data[4])
+                    dones      .append(data[4])
 
-                q_network_params, opt_state, loss, new_td_errors = train_step( # train_step now returns td_errors
-                                        q_network_params,
-                                        target_q_network_params,
-                                        opt_state,
-                                        (   # sample-дсэн batch өгөгдлүүдийг хурдасгуур
-                                            # төхөөрөмийн санах ойруу хуулах
-                                            jnp.asarray(list(states)),
-                                            jnp.asarray(list(actions), dtype=jnp.int32),
-                                            jnp.asarray(list(rewards), dtype=jnp.float32),
-                                            jnp.asarray(list(next_states)),
-                                            jnp.asarray(list(dones), dtype=jnp.float32)
-                                        )
-                                    )
+                q_network_params, opt_state, loss, new_td_errors = train_step(
+                    q_network_params,
+                    target_q_network_params,
+                    opt_state,
+                    (
+                        # sample-дсэн batch өгөгдлүүдийг хурдасгуур
+                        # төхөөрөмжийн санах ойруу хуулах
+                        jnp.asarray(list(states     ), dtype=jnp.float32),
+                        jnp.asarray(list(actions    ), dtype=jnp.int32  ),
+                        jnp.asarray(list(rewards    ), dtype=jnp.float32),
+                        jnp.asarray(list(next_states), dtype=jnp.float32),
+                        jnp.asarray(list(dones      ), dtype=jnp.float32),
+                    )
+                )
+
                 # batch-аас бий болсон temporal difference error-ийн дагуу санах ойг шинэчлэх
-                new_td_errors_np = np.array(new_td_errors) 
+                new_td_errors_np = np.array(new_td_errors)
                 for i in range(batch_size):
-                    idx = idxs[i] # Use idxs from sample
-                    per_memory.update(idx, new_td_errors_np[i])
-
+                    idx = idxs[i]
+                    per_memory.update(idx, float(new_td_errors_np[i]))
 
             episode_rewards.append(reward)
             state = new_state
 
             # Тодорхой алхам тутамд target неорон сүлжээний жингүүдийг сайжирсан хувилбараар солих
             if global_steps%sync_steps==0:
-                target_q_network_params = q_network_params # Directly copy params
+                target_q_network_params = q_network_params
                 if debug:
                     print("сайжруулсан жингүүдийг target неорон сүлжээрүү хууллаа")
 
