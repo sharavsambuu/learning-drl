@@ -47,21 +47,24 @@
 
 # Environment
 
-    Python3.12
+    Python3.13
 
 
 # Dependencies
 
 ```shell
-  sudo apt install libsdl2-dev swig python3.12-tk
+  sudo apt install libsdl2-dev swig python3.13-tk
+  sudo apt install libbox2d-dev
   sudo apt install cmake zlib1g-dev libjpeg-dev libboost-all-dev gcc libsdl2-dev wget unzip
+  sudo ldconfig
 ```
 
 
 # Prepare
 
 ```shell
-  virtualenv -p python3.12 env && source env/bin/activate && pip install -r requirements.txt
+  virtualenv -p python3.13 env && source env/bin/activate && pip install -r requirements313.txt
+  pip install "gymnasium[box2d]"
 ```
 
 

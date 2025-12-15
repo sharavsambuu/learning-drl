@@ -1,38 +1,80 @@
+#
+# SAC (Discrete) Ultimate + Entropy Plot
+#
+#    - Discrete SAC target uses exact expectation over actions (no action sampling in target)
+#    - Twin Q networks + clipped double Q
+#    - Auto-tuned alpha (entropy temperature) with log_alpha clipping safety
+#    - Prioritized Experience Replay (PER) SumTree (new samples start at max priority)
+#    - Correct boundary handling:
+#         terminated  -> done_term  (mask bootstrap)
+#         truncated   -> boundary reset only (bootstrap allowed)
+#    - Gradient clipping + Adam(eps=1e-5)
+#    - Live plotting of entropy vs target entropy (and alpha on a twin axis)
+#
+
 import random
+import time
 import jax
 import optax
-import gymnasium as gym
-import flax.linen as nn
-import numpy as np
-from jax import numpy as jnp
+import numpy             as np
+import gymnasium         as gym
+import flax.linen        as nn
+from   jax               import numpy as jnp
+import matplotlib.pyplot as plt
 
-num_episodes    = 500
-learning_rate   = 0.001
-gamma           = 0.99
-tau             = 0.005  # Soft update coefficient for target network
-entropy_alpha   = 0.2    # Initial entropy temperature (can be tuned or made learnable)
-batch_size      = 64
-memory_length   = 10000
 
-per_alpha       = 0.6
-per_beta_start  = 0.4
-per_beta_frames = 100000
-per_epsilon     = 1e-6
+# Hyperparameters
+env_name            = "LunarLander-v3"
+debug_render        = True
+
+live_plot           = True
+plot_every_episodes = 1
+
+total_timesteps     = 600000
+start_steps         = 5000
+
+learning_rate       = 3e-4
+gamma               = 0.99
+tau                 = 0.005
+
+batch_size          = 64
+memory_length       = 100000
+update_every_steps  = 1
+updates_per_step    = 1
+
+# PER
+per_alpha           = 0.6
+per_beta_start      = 0.4
+per_beta_frames     = 100000
+per_epsilon         = 1e-6
+
+# Entropy / Alpha
+ALPHA_AUTO          = True
+target_entropy_ratio= 0.98
+init_alpha          = 0.2
+alpha_lr            = 3e-4
+
+max_grad_norm       = 10.0
+
 
 
 class SumTree:
     write = 0
     def __init__(self, capacity):
         self.capacity = capacity
-        self.tree = np.zeros(2 * capacity - 1)
-        self.data = np.zeros(capacity, dtype=object)
+        self.tree     = np.zeros(2 * capacity - 1, dtype=np.float32)
+        # Initialize with None to safely detect empty slots
+        self.data     = np.full(capacity, None, dtype=object)
+        self.size     = 0
+
     def _propagate(self, idx, change):
         parent = (idx - 1) // 2
         self.tree[parent] += change
         if parent != 0:
             self._propagate(parent, change)
+
     def _retrieve(self, idx, s):
-        left = 2 * idx + 1
+        left  = 2 * idx + 1
         right = left + 1
         if left >= len(self.tree):
             return idx
@@ -40,8 +82,10 @@ class SumTree:
             return self._retrieve(left, s)
         else:
             return self._retrieve(right, s - self.tree[left])
+
     def total(self):
-        return self.tree[0]
+        return float(self.tree[0])
+
     def add(self, p, data):
         idx = self.write + self.capacity - 1
         self.data[self.write] = data
@@ -49,247 +93,386 @@ class SumTree:
         self.write += 1
         if self.write >= self.capacity:
             self.write = 0
+        if self.size < self.capacity:
+            self.size += 1
+
     def update(self, idx, p):
         change = p - self.tree[idx]
         self.tree[idx] = p
         self._propagate(idx, change)
+
     def get(self, s):
-        idx = self._retrieve(0, s)
+        idx     = self._retrieve(0, s)
         dataIdx = idx - self.capacity + 1
-        return (idx, self.tree[idx], self.data[dataIdx])
+        return (idx, float(self.tree[idx]), self.data[dataIdx])
+
 
 class PrioritizedReplayMemory:
     def __init__(self, capacity, alpha=per_alpha):
-        self.tree = SumTree(capacity)
-        self.alpha = alpha
-        self.capacity = capacity
+        self.tree   = SumTree(capacity)
+        self.alpha  = alpha
+        self.max_p  = 1.0
+
     def _get_priority(self, error):
         return (np.abs(error) + per_epsilon) ** self.alpha
-    def push(self, state, action, reward, next_state, done):
-        error = 1.0  # Initial error for new transitions
-        p = self._get_priority(error)
-        self.tree.add(p, (state, action, reward, next_state, done))
+
+    def push(self, state, action, reward, next_state, done_term):
+        p = self.max_p
+        self.tree.add(p, (state, action, reward, next_state, done_term))
+
     def sample(self, batch_size, beta):
-        batch = []
-        idxs  = []
-        segment = self.tree.total() / batch_size
+        if self.tree.size < batch_size:
+            return None
+
+        batch      = []
+        idxs       = []
         priorities = []
+        total_p    = self.tree.total()
+        
+        # Avoid division by zero
+        if total_p <= 0.0:
+            return None
+
+        segment    = total_p / batch_size
+
         for i in range(batch_size):
             a = segment * i
             b = segment * (i + 1)
             s = random.uniform(a, b)
-            (idx, p, data) = self.tree.get(s)
+            idx, p, data = self.tree.get(s)
+            
+            # Safety check for uninitialized data
+            if data is None:
+                return None
+
+            batch     .append(data)
+            idxs      .append(idx)
             priorities.append(p)
-            batch.append(data)
-            idxs.append(idx)
-        sampling_probabilities = priorities / self.tree.total()
-        is_weight = np.power(self.tree.capacity * sampling_probabilities, -beta)
-        is_weight /= is_weight.max()
+
+        probs   = np.array(priorities, dtype=np.float32) / total_p
+        weights = (self.tree.size * probs) ** (-beta)
+        weights = weights / weights.max()
+
         states, actions, rewards, next_states, dones = zip(*batch)
-        return idxs, np.array(states), np.array(actions), np.array(rewards), np.array(next_states), np.array(
-            dones), is_weight
+
+        return (
+            idxs,
+            np.array(states     , dtype=np.float32),
+            np.array(actions    , dtype=np.int32  ),
+            np.array(rewards    , dtype=np.float32),
+            np.array(next_states, dtype=np.float32),
+            np.array(dones      , dtype=np.float32),
+            np.array(weights    , dtype=np.float32)
+        )
+
     def update(self, idx, error):
         p = self._get_priority(error)
         self.tree.update(idx, p)
+        if p > self.max_p:
+            self.max_p = float(p)
+
     def __len__(self):
-        return min(self.tree.write, self.capacity)
+        return self.tree.size
+
 
 
 class SoftQNetwork(nn.Module):
     n_actions: int
     @nn.compact
     def __call__(self, x):
-        x = nn.Dense(features=64)(x)
+        x = nn.Dense(256)(x)
         x = nn.relu(x)
-        x = nn.Dense(features=64)(x)
+        x = nn.Dense(256)(x)
         x = nn.relu(x)
-        x = nn.Dense(features=self.n_actions)(x)
+        x = nn.Dense(self.n_actions)(x)
         return x
 
 class DiscretePolicyNetwork(nn.Module):
     n_actions: int
     @nn.compact
     def __call__(self, x):
-        x = nn.Dense(features=64)(x)
+        x = nn.Dense(256)(x)
         x = nn.relu(x)
-        x = nn.Dense(features=64)(x)
+        x = nn.Dense(256)(x)
         x = nn.relu(x)
-        x = nn.Dense(features=self.n_actions)(x)
-        x = nn.softmax(x)
+        x = nn.Dense(self.n_actions)(x)   # logits
         return x
 
 
-#env         = gym.make('CartPole-v1', render_mode='human')
-env         = gym.make('LunarLander-v3', render_mode='human')
-state, info = env.reset()
-state       = np.array(state, dtype=np.float32)
+
+env         = gym.make(env_name, render_mode="human" if debug_render else None)
+state_dim   = env.observation_space.shape[0]
 n_actions   = env.action_space.n
 
-soft_q_module_1 = SoftQNetwork(n_actions=n_actions)
-soft_q_module_2 = SoftQNetwork(n_actions=n_actions)
-policy_module   = DiscretePolicyNetwork(n_actions=n_actions)
-dummy_input     = jnp.zeros(state.shape)
+q1_module   = SoftQNetwork(n_actions)
+q2_module   = SoftQNetwork(n_actions)
+pi_module   = DiscretePolicyNetwork(n_actions)
 
-soft_q_params_1        = soft_q_module_1.init(jax.random.PRNGKey(0), dummy_input)['params']
-soft_q_params_2        = soft_q_module_2.init(jax.random.PRNGKey(1), dummy_input)['params']
-target_soft_q_params_1 = soft_q_params_1
-target_soft_q_params_2 = soft_q_params_2
-policy_params          = policy_module.init(jax.random.PRNGKey(2), dummy_input)['params']
+rng         = jax.random.PRNGKey(42)
+rng, k1, k2, k3 = jax.random.split(rng, 4)
 
-soft_q_optimizer_1 = optax.adam(learning_rate)
-soft_q_optimizer_2 = optax.adam(learning_rate)
-policy_optimizer   = optax.adam(learning_rate)
-soft_q_opt_state_1 = soft_q_optimizer_1.init(soft_q_params_1)
-soft_q_opt_state_2 = soft_q_optimizer_2.init(soft_q_params_2)
-policy_opt_state   = policy_optimizer.init(policy_params)
+dummy       = jnp.zeros((1, state_dim), dtype=jnp.float32)
 
+q1_params   = q1_module.init(k1, dummy)["params"]
+q2_params   = q2_module.init(k2, dummy)["params"]
+tq1_params  = q1_params
+tq2_params  = q2_params
+pi_params   = pi_module.init(k3, dummy)["params"]
 
-replay_memory = PrioritizedReplayMemory(memory_length)
+target_entropy = float(np.log(n_actions) * target_entropy_ratio)
+
+if ALPHA_AUTO:
+    log_alpha    = jnp.array(np.log(init_alpha), dtype=jnp.float32)
+    alpha_optim  = optax.adam(alpha_lr, eps=1e-5)
+    alpha_opt_st = alpha_optim.init(log_alpha)
+else:
+    log_alpha    = jnp.array(np.log(init_alpha), dtype=jnp.float32)
+    alpha_optim  = None
+    alpha_opt_st = None
+
+optimizer = optax.chain(
+    optax.clip_by_global_norm(max_grad_norm),
+    optax.adam(learning_rate, eps=1e-5)
+)
+
+q1_opt_st  = optimizer.init(q1_params)
+q2_opt_st  = optimizer.init(q2_params)
+pi_opt_st  = optimizer.init(pi_params)
+
 
 
 @jax.jit
-def soft_q_inference(params, x):
-    return soft_q_module_1.apply({'params': params}, x)
+def soft_update(target, source, tau):
+    return jax.tree_util.tree_map(lambda t, s: (1.0 - tau) * t + tau * s, target, source)
 
 @jax.jit
-def policy_inference(params, x):
-    return policy_module.apply({'params': params}, x)
-
-@jax.vmap
-def gather(probability_vec, action_index):
-    return probability_vec[action_index]
+def sample_action(rng, pi_params, state):
+    logits = pi_module.apply({"params": pi_params}, state)
+    act    = jax.random.categorical(rng, logits, axis=-1).astype(jnp.int32)
+    return act
 
 @jax.jit
-def soft_q_update(
-    soft_q_params_1, soft_q_opt_state_1,
-    soft_q_params_2,
-    target_soft_q_params_1, target_soft_q_params_2,
-    policy_params,
+def update_step(
+    q1_params , q1_opt_st  ,
+    q2_params , q2_opt_st  ,
+    pi_params , pi_opt_st  ,
+    tq1_params, tq2_params ,
+    log_alpha , alpha_opt_st,
     states, actions, rewards, next_states, dones, is_weights
 ):
-    # Calculate target Q-value
-    next_state_policy_probs = policy_module.apply({'params': policy_params}, next_states)
-    next_state_q_values_1 = soft_q_module_1.apply({'params': target_soft_q_params_1}, next_states)
-    next_state_q_values_2 = soft_q_module_2.apply({'params': target_soft_q_params_2}, next_states)
-    next_state_min_q = jnp.minimum(next_state_q_values_1, next_state_q_values_2)
-    
-    next_state_v = jnp.sum(next_state_policy_probs * (next_state_min_q - entropy_alpha * jnp.log(next_state_policy_probs + 1e-6)), axis=1)
-    
-    target_q_values = rewards + (1.0 - dones) * gamma * next_state_v
+    alpha = jnp.exp(log_alpha)
 
-    # Calculate Q-function loss with Importance Sampling weights
-    def soft_q_loss_fn(params, target, actions, q_net_module, is_weights):
-        q_values = q_net_module.apply({'params': params}, states)
-        q_values_of_actions = gather(q_values, actions)
-        td_error = target - q_values_of_actions
-        return jnp.mean(is_weights * jnp.square(td_error)), td_error
+    # Target V(s') = sum_a pi(a|s') [ minQ(s',a) - alpha * log_pi(a|s') ]
+    next_logits = pi_module.apply({"params": pi_params}, next_states)
+    next_logp   = jax.nn.log_softmax(next_logits, axis=-1)
+    next_probs  = jnp.exp(next_logp)
 
-    # Update Q-function 1
-    (q1_loss, q1_td_error), q1_grads = jax.value_and_grad(soft_q_loss_fn, has_aux=True)(soft_q_params_1, target_q_values, actions, soft_q_module_1, is_weights)
-    q1_updates, new_soft_q_opt_state_1 = soft_q_optimizer_1.update(q1_grads, soft_q_opt_state_1, soft_q_params_1)
-    new_soft_q_params_1 = optax.apply_updates(soft_q_params_1, q1_updates)
+    tq1_next    = q1_module.apply({"params": tq1_params}, next_states)
+    tq2_next    = q2_module.apply({"params": tq2_params}, next_states)
+    tq_min      = jnp.minimum(tq1_next, tq2_next)
 
-    # Update Q-function 2
-    (q2_loss, q2_td_error), q2_grads = jax.value_and_grad(soft_q_loss_fn, has_aux=True)(soft_q_params_2, target_q_values, actions, soft_q_module_2, is_weights)
-    q2_updates, new_soft_q_opt_state_2 = soft_q_optimizer_2.update(q2_grads, soft_q_opt_state_2, soft_q_params_2)
-    new_soft_q_params_2 = optax.apply_updates(soft_q_params_2, q2_updates)
+    next_v      = jnp.sum(next_probs * (tq_min - alpha * next_logp), axis=1)
+    target_q    = rewards + gamma * (1.0 - dones) * next_v
 
-    return new_soft_q_params_1, new_soft_q_opt_state_1, new_soft_q_params_2, new_soft_q_opt_state_2, q1_loss, q2_loss, q1_td_error, q2_td_error
+    def q_loss_fn(p, apply_fn):
+        q_pred = apply_fn({"params": p}, states)
+        q_act  = jnp.take_along_axis(q_pred, actions[:, None], axis=1).squeeze(1)
+        td     = target_q - q_act
+        loss   = jnp.mean(is_weights * jnp.square(td))
+        return loss, td
 
-@jax.jit
-def policy_update(policy_params, policy_opt_state, soft_q_params_1, soft_q_params_2, states):
-    def policy_loss_fn(params):
-        policy_probs = policy_module.apply({'params': params}, states)
-        
-        soft_q_values_1 = soft_q_module_1.apply({'params': soft_q_params_1}, states)
-        soft_q_values_2 = soft_q_module_2.apply({'params': soft_q_params_2}, states)
-        min_soft_q_values = jnp.minimum(soft_q_values_1, soft_q_values_2)
+    (q1_loss, td1), g1 = jax.value_and_grad(q_loss_fn, has_aux=True)(q1_params, q1_module.apply)
+    u1, q1_opt_st      = optimizer.update(g1, q1_opt_st, q1_params)
+    q1_params          = optax.apply_updates(q1_params, u1)
 
-        log_probs = min_soft_q_values - jax.scipy.special.logsumexp(min_soft_q_values, axis=1, keepdims=True)
-        
-        policy_loss = jnp.sum(policy_probs * (entropy_alpha * jnp.log(policy_probs + 1e-6) - min_soft_q_values), axis=1)
-        return jnp.mean(policy_loss)
+    (q2_loss, td2), g2 = jax.value_and_grad(q_loss_fn, has_aux=True)(q2_params, q2_module.apply)
+    u2, q2_opt_st      = optimizer.update(g2, q2_opt_st, q2_params)
+    q2_params          = optax.apply_updates(q2_params, u2)
 
-    (policy_loss, policy_grads) = jax.value_and_grad(policy_loss_fn)(policy_params)
-    policy_updates, new_policy_opt_state = policy_optimizer.update(policy_grads, policy_opt_state, policy_params)
-    new_policy_params = optax.apply_updates(policy_params, policy_updates)
+    per_err = 0.5 * (jnp.abs(td1) + jnp.abs(td2))
 
-    return new_policy_params, new_policy_opt_state, policy_loss
+    def pi_loss_fn(p):
+        logits      = pi_module.apply({"params": p}, states)
+        logp        = jax.nn.log_softmax(logits, axis=-1)
+        probs       = jnp.exp(logp)
 
-@jax.jit
-def soft_update(target_params, params, tau):
-    def update_fn(target_param, param):
-        return (1 - tau) * target_param + tau * param
-    return jax.tree_map(update_fn, target_params, params)
+        q1_curr     = q1_module.apply({"params": q1_params}, states)
+        q2_curr     = q2_module.apply({"params": q2_params}, states)
+        q_min       = jnp.minimum(q1_curr, q2_curr)
 
+        policy_loss = jnp.sum(probs * (alpha * logp - q_min), axis=1)
+        entropy     = -jnp.sum(probs * logp, axis=1)
+
+        return jnp.mean(policy_loss), jnp.mean(entropy)
+
+    (pi_loss, ent), g_pi = jax.value_and_grad(pi_loss_fn, has_aux=True)(pi_params)
+    u_pi, pi_opt_st      = optimizer.update(g_pi, pi_opt_st, pi_params)
+    pi_params            = optax.apply_updates(pi_params, u_pi)
+
+    alpha_loss = jnp.array(0.0, dtype=jnp.float32)
+    if ALPHA_AUTO:
+        def alpha_loss_fn(log_a):
+            return jnp.exp(log_a) * (jax.lax.stop_gradient(ent) - target_entropy)
+
+        alpha_loss, g_a   = jax.value_and_grad(alpha_loss_fn)(log_alpha)
+        u_a, alpha_opt_st = alpha_optim.update(g_a, alpha_opt_st, log_alpha)
+        log_alpha         = optax.apply_updates(log_alpha, u_a)
+
+        log_alpha = jnp.clip(log_alpha, -20.0, 2.0)
+
+    tq1_params = soft_update(tq1_params, q1_params, tau)
+    tq2_params = soft_update(tq2_params, q2_params, tau)
+
+    return (
+        q1_params, q1_opt_st   ,
+        q2_params, q2_opt_st   ,
+        pi_params, pi_opt_st   ,
+        tq1_params, tq2_params ,
+        log_alpha, alpha_opt_st,
+        q1_loss, q2_loss, pi_loss, ent, per_err, alpha_loss
+    )
+
+
+
+if live_plot:
+    plt.ion()
+    fig, ax1 = plt.subplots(1, 1, figsize=(10, 4))
+
+    ax1.set_title("SAC Discrete: Entropy vs Target (and Alpha)")
+    ax1.set_xlabel("Episode")
+    ax1.set_ylabel("Entropy")
+    ax1.grid(True, alpha=0.3)
+
+    ax2 = ax1.twinx()
+    ax2.set_ylabel("Alpha")
+
+    ent_line, = ax1.plot([], [], linewidth=2)
+    tgt_line, = ax1.plot([], [], linestyle="--", linewidth=1)
+
+    alp_line, = ax2.plot([], [], linewidth=1)
+
+    fig.tight_layout()
+    plt.show(block=False)
+
+plot_eps   = []
+plot_ent   = []
+plot_alpha = []
+
+
+replay      = PrioritizedReplayMemory(memory_length)
 
 global_step = 0
-per_beta    = per_beta_start
+episode     = 0
+
+ep_ret      = 0.0
+ep_ents     = []
 
 try:
-    for episode in range(num_episodes):
-        state, info = env.reset()
-        state = np.array(state, dtype=np.float32)
-        done = False
-        total_reward = 0
+    obs, _ = env.reset()
+    obs    = np.array(obs, dtype=np.float32)
 
-        while not done:
-            global_step += 1
-            if np.random.rand() < 0.1:
-                action = env.action_space.sample()
-            else:
-                action_probs = policy_inference(policy_params, jnp.array([state]))
-                action = int(jnp.argmax(action_probs))
+    last_l_q1   = 0.0
+    last_l_q2   = 0.0
+    last_l_pi   = 0.0
+    last_ent    = 0.0
+    last_a_loss = 0.0
 
-            next_state, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
-            next_state = np.array(next_state, dtype=np.float32)
-            total_reward += reward
+    while global_step < total_timesteps:
+        global_step += 1
 
-            replay_memory.push(state, action, reward, next_state, float(done))
+        if global_step < start_steps:
+            action = env.action_space.sample()
+        else:
+            rng, a_rng = jax.random.split(rng)
+            action = int(sample_action(a_rng, pi_params, obs[None, :])[0])
 
-            # Linearly annealing beta from per_beta_start to 1.0
-            per_beta = min(1.0, per_beta_start + global_step * (1.0 - per_beta_start) / per_beta_frames)
+        next_obs, reward, terminated, truncated, _ = env.step(action)
 
-            if len(replay_memory) > batch_size:
-                idxs, states, actions, rewards, next_states, dones, is_weights = replay_memory.sample(batch_size, per_beta)
+        done_boundary = bool(terminated or truncated)
+        done_term     = bool(terminated)
 
-                states      = jnp.array(states     )
-                actions     = jnp.array(actions    )
-                rewards     = jnp.array(rewards    )
-                next_states = jnp.array(next_states)
-                dones       = jnp.array(dones      )
-                is_weights  = jnp.array(is_weights )
+        next_obs = np.array(next_obs, dtype=np.float32)
 
-                soft_q_params_1, soft_q_opt_state_1, soft_q_params_2, soft_q_opt_state_2, q1_loss, q2_loss, q1_td_error, q2_td_error = soft_q_update(
-                    soft_q_params_1,
-                    soft_q_opt_state_1,
-                    soft_q_params_2,
-                    target_soft_q_params_1,
-                    target_soft_q_params_2,
-                    policy_params,
-                    states, actions, rewards, next_states, dones, is_weights
+        replay.push(obs, action, float(reward), next_obs, float(done_term))
+
+        obs     = next_obs
+        ep_ret += float(reward)
+
+        if debug_render:
+            env.render()
+
+        if len(replay) >= batch_size and global_step % update_every_steps == 0:
+            beta = min(1.0, per_beta_start + global_step * (1.0 - per_beta_start) / per_beta_frames)
+
+            for _ in range(updates_per_step):
+                batch = replay.sample(batch_size, beta)
+                if batch is None:
+                    break
+
+                idxs, b_s, b_a, b_r, b_ns, b_d, b_w = batch
+
+                (
+                    q1_params, q1_opt_st   ,
+                    q2_params, q2_opt_st   ,
+                    pi_params, pi_opt_st   ,
+                    tq1_params, tq2_params ,
+                    log_alpha, alpha_opt_st,
+                    l_q1, l_q2, l_pi, ent, per_err, a_loss
+                ) = update_step(
+                    q1_params, q1_opt_st   ,
+                    q2_params, q2_opt_st   ,
+                    pi_params, pi_opt_st   ,
+                    tq1_params, tq2_params ,
+                    log_alpha, alpha_opt_st,
+                    b_s, b_a, b_r, b_ns, b_d, b_w
                 )
 
-                policy_params, policy_opt_state, policy_loss = policy_update(
-                    policy_params,
-                    policy_opt_state,
-                    soft_q_params_1,
-                    soft_q_params_2,
-                    states
-                )
+                last_l_q1   = float(l_q1)
+                last_l_q2   = float(l_q2)
+                last_l_pi   = float(l_pi)
+                last_ent    = float(ent)
+                last_a_loss = float(a_loss)
 
-                # Update priorities in PER tree
-                for idx, error in zip(idxs, np.mean((np.abs(q1_td_error), np.abs(q2_td_error)), axis=0)):
-                    replay_memory.update(idx, error)
+                ep_ents.append(last_ent)
 
-                # Soft update target networks
-                target_soft_q_params_1 = soft_update(target_soft_q_params_1, soft_q_params_1, tau)
-                target_soft_q_params_2 = soft_update(target_soft_q_params_2, soft_q_params_2, tau)
+                per_err_np = np.array(per_err) + 1e-6
+                for i in range(batch_size):
+                    replay.update(idxs[i], per_err_np[i])
 
-            state = next_state
+        if done_boundary:
+            curr_alpha = float(jnp.exp(log_alpha)) if ALPHA_AUTO else init_alpha
+            mean_ent   = float(np.mean(ep_ents)) if len(ep_ents) > 0 else 0.0
 
-        print(f"Episode: {episode}, Total Reward: {total_reward}")
+            print(f"Ep {episode:4d} | Step {global_step:7d} | Ret {ep_ret:8.1f} | "
+                  f"Q1 {last_l_q1:7.3f} | Pi {last_l_pi:7.3f} | "
+                  f"Ent {mean_ent:7.3f} | Alpha {curr_alpha:8.4f}")
+
+            if live_plot and (episode % plot_every_episodes == 0):
+                plot_eps  .append(episode)
+                plot_ent  .append(mean_ent)
+                plot_alpha.append(curr_alpha)
+
+                ent_line.set_data(plot_eps, plot_ent)
+                tgt_line.set_data(plot_eps, [target_entropy] * len(plot_eps))
+                alp_line.set_data(plot_eps, plot_alpha)
+
+                ax1.relim()
+                ax1.autoscale_view()
+
+                ax2.relim()
+                ax2.autoscale_view()
+
+                fig.canvas.draw_idle()
+                fig.canvas.flush_events()
+
+            ep_ret  = 0.0
+            ep_ents = []
+            episode += 1
+
+            obs, _ = env.reset()
+            obs    = np.array(obs, dtype=np.float32)
 
 finally:
     env.close()
+    if live_plot:
+        plt.close()
