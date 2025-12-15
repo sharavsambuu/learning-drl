@@ -3,13 +3,13 @@
 #
 #    - Sparse reward wrapper on CartPole (reward only at episode end if steps >= threshold)
 #    - Group rollouts (K trajectories) per update from a frozen OLD policy (actor_old_params)
-#    - GRPO group centering (DeepSeek-style):         center by mean(R_i)  (NO std division)
+#    - GRPO group centering (DeepSeek-style):        center by mean(R_i)  (NO std division)
 #    - PPO-style policy update:                      ratio + clipping using OLD behavior log-probs
 #    - Reference regularization:                     beta * KL( pi_new || pi_ref )
 #    - Critic baseline (A2C-style):                  adv_t = (G_t - mean(R_group)) - V(s_t)
 #    - Critic learns uncentered returns:             MSE(G_t, V(s_t))
 #    - Epsilon-greedy exploration:                   behavior policy is a MIXTURE (eps*Uniform + (1-eps)*pi_old)
-#                                                   so we store logp_behavior for correct PPO ratios
+#                                                    so we store logp_behavior for correct PPO ratios
 #
 #
 
@@ -147,7 +147,7 @@ critic_optimizer_def   = optax.chain(
     optax.adam(learning_rate)
 )
 
-actor_optimizer_state  = actor_optimizer_def .init(actor_model_params)
+actor_optimizer_state  = actor_optimizer_def .init(actor_model_params )
 critic_optimizer_state = critic_optimizer_def.init(critic_model_params)
 
 
@@ -248,7 +248,7 @@ def rollout_trajectory(group_member_id, actor_old_params, critic_model_params, s
     state          = np.array(state, dtype=np.float32)
 
     states         = np.zeros(shape=(max_steps,) + state_shape, dtype=np.float32)
-    actions        = np.zeros(shape=(max_steps,), dtype=np.int32)
+    actions        = np.zeros(shape=(max_steps,), dtype=np.int32  )
     rewards        = np.zeros(shape=(max_steps,), dtype=np.float32)
     done_terms     = np.zeros(shape=(max_steps,), dtype=np.float32)
     old_logps      = np.zeros(shape=(max_steps,), dtype=np.float32)
@@ -286,10 +286,10 @@ def rollout_trajectory(group_member_id, actor_old_params, critic_model_params, s
         next_state = np.array(next_state, dtype=np.float32)
 
         states    [step, :] = state
-        actions   [step   ] = int  (action)
-        rewards   [step   ] = float(reward)
+        actions   [step   ] = int  (action   )
+        rewards   [step   ] = float(reward   )
         done_terms[step   ] = float(done_term)
-        old_logps [step   ] = float(old_logp)
+        old_logps [step   ] = float(old_logp )
 
         step += 1
 
@@ -297,7 +297,7 @@ def rollout_trajectory(group_member_id, actor_old_params, critic_model_params, s
         state = next_state
 
         last_state      = state
-        last_truncated  = bool(truncated)
+        last_truncated  = bool(truncated )
         last_terminated = bool(terminated)
 
         if done_boundary:
@@ -331,8 +331,8 @@ def rollout_group(actor_old_params, critic_model_params, seed, epsilon):
 
     for group_member_id in range(group_size):
         member_id, group_reward, trajectory_length, states, actions, returns, old_logps = rollout_trajectory(
-            group_member_id     = group_member_id,
-            actor_old_params    = actor_old_params,
+            group_member_id     = group_member_id    ,
+            actor_old_params    = actor_old_params   ,
             critic_model_params = critic_model_params,
             seed                = seed,
             epsilon             = epsilon
@@ -364,17 +364,17 @@ try:
         actor_old_params = actor_model_params
 
         group_mean_reward, group_lengths, group_states, group_actions, group_returns, group_old_logps = rollout_group(
-            actor_old_params      = actor_old_params,
+            actor_old_params      = actor_old_params   ,
             critic_model_params   = critic_model_params,
-            seed                  = episode,
+            seed                  = episode            ,
             epsilon               = epsilon
         )
 
         # Flatten variable-length trajectories into one batch (no padding leakage)
-        flat_states   = np.concatenate(group_states   , axis=0) if len(group_states)    > 0 else np.zeros((0,) + state_shape, dtype=np.float32)
-        flat_actions  = np.concatenate(group_actions  , axis=0) if len(group_actions)  > 0 else np.zeros((0,), dtype=np.int32)
-        flat_returns  = np.concatenate(group_returns  , axis=0) if len(group_returns)  > 0 else np.zeros((0,), dtype=np.float32)
-        flat_old_logp = np.concatenate(group_old_logps, axis=0) if len(group_old_logps)> 0 else np.zeros((0,), dtype=np.float32)
+        flat_states   = np.concatenate(group_states   , axis=0) if len(group_states   ) > 0 else np.zeros((0,) + state_shape, dtype=np.float32)
+        flat_actions  = np.concatenate(group_actions  , axis=0) if len(group_actions  ) > 0 else np.zeros((0,), dtype=np.int32  )
+        flat_returns  = np.concatenate(group_returns  , axis=0) if len(group_returns  ) > 0 else np.zeros((0,), dtype=np.float32)
+        flat_old_logp = np.concatenate(group_old_logps, axis=0) if len(group_old_logps) > 0 else np.zeros((0,), dtype=np.float32)
 
         actor_loss  = 0.0
         pg_loss     = 0.0
@@ -386,17 +386,17 @@ try:
             batch_size  = int(flat_states.shape[0])
             global_step += batch_size
 
-            states_j    = jnp.asarray(flat_states  , dtype=jnp.float32)
-            actions_j   = jnp.asarray(flat_actions , dtype=jnp.int32  )
-            returns_j   = jnp.asarray(flat_returns , dtype=jnp.float32)
-            old_logp_j  = jnp.asarray(flat_old_logp, dtype=jnp.float32)
+            states_j    = jnp.asarray(flat_states      , dtype=jnp.float32)
+            actions_j   = jnp.asarray(flat_actions     , dtype=jnp.int32  )
+            returns_j   = jnp.asarray(flat_returns     , dtype=jnp.float32)
+            old_logp_j  = jnp.asarray(flat_old_logp    , dtype=jnp.float32)
             mean_r_j    = jnp.asarray(group_mean_reward, dtype=jnp.float32)
 
             critic_optimizer_state, critic_model_params, critic_loss = backpropagate_critic(
                 critic_optimizer_state,
-                critic_model_params,
+                critic_model_params   ,
                 (
-                    states_j,
+                    states_j ,
                     returns_j,
                 )
             )
@@ -411,9 +411,9 @@ try:
 
                     actor_optimizer_state, actor_model_params, actor_loss, pg_loss, kl_loss, entropy = backpropagate_actor(
                         actor_optimizer_state,
-                        actor_model_params,
-                        actor_ref_params,
-                        critic_model_params,
+                        actor_model_params   ,
+                        actor_ref_params     ,
+                        critic_model_params  ,
                         (
                             states_j   [mb_idx],
                             actions_j  [mb_idx],
@@ -450,7 +450,7 @@ try:
 
                 rewards.append(float(reward))
                 steps += 1
-                state = next_state
+                state  = next_state
 
                 env.render()
 
