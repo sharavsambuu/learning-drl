@@ -35,13 +35,13 @@ end_of_text_token     = "<|endoftext|>"
 seed                  = 42
 
 # Phase 1: SFT
-sft_updates           = 800
+sft_updates           = 1800
 sft_batch_size        = 64
 sft_seq_len           = 128
 sft_learning_rate     = 0.002
 
 # Phase 2: GRPO + PPO-clip (criticless)
-grpo_updates          = 400
+grpo_updates          = 200
 prompts_per_update    = 16
 group_size            = 8
 
@@ -123,8 +123,8 @@ corpus       = "\n\n".join(stories)
 corpus_ids   = np.array(encode_text(corpus), dtype=np.int32)
 
 
-embed_dim    = 64
-hidden_dim   = 256
+embed_dim    = 32
+hidden_dim   = 128
 
 
 class TinyLSTM(nn.Module):
