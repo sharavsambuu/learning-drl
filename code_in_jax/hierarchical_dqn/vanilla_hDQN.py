@@ -1,3 +1,12 @@
+#
+# hDQN (Goal-Conditioned Controller + Meta-Controller) + PER + Target Networks
+#
+#   Meta-controller picks a GOAL id every meta_controller_interval steps (or earlier if goal reached).
+#   Controller picks primitive action conditioned on (state, goal_id) using intrinsic reward.
+#   Meta learns on k-step accumulated extrinsic reward with gamma**k bootstrap.
+#
+
+
 import os
 import random
 import math
@@ -10,25 +19,36 @@ from jax import numpy as jnp
 import numpy as np
 import optax
 
+
 debug_render             = True
+debug                    = False
 num_episodes             = 500
-batch_size               = 128         # Increased batch size
-learning_rate            = 0.0025      # Increased learning rate
-sync_steps               = 250         # Increased sync steps
+
+batch_size               = 128
+learning_rate            = 0.001
+sync_steps               = 250
 memory_length            = 4000
+
 meta_controller_interval = 10
+
 epsilon                  = 1.0
-epsilon_decay            = 0.0005      # Decreased epsilon decay
+epsilon_decay            = 0.0005
 epsilon_max              = 1.0
 epsilon_min              = 0.01
+
 gamma                    = 0.99
+
+goal_positions           = jnp.asarray([-0.5, 0.0, 0.5], dtype=jnp.float32)
+goal_threshold           = 0.08
+
 
 class SumTree:
     write = 0
     def __init__(self, capacity):
-        self.capacity = capacity
-        self.tree     = np.zeros(2*capacity - 1)
-        self.data     = np.zeros(capacity, dtype=object)
+        self.capacity  = capacity
+        self.tree      = np.zeros(2*capacity - 1, dtype=np.float32)
+        self.data      = np.zeros(capacity, dtype=object)
+        self.n_entries = 0
     def _propagate(self, idx, change):
         parent             = (idx - 1) // 2
         self.tree[parent] += change
@@ -44,7 +64,7 @@ class SumTree:
         else:
             return self._retrieve(right, s-self.tree[left])
     def total(self):
-        return self.tree[0]
+        return float(self.tree[0])
     def add(self, p, data):
         idx                   = self.write + self.capacity - 1
         self.data[self.write] = data
@@ -52,6 +72,8 @@ class SumTree:
         self.write           += 1
         if self.write >= self.capacity:
             self.write = 0
+        if self.n_entries < self.capacity:
+            self.n_entries += 1
     def update(self, idx, p):
         change         = p - self.tree[idx]
         self.tree[idx] = p
@@ -63,20 +85,23 @@ class SumTree:
 
 class PERMemory:
     e = 0.01
-    a = 0.7             # Increased PER alpha
+    a = 0.7
     def __init__(self, capacity):
         self.tree = SumTree(capacity)
     def _get_priority(self, error):
-        return (error+self.e)**self.a
+        return float((error + self.e) ** self.a)
     def add(self, error, sample):
         p = self._get_priority(error)
         self.tree.add(p, sample)
     def sample(self, n):
         batch   = []
-        segment = self.tree.total()/n
+        total_p = self.tree.total()
+        if total_p <= 0:
+            return batch
+        segment = total_p / n
         for i in range(n):
-            a = segment*i
-            b = segment*(i+1)
+            a = segment * i
+            b = segment * (i+1)
             s = random.uniform(a, b)
             (idx, p, data) = self.tree.get(s)
             batch.append((idx, data))
@@ -84,160 +109,220 @@ class PERMemory:
     def update(self, idx, error):
         p = self._get_priority(error)
         self.tree.update(idx, p)
+    def size(self):
+        return self.tree.n_entries
+
 
 class MetaControllerNetwork(nn.Module):
-    n_meta_actions: int
-
+    n_goals: int
     @nn.compact
     def __call__(self, x):
         x = nn.Dense(features=64)(x)
         x = nn.relu(x)
         x = nn.Dense(features=32)(x)
         x = nn.relu(x)
-        x = nn.Dense(features=self.n_meta_actions)(x)
+        x = nn.Dense(features=self.n_goals)(x)
         return x
 
 class ControllerNetwork(nn.Module):
     n_actions: int
-    n_meta_actions: int
-
+    n_goals  : int
     @nn.compact
-    def __call__(self, x, meta_action):
-        # x = jnp.expand_dims(x, axis=0) # Remove this
-        meta_action_one_hot = jax.nn.one_hot(meta_action, self.n_meta_actions)
-        # meta_action_one_hot = jnp.expand_dims(meta_action_one_hot, axis=0)
-        combined_input = jnp.concatenate([x, meta_action_one_hot], axis=-1)
-        x = nn.Dense(features=64)(combined_input)
+    def __call__(self, x, goal_id):
+        goal_one_hot = jax.nn.one_hot(goal_id, self.n_goals)
+        combined     = jnp.concatenate([x, goal_one_hot], axis=-1)
+        x = nn.Dense(features=64)(combined)
         x = nn.relu(x)
         x = nn.Dense(features=32)(x)
         x = nn.relu(x)
         x = nn.Dense(features=self.n_actions)(x)
-        return x # Remove squeeze as well
+        return x
 
-env = gym.make('CartPole-v1', render_mode="human")
+
+env         = gym.make('CartPole-v1', render_mode='human' if debug_render else None)
 state, info = env.reset()
-n_actions        = env.action_space.n
-n_meta_actions   = n_actions
+state       = np.array(state, dtype=np.float32)
 
-meta_controller_module = MetaControllerNetwork(n_meta_actions=n_meta_actions)
-meta_controller_params = meta_controller_module.init(jax.random.PRNGKey(0), jnp.asarray(state))['params']
-target_meta_controller_params = meta_controller_params
+n_actions   = env.action_space.n
+n_goals     = int(goal_positions.shape[0])
 
-controller_module = ControllerNetwork(n_actions=n_actions, n_meta_actions=n_meta_actions)
-controller_params = controller_module.init(jax.random.PRNGKey(0), jnp.asarray(state), jnp.asarray(0, dtype=jnp.int32))['params']
-target_controller_params = controller_params
+meta_module = MetaControllerNetwork(n_goals=n_goals)
+ctrl_module = ControllerNetwork(n_actions=n_actions, n_goals=n_goals)
 
-meta_controller_optimizer = optax.adam(learning_rate)
-meta_controller_opt_state = meta_controller_optimizer.init(meta_controller_params)
+key = jax.random.PRNGKey(0)
+key, k1, k2 = jax.random.split(key, 3)
 
-controller_optimizer = optax.adam(learning_rate)
-controller_opt_state = controller_optimizer.init(controller_params)
+meta_params = meta_module.init(k1, jnp.asarray(state, dtype=jnp.float32))['params']
+tgt_meta_params = meta_params
 
-per_memory = PERMemory(memory_length)
+ctrl_params = ctrl_module.init(
+    k2,
+    jnp.asarray(state, dtype=jnp.float32),
+    jnp.asarray(0, dtype=jnp.int32)
+)['params']
+tgt_ctrl_params = ctrl_params
+
+meta_optimizer = optax.adam(learning_rate)
+ctrl_optimizer = optax.adam(learning_rate)
+
+meta_opt_state = meta_optimizer.init(meta_params)
+ctrl_opt_state = ctrl_optimizer.init(ctrl_params)
+
+meta_memory = PERMemory(memory_length)
+ctrl_memory = PERMemory(memory_length)
+
 
 @jax.jit
-def meta_controller_policy(params, x):
-    predicted_q_values = meta_controller_module.apply({'params': params}, x)
-    max_q_action       = jnp.argmax(predicted_q_values)
-    return max_q_action, predicted_q_values
+def meta_policy(params, x):
+    q = meta_module.apply({'params': params}, x)
+    a = jnp.argmax(q)
+    return a, q
 
 @jax.jit
-def controller_policy(params, x, meta_action):
-    predicted_q_values = controller_module.apply({'params': params}, x, meta_action)
-    max_q_action       = jnp.argmax(predicted_q_values)
-    return max_q_action, predicted_q_values
+def ctrl_policy(params, x, goal_id):
+    q = ctrl_module.apply({'params': params}, x, goal_id)
+    a = jnp.argmax(q)
+    return a, q
 
-def calculate_td_error(q_value_vec, target_q_value_vec, action, reward, n_actions):
-    one_hot_actions = jax.nn.one_hot(action, n_actions)
-    q_value         = jnp.sum(one_hot_actions*q_value_vec, axis=-1)
-    td_target       = reward + gamma*jnp.max(target_q_value_vec, axis=-1)
+
+def td_error_dqn(q_value_vec, target_q_value_vec, action, reward, done):
+    one_hot_actions = jax.nn.one_hot(action, q_value_vec.shape[-1])
+    q_value         = jnp.sum(one_hot_actions * q_value_vec, axis=-1)
+    td_target       = reward + gamma * jnp.max(target_q_value_vec, axis=-1) * (1.0 - done)
     td_error        = td_target - q_value
     return jnp.abs(td_error)
 
-def td_error_meta_controller(meta_controller_params, target_meta_controller_params, batch):
-    states, meta_actions, rewards, next_states, dones = batch
-    predicted_q_values = meta_controller_module.apply({'params': meta_controller_params}, states)
-    target_q_values    = meta_controller_module.apply({'params': target_meta_controller_params}, next_states)
-    return calculate_td_error(predicted_q_values, target_q_values, meta_actions, rewards, n_meta_actions)
+td_error_dqn_vmap = jax.vmap(td_error_dqn, in_axes=(0, 0, 0, 0, 0), out_axes=0)
 
-def td_error_controller(controller_params, target_controller_params, batch, meta_action):
-    states, actions, rewards, next_states, dones = batch
-    predicted_q_values = controller_module.apply({'params': controller_params}, states, meta_action)
-    target_q_values    = controller_module.apply({'params': target_controller_params}, next_states, meta_action)
-    return calculate_td_error(predicted_q_values, target_q_values, actions, rewards, n_actions)
-
-def q_learning_loss(q_value_vec, target_q_value_vec, action, reward, done):
+def loss_dqn(q_value_vec, target_q_value_vec, action, reward, done):
     one_hot_actions = jax.nn.one_hot(action, q_value_vec.shape[-1])
-    q_value = jnp.sum(q_value_vec * one_hot_actions, axis=-1)
-    td_target = reward + gamma * jnp.max(target_q_value_vec, axis=-1) * (1.0 - done)
-    td_error = jax.lax.stop_gradient(td_target) - q_value
+    q_value         = jnp.sum(one_hot_actions * q_value_vec, axis=-1)
+    td_target       = reward + gamma * jnp.max(target_q_value_vec, axis=-1) * (1.0 - done)
+    td_error        = jax.lax.stop_gradient(td_target) - q_value
     return jnp.square(td_error)
 
-@jax.jit
-def train_step_meta_controller(meta_controller_params, target_meta_controller_params, meta_controller_opt_state, batch):
-    def loss_fn(params):
-        predicted_q_values = meta_controller_module.apply({'params': params}, batch[0])
-        target_q_values    = meta_controller_module.apply({'params': target_meta_controller_params}, batch[3])
-        return jnp.mean(
-            q_learning_loss(
-                predicted_q_values,
-                target_q_values,
-                batch[1],
-                batch[2],
-                batch[4]
-            )
-        )
-    loss, gradients = jax.value_and_grad(loss_fn)(meta_controller_params)
-    updates, meta_controller_opt_state = meta_controller_optimizer.update(gradients, meta_controller_opt_state, meta_controller_params)
-    meta_controller_params = optax.apply_updates(meta_controller_params, updates)
-    return meta_controller_params, meta_controller_opt_state, loss, td_error_meta_controller(meta_controller_params, target_meta_controller_params, batch)
+loss_dqn_vmap = jax.vmap(loss_dqn, in_axes=(0, 0, 0, 0, 0), out_axes=0)
+
 
 @jax.jit
-def train_step_controller(controller_params, target_controller_params, controller_opt_state, batch, meta_action):
-    # meta_actions = jnp.repeat(jnp.array([meta_action]), batch_size) # Removed this line
+def train_step_meta(meta_params, tgt_meta_params, meta_opt_state, batch):
     def loss_fn(params):
-        predicted_q_values = controller_module.apply({'params': params}, batch[0], batch[1]) # Use batched meta_actions
-        target_q_values    = controller_module.apply({'params': target_controller_params}, batch[3], batch[1]) # Use batched meta_actions
-        return jnp.mean(
-            q_learning_loss(
-                predicted_q_values,
-                target_q_values,
-                batch[1],
-                batch[2],
-                batch[4]
-            )
-        )
-    loss, gradients = jax.value_and_grad(loss_fn)(controller_params)
-    updates, controller_opt_state = controller_optimizer.update(gradients, controller_opt_state, controller_params)
-    controller_params = optax.apply_updates(controller_params, updates)
-    return controller_params, controller_opt_state, loss, td_error_controller(controller_params, target_controller_params, batch, batch[1]) # Use batched meta_actions
+        q      = meta_module.apply({'params': params}, batch[0])
+        q_next = meta_module.apply({'params': tgt_meta_params}, batch[3])
+
+        a      = batch[1]
+        r_sum  = batch[2]
+        done   = batch[4]
+        k_step = batch[5]
+
+        one_hot_a = jax.nn.one_hot(a, n_goals)
+        q_sa      = jnp.sum(q * one_hot_a, axis=-1)
+
+        discount  = jnp.power(gamma, k_step)
+        target    = r_sum + (1.0 - done) * discount * jnp.max(q_next, axis=-1)
+
+        td_error  = jax.lax.stop_gradient(target) - q_sa
+        return jnp.mean(jnp.square(td_error))
+
+    loss, grads = jax.value_and_grad(loss_fn)(meta_params)
+    updates, meta_opt_state = meta_optimizer.update(grads, meta_opt_state, meta_params)
+    meta_params = optax.apply_updates(meta_params, updates)
+
+    q      = meta_module.apply({'params': meta_params}, batch[0])
+    q_next = meta_module.apply({'params': tgt_meta_params}, batch[3])
+    one_hot_a = jax.nn.one_hot(batch[1], n_goals)
+    q_sa      = jnp.sum(q * one_hot_a, axis=-1)
+    discount  = jnp.power(gamma, batch[5])
+    target    = batch[2] + (1.0 - batch[4]) * discount * jnp.max(q_next, axis=-1)
+    td_err    = jnp.abs(target - q_sa)
+
+    return meta_params, meta_opt_state, loss, td_err
+
+
+@jax.jit
+def train_step_ctrl(ctrl_params, tgt_ctrl_params, ctrl_opt_state, batch):
+    def loss_fn(params):
+        q = ctrl_module.apply({'params': params}, batch[0], batch[1])
+        q_next = ctrl_module.apply({'params': tgt_ctrl_params}, batch[3], batch[1])
+        losses = loss_dqn_vmap(q, q_next, batch[2], batch[4], batch[5])
+        return jnp.mean(losses)
+
+    loss, grads = jax.value_and_grad(loss_fn)(ctrl_params)
+    updates, ctrl_opt_state = ctrl_optimizer.update(grads, ctrl_opt_state, ctrl_params)
+    ctrl_params = optax.apply_updates(ctrl_params, updates)
+
+    q = ctrl_module.apply({'params': ctrl_params}, batch[0], batch[1])
+    q_next = ctrl_module.apply({'params': tgt_ctrl_params}, batch[3], batch[1])
+    td_err = td_error_dqn_vmap(q, q_next, batch[2], batch[4], batch[5])
+
+    return ctrl_params, ctrl_opt_state, loss, td_err
+
+
+def goal_reached(state_np, goal_id):
+    x = float(state_np[0])
+    gx = float(goal_positions[int(goal_id)])
+    return abs(x - gx) <= float(goal_threshold)
+
+def intrinsic_reward(state_np, goal_id):
+    return 1.0 if goal_reached(state_np, goal_id) else 0.0
+
 
 global_steps = 0
-meta_action = None
 try:
     for episode in range(num_episodes):
         episode_rewards = []
         state, info = env.reset()
         state = np.array(state, dtype=np.float32)
-        meta_controller_steps = 0
+
+        meta_goal_start_state = state.copy()
+        meta_goal_id          = 0
+        meta_steps_in_goal    = 0
+        meta_extrinsic_sum    = 0.0
+
         while True:
             global_steps += 1
-            meta_controller_steps += 1
 
-            if meta_controller_steps % meta_controller_interval == 1:
+            need_new_goal = False
+            if meta_steps_in_goal == 0:
+                need_new_goal = True
+            if meta_steps_in_goal >= meta_controller_interval:
+                need_new_goal = True
+            if goal_reached(state, meta_goal_id):
+                need_new_goal = True
+
+            if need_new_goal:
+                if meta_steps_in_goal > 0:
+                    meta_memory.add(
+                        1e3,
+                        (
+                            meta_goal_start_state,
+                            int(meta_goal_id),
+                            float(meta_extrinsic_sum),
+                            state.copy(),
+                            0.0,
+                            float(meta_steps_in_goal),
+                        )
+                    )
+
+                meta_goal_start_state = state.copy()
+                meta_steps_in_goal    = 0
+                meta_extrinsic_sum    = 0.0
+
                 if np.random.rand() <= epsilon:
-                    meta_action = env.action_space.sample()
+                    meta_goal_id = np.random.randint(0, n_goals)
                 else:
-                    meta_action, _ = meta_controller_policy(meta_controller_params, jnp.asarray(state))
-                    meta_action = int(meta_action)
-
-                meta_controller_steps = 1
+                    g, _ = meta_policy(meta_params, jnp.asarray(state, dtype=jnp.float32))
+                    meta_goal_id = int(g)
 
             if np.random.rand() <= epsilon:
                 action = env.action_space.sample()
             else:
-                action, q_values = controller_policy(controller_params, jnp.asarray(state), jnp.asarray(meta_action, dtype=jnp.int32))
-                action = int(action)
+                a, _ = ctrl_policy(
+                    ctrl_params,
+                    jnp.asarray(state, dtype=jnp.float32),
+                    jnp.asarray(meta_goal_id, dtype=jnp.int32)
+                )
+                action = int(a)
 
             if epsilon > epsilon_min:
                 epsilon = epsilon_min + (epsilon_max - epsilon_min) * math.exp(-epsilon_decay * global_steps)
@@ -246,45 +331,103 @@ try:
             done = terminated or truncated
             new_state = np.array(new_state, dtype=np.float32)
 
-            temporal_difference = per_memory.tree.total()
-            per_memory.add(temporal_difference, (state, meta_action, reward, new_state, float(done), action))
+            ir = intrinsic_reward(new_state, meta_goal_id)
 
-            if len(per_memory.tree.data) > batch_size:
-                batch = per_memory.sample(batch_size)
-                states, meta_actions_batch, rewards, next_states, dones, actions = [], [], [], [], [], []
-                for i in range(batch_size):
-                    states.append(batch[i][1][0])
-                    meta_actions_batch.append(batch[i][1][1])
-                    rewards.append(batch[i][1][2])
-                    next_states.append(batch[i][1][3])
-                    dones.append(batch[i][1][4])
-                    actions.append(batch[i][1][5])
-                meta_controller_params, meta_controller_opt_state, meta_controller_loss, _ = train_step_meta_controller(
-                    meta_controller_params, target_meta_controller_params, meta_controller_opt_state,
-                    (jnp.asarray(states), jnp.asarray(meta_actions_batch, dtype=jnp.int32), jnp.asarray(rewards, dtype=jnp.float32), jnp.asarray(next_states), jnp.asarray(dones, dtype=jnp.float32))
+            ctrl_memory.add(
+                1e3,
+                (
+                    state.copy(),
+                    int(meta_goal_id),
+                    int(action),
+                    float(ir),
+                    new_state.copy(),
+                    float(done or goal_reached(new_state, meta_goal_id)),
                 )
-                controller_params, controller_opt_state, controller_loss, new_td_errors = train_step_controller(
-                    controller_params, target_controller_params, controller_opt_state,
-                    (jnp.asarray(states), jnp.asarray(meta_actions_batch, dtype=jnp.int32), jnp.asarray(rewards, dtype=jnp.float32), jnp.asarray(next_states), jnp.asarray(dones, dtype=jnp.float32)), # Use meta_actions_batch here as well
-                    jnp.asarray(meta_actions_batch, dtype=jnp.int32)
-                )
+            )
 
-                new_td_errors = np.array(new_td_errors)
-                for i in range(batch_size):
-                    idx = batch[i][0]
-                    per_memory.update(idx, new_td_errors[i])
+            meta_steps_in_goal += 1
+            meta_extrinsic_sum += float(reward)
 
-            episode_rewards.append(reward)
+            episode_rewards.append(float(reward))
             state = new_state
 
+            if ctrl_memory.size() >= batch_size:
+                batch = ctrl_memory.sample(batch_size)
+                idxs, data = zip(*batch)
+
+                states, goals, actions, i_rewards, next_states, g_dones = [], [], [], [], [], []
+                for d in data:
+                    states     .append(d[0])
+                    goals      .append(d[1])
+                    actions    .append(d[2])
+                    i_rewards  .append(d[3])
+                    next_states.append(d[4])
+                    g_dones    .append(d[5])
+
+                ctrl_params, ctrl_opt_state, ctrl_loss, ctrl_td = train_step_ctrl(
+                    ctrl_params, tgt_ctrl_params, ctrl_opt_state,
+                    (
+                        jnp.asarray(states     , dtype=jnp.float32),
+                        jnp.asarray(goals      , dtype=jnp.int32  ),
+                        jnp.asarray(actions    , dtype=jnp.int32  ),
+                        jnp.asarray(next_states, dtype=jnp.float32),
+                        jnp.asarray(i_rewards  , dtype=jnp.float32),
+                        jnp.asarray(g_dones    , dtype=jnp.float32),
+                    )
+                )
+
+                ctrl_td_np = np.array(ctrl_td)
+                for i in range(batch_size):
+                    ctrl_memory.update(idxs[i], float(ctrl_td_np[i]))
+
+            if meta_memory.size() >= batch_size:
+                batch = meta_memory.sample(batch_size)
+                idxs, data = zip(*batch)
+
+                s0, g, rsum, sk, dones, ksteps = [], [], [], [], [], []
+                for d in data:
+                    s0    .append(d[0])
+                    g     .append(d[1])
+                    rsum  .append(d[2])
+                    sk    .append(d[3])
+                    dones .append(d[4])
+                    ksteps.append(d[5])
+
+                meta_params, meta_opt_state, meta_loss, meta_td = train_step_meta(
+                    meta_params, tgt_meta_params, meta_opt_state,
+                    (
+                        jnp.asarray(s0    , dtype=jnp.float32),
+                        jnp.asarray(g     , dtype=jnp.int32  ),
+                        jnp.asarray(rsum  , dtype=jnp.float32),
+                        jnp.asarray(sk    , dtype=jnp.float32),
+                        jnp.asarray(dones , dtype=jnp.float32),
+                        jnp.asarray(ksteps, dtype=jnp.float32),
+                    )
+                )
+
+                meta_td_np = np.array(meta_td)
+                for i in range(batch_size):
+                    meta_memory.update(idxs[i], float(meta_td_np[i]))
+
             if global_steps % sync_steps == 0:
-                target_meta_controller_params = meta_controller_params
-                target_controller_params = controller_params
+                tgt_meta_params = meta_params
+                tgt_ctrl_params = ctrl_params
 
             if debug_render:
                 env.render()
 
             if done:
+                meta_memory.add(
+                    1e3,
+                    (
+                        meta_goal_start_state,
+                        int(meta_goal_id),
+                        float(meta_extrinsic_sum),
+                        state.copy(),
+                        1.0,
+                        float(meta_steps_in_goal),
+                    )
+                )
                 print(f"{episode} episode, reward: {sum(episode_rewards)}")
                 break
 finally:
