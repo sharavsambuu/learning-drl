@@ -1,192 +1,285 @@
-import gymnasium as gym
-import flax.linen as nn
-import jax
-from jax import numpy as jnp
-import numpy as np
-import optax
-import random
+#
+# PPO (Continuous)
+#
+#   - Squashed Gaussian Policy: a = tanh(u) * max_action
+#   - Stable Log-Prob: Recomputed from 'u' with Jacobian correction
+#   - Unified Path: Store raw 'u' in buffer, avoids unstable arctanh(a)
+#   - Correct Timeout Handling: Truncated != Terminated for bootstrapping
+#   - Optimized Rollout: Single inference per step, bootstrap post-loop
+#   - Stability: Global Gradient Clipping + Orthogonal Initialization
+#
+#
 
-num_episodes      = 1500
-learning_rate     = 0.0003  # Learning rate for PPO, often smaller than TRPO
-gamma             = 0.99
-clip_epsilon      = 0.2     # Clipping parameter for PPO's objective
-entropy_coeff     = 0.001   # Entropy coefficient, encourage exploration, reduced for continuous
-value_coeff       = 0.5     # Value loss coefficient
-batch_size        = 128
-epochs_per_update = 5       # Number of epochs to train on collected data
-gae_lambda        = 0.95    # Lambda for GAE, between 0 and 1
-mini_batch_size   = 64
+import time
+import jax
+import optax
+import gymnasium        as gym
+import flax.linen       as nn
+from   jax import numpy as jnp
+import numpy            as np
+
+
+# Hyperparameters
+total_timesteps     = 500000
+steps_per_batch     = 2048
+
+learning_rate       = 3e-4
+gamma               = 0.99
+gae_lambda          = 0.95
+
+clip_epsilon        = 0.2
+entropy_coeff       = 0.0003
+value_coeff         = 0.5
+max_grad_norm       = 0.5
+
+epochs_per_update   = 10
+mini_batch_size     = 64
+
+debug_render        = True
+render_update_every = 10
+render_sleep        = 0.0
+
+log_std_min         = -5.0
+log_std_max         =  2.0
+
 
 class ActorCriticNetwork(nn.Module):
     action_dim: int
+
     @nn.compact
     def __call__(self, x):
-        # Common layers for both actor and critic
-        x = nn.Dense(features=256)(x)
+        # Orthogonal Initialization (Standard for PPO stability)
+        init_ortho = nn.initializers.orthogonal(np.sqrt(2))
+        init_value = nn.initializers.orthogonal(1.0)
+        init_means = nn.initializers.orthogonal(0.01)
+
+        x = nn.Dense(features=64, kernel_init=init_ortho)(x)
         x = nn.tanh(x)
-        x = nn.Dense(features=256)(x)
+        x = nn.Dense(features=64, kernel_init=init_ortho)(x)
         x = nn.tanh(x)
 
-        # Actor head
-        actor_mean = nn.Dense(features=self.action_dim)(x)
-        actor_log_std = self.param('log_std', nn.initializers.constant(-0.5), (self.action_dim,))
+        mean    = nn.Dense(features=self.action_dim, kernel_init=init_means)(x)
+        log_std = self.param("log_std", nn.initializers.constant(-0.5), (self.action_dim,))
+        
+        # Clip log_std to prevent numerical instability
+        log_std = jnp.clip(log_std, log_std_min, log_std_max)
 
-        # Critic head
-        critic_output = nn.Dense(features=1)(x)
+        value   = nn.Dense(features=1, kernel_init=init_value)(x)
 
-        return actor_mean, actor_log_std, critic_output
+        return mean, log_std, value
 
 
-env         = gym.make('Pendulum-v1', render_mode='human')
-state, info = env.reset()
-state       = np.array(state, dtype=np.float32)
-
-if isinstance(env.action_space, gym.spaces.Box):
-    action_dim = env.action_space.shape[0]
-    print(f"Action space: Continuous, Dimension: {action_dim}")
-else:
-    raise ValueError("Only continuous action space (gym.spaces.Box) is supported for this PPO implementation.")
+env        = gym.make("Pendulum-v1", render_mode="human" if debug_render else None)
+state_dim  = env.observation_space.shape[0]
+action_dim = env.action_space.shape[0]
+max_action = float(env.action_space.high[0])
 
 actor_critic_module = ActorCriticNetwork(action_dim=action_dim)
-dummy_input         = jnp.zeros(state.shape)
-actor_critic_params = actor_critic_module.init(jax.random.PRNGKey(0), dummy_input)['params']
-optimizer           = optax.adam(learning_rate)
-opt_state           = optimizer.init(actor_critic_params)
+
+rng = jax.random.PRNGKey(42)
+rng, init_rng = jax.random.split(rng, 2)
+
+dummy_input         = jnp.zeros((1, state_dim), dtype=jnp.float32)
+actor_critic_params = actor_critic_module.init(init_rng, dummy_input)["params"]
+
+optimizer = optax.chain(
+    optax.clip_by_global_norm(max_grad_norm),
+    optax.adam(learning_rate, eps=1e-5)
+)
+opt_state = optimizer.init(actor_critic_params)
 
 
 @jax.jit
-def policy_inference(params, x):
-    mean, log_std, _ = actor_critic_module.apply({'params': params}, x)
-    return mean, log_std
+def ac_inference(params, x):
+    mean, log_std, value = actor_critic_module.apply({"params": params}, x)
+    log_std = jnp.broadcast_to(log_std, mean.shape)
+    return mean, log_std, value
 
 @jax.jit
-def get_values(params, x):
-    _, _, values = actor_critic_module.apply({'params': params}, x)
-    return values
+def gaussian_log_prob(u, mean, log_std):
+    var  = jnp.exp(2.0 * log_std)
+    logp = -0.5 * jnp.sum(((u - mean) ** 2) / (var + 1e-10) + jnp.log(2.0 * jnp.pi * var + 1e-10), axis=-1)
+    return logp
 
 @jax.jit
-def calculate_gae(rewards, values, next_values, dones):
-    advantages = []
-    advantage = 0
-    for i in reversed(range(len(rewards))):
-        delta = rewards[i] + gamma * next_values[i] * (1 - dones[i]) - values[i]
-        advantage = delta + gamma * gae_lambda * (1 - dones[i]) * advantage
-        advantages.insert(0, advantage)
-    return jnp.array(advantages)
+def squashed_log_prob(u, mean, log_std):
+    # log π(a) where a = tanh(u) * max_action
+    # Uses the stable identity: log(1 - tanh(u)^2) = 2 * (log(2) - u - softplus(-2u))
+    logp_u = gaussian_log_prob(u, mean, log_std)
+    corr   = 2.0 * (jnp.log(2.0) - u - jax.nn.softplus(-2.0 * u))
+    logdet = jnp.sum(corr, axis=-1)
+    return logp_u - logdet
 
 @jax.jit
-def ppo_update(params, opt_state, states, actions, old_log_probs, advantages, returns, rng):
-    def loss_fn(params, states, actions, old_log_probs, advantages, returns):
-        mean, log_std, values = actor_critic_module.apply({'params': params}, states)
-        values = values.squeeze()
+def sample_action(rng, params, obs, max_action):
+    mean, log_std, value = ac_inference(params, obs)
+    std = jnp.exp(log_std)
 
-        # Actor loss
-        std        = jnp.exp(log_std)
-        dist       = jax.random.normal(rng, mean.shape) * std + mean
-        log_probs  = -0.5 * ((dist - mean) / std) ** 2 - log_std - 0.5 * jnp.log(2 * jnp.pi)
-        log_probs  = jnp.sum(log_probs, axis=-1)
+    u = mean + std * jax.random.normal(rng, shape=mean.shape, dtype=mean.dtype)
+    a = jnp.tanh(u) * max_action
 
-        ratio      = jnp.exp(log_probs - old_log_probs)
-        pg_loss1   = -advantages * ratio
-        pg_loss2   = -advantages * jnp.clip(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon)
-        actor_loss = jnp.maximum(pg_loss1, pg_loss2).mean()
+    logp = squashed_log_prob(u, mean, log_std)
 
-        # Critic loss
-        critic_loss = jnp.square(returns - values).mean()
+    return u[0], a[0], logp[0], value[0, 0]
 
-        # Entropy loss
-        entropy = 0.5 * (1 + jnp.log(2 * jnp.pi * std ** 2)).sum(axis=-1).mean()
+@jax.jit
+def calculate_gae(rewards, values, last_val, dones):
+    # 'dones' here means "terminated" (died), so we mask value.
+    # If truncated, 'dones' is 0, so we bootstrap (delta = r + gamma*V_next - V)
+    next_values = jnp.concatenate([values[1:], last_val.reshape(1)])
+    deltas      = rewards + gamma * (1.0 - dones) * next_values - values
 
-        # Total loss
-        total_loss = actor_loss + value_coeff * critic_loss - entropy_coeff * entropy
+    def scan_fn(carry, x):
+        delta, done = x
+        carry = delta + gamma * gae_lambda * (1.0 - done) * carry
+        return carry, carry
 
-        return total_loss, (actor_loss, critic_loss, entropy)
+    _, adv = jax.lax.scan(
+        scan_fn,
+        jnp.array(0.0, dtype=deltas.dtype),
+        (deltas, dones),
+        reverse=True
+    )
+    returns = adv + values
+    return adv, returns
 
-    advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages) + 1e-6)
+@jax.jit
+def ppo_loss(params, states, raw_actions_u, old_log_probs, advantages, returns):
+    mean, log_std, values = ac_inference(params, states)
+    values = values.squeeze(-1)
 
-    for _ in range(epochs_per_update):
-        num_samples = len(states)
-        indices = jnp.arange(num_samples)
-        rng, shuffle_rng = jax.random.split(rng)
-        indices = jax.random.permutation(shuffle_rng, indices)
-        for start in range(0, num_samples, mini_batch_size):
-            end                      = start + mini_batch_size
-            batch_indices            = indices      [start:end    ]
-            mini_batch_states        = states       [batch_indices]
-            mini_batch_actions       = actions      [batch_indices]
-            mini_batch_old_log_probs = old_log_probs[batch_indices]
-            mini_batch_advantages    = advantages   [batch_indices]
-            mini_batch_returns       = returns      [batch_indices]
-            
-            rng, loss_rng = jax.random.split(rng)
+    new_log_probs = squashed_log_prob(raw_actions_u, mean, log_std)
+    ratio         = jnp.exp(new_log_probs - old_log_probs)
 
-            (total_loss, (actor_loss, critic_loss, entropy)), grads = jax.value_and_grad(loss_fn, has_aux=True)(
-                params, mini_batch_states, mini_batch_actions, mini_batch_old_log_probs, mini_batch_advantages, mini_batch_returns
-            )
-            updates, new_opt_state = optimizer.update(grads, opt_state, params)
-            params = optax.apply_updates(params, updates)
+    pg_loss1   = -advantages * ratio
+    pg_loss2   = -advantages * jnp.clip(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon)
+    actor_loss = jnp.maximum(pg_loss1, pg_loss2).mean()
 
-    return params, new_opt_state, total_loss, actor_loss, critic_loss, entropy
+    critic_loss = jnp.square(returns - values).mean()
+
+    entropy   = jnp.sum(log_std + 0.5 * jnp.log(2.0 * jnp.pi * jnp.e), axis=-1).mean()
+    approx_kl = jnp.mean(old_log_probs - new_log_probs)
+    clipfrac  = jnp.mean((jnp.abs(ratio - 1.0) > clip_epsilon).astype(jnp.float32))
+
+    total_loss = actor_loss + value_coeff * critic_loss - entropy_coeff * entropy
+    return total_loss, (actor_loss, critic_loss, entropy, approx_kl, clipfrac)
+
+@jax.jit
+def train_step(params, opt_state, states, raw_actions_u, old_log_probs, advantages, returns):
+    (loss, aux), grads = jax.value_and_grad(ppo_loss, has_aux=True)(
+        params, states, raw_actions_u, old_log_probs, advantages, returns
+    )
+    updates, opt_state = optimizer.update(grads, opt_state, params)
+    params = optax.apply_updates(params, updates)
+    return params, opt_state, loss, aux
 
 
-master_rng = jax.random.PRNGKey(0)
+updates = int(total_timesteps // steps_per_batch)
+global_steps = 0
+
 try:
-    for episode in range(num_episodes):
-        state, info  = env.reset()
-        state        = np.array(state, dtype=np.float32)
-        done         = False
-        total_reward = 0
-        states, actions, rewards, dones, log_probs, values = [], [], [], [], [], []
+    for update in range(updates):
+        states      = np.zeros((steps_per_batch, state_dim ), dtype=np.float32)
+        raw_actions = np.zeros((steps_per_batch, action_dim), dtype=np.float32)
+        actions     = np.zeros((steps_per_batch, action_dim), dtype=np.float32)
+        rewards     = np.zeros((steps_per_batch,           ), dtype=np.float32)
+        dones       = np.zeros((steps_per_batch,           ), dtype=np.float32)
+        values      = np.zeros((steps_per_batch,           ), dtype=np.float32)
+        log_probs   = np.zeros((steps_per_batch,           ), dtype=np.float32)
 
-        master_rng, loop_rng = jax.random.split(master_rng)
+        ep_returns = []
+        ep_return  = 0.0
 
-        while not done:
-            loop_rng, policy_rng, env_rng = jax.random.split(loop_rng, 3)
+        obs, info = env.reset()
+        obs       = np.array(obs, dtype=np.float32)
 
-            mean, log_std = policy_inference(actor_critic_params, jnp.array([state]))
-            value = get_values(actor_critic_params, jnp.array([state]))
+        do_render = debug_render and (update % render_update_every == 0)
 
-            std       = jnp.exp(log_std)
-            action    = jax.random.normal(policy_rng, mean.shape) * std + mean
-            action    = jnp.clip(action, env.action_space.low, env.action_space.high)
+        for t in range(steps_per_batch):
+            rng, a_rng = jax.random.split(rng)
 
-            log_prob  = -0.5 * ((action - mean) / std) ** 2 - log_std - 0.5 * jnp.log(2 * jnp.pi)
-            log_prob  = jnp.sum(log_prob, axis=-1)
+            u, act, logp, v = sample_action(
+                a_rng,
+                actor_critic_params,
+                jnp.array([obs], dtype=jnp.float32),
+                max_action
+            )
 
-            action_np = np.array(action[0])
+            act_np = np.array(act, dtype=np.float32)
+            nobs, rew, terminated, truncated, info = env.step(act_np)
 
-            next_state, reward, terminated, truncated, info = env.step(action_np)
-            done = terminated or truncated
-            next_state = np.array(next_state, dtype=np.float32)
-            total_reward += reward
+            # Mask only on death (terminated), not time limit (truncated)
+            done_term = bool(terminated)
 
-            states   .append(state)
-            actions  .append(action[0])
-            rewards  .append(reward)
-            dones    .append(done)
-            log_probs.append(log_prob[0])
-            values   .append(value[0][0])
+            states     [t] = obs
+            raw_actions[t] = np.array(u, dtype=np.float32)
+            actions    [t] = act_np
+            rewards    [t] = float(rew)
+            dones      [t] = 1.0 if done_term else 0.0
+            values     [t] = float(v)
+            log_probs  [t] = float(logp)
 
-            state = next_state
+            ep_return    += float(rew)
+            global_steps += 1
 
-        next_value = get_values(actor_critic_params, jnp.array([state]))[0][0]
-        advantages = calculate_gae(jnp.array(rewards), jnp.array(values), jnp.array([next_value]), jnp.array(dones))
-        returns = advantages + jnp.array(values)
+            nobs = np.array(nobs, dtype=np.float32)
 
-        master_rng, update_rng = jax.random.split(master_rng)
+            if do_render:
+                env.render()
+                if render_sleep > 0:
+                    time.sleep(render_sleep)
 
-        actor_critic_params, opt_state, total_loss, actor_loss, critic_loss, entropy = ppo_update(
-            actor_critic_params,
-            opt_state,
-            jnp.array(states),
-            jnp.array(actions),
-            jnp.array(log_probs),
-            advantages,
-            returns,
-            update_rng
-        )
+            # Reset on either condition
+            if terminated or truncated:
+                ep_returns.append(ep_return)
+                ep_return = 0.0
+                obs, info = env.reset()
+                obs       = np.array(obs, dtype=np.float32)
+            else:
+                obs = nobs
 
-        print(f"Episode: {episode}, Total Reward: {total_reward}, Total Loss: {total_loss:.4f}, Actor Loss: {actor_loss:.4f}, Critic Loss: {critic_loss:.4f}, Entropy: {entropy:.4f}")
+        # Bootstrapping (post-loop)
+        _, _, last_val_j = ac_inference(actor_critic_params, jnp.array([obs], dtype=jnp.float32))
+        last_val_j = last_val_j[0, 0]
+
+        states_j      = jnp.asarray(states     , dtype=jnp.float32)
+        raw_actions_j = jnp.asarray(raw_actions, dtype=jnp.float32)
+        rewards_j     = jnp.asarray(rewards    , dtype=jnp.float32)
+        dones_j       = jnp.asarray(dones      , dtype=jnp.float32)
+        values_j      = jnp.asarray(values     , dtype=jnp.float32)
+        old_logp_j    = jnp.asarray(log_probs  , dtype=jnp.float32)
+
+        advantages_j, returns_j = calculate_gae(rewards_j, values_j, last_val_j, dones_j)
+        
+        # Normalize advantages
+        advantages_j = (advantages_j - jnp.mean(advantages_j)) / (jnp.std(advantages_j) + 1e-8)
+        advantages_j = jnp.clip(advantages_j, -5.0, 5.0)
+
+        for ep in range(epochs_per_update):
+            rng, perm_rng = jax.random.split(rng)
+            indices       = jax.random.permutation(perm_rng, jnp.arange(steps_per_batch))
+
+            for start in range(0, steps_per_batch, mini_batch_size):
+                end   = start + mini_batch_size
+                mb_ix = indices[start:end]
+
+                actor_critic_params, opt_state, total_loss, aux = train_step(
+                    actor_critic_params,
+                    opt_state,
+                    states_j     [mb_ix],
+                    raw_actions_j[mb_ix],
+                    old_logp_j   [mb_ix],
+                    advantages_j [mb_ix],
+                    returns_j    [mb_ix],
+                )
+
+        actor_loss, critic_loss, entropy, approx_kl, clipfrac = aux
+
+        avg_ep = float(np.mean(ep_returns)) if len(ep_returns) > 0 else float(ep_return)
+
+        print(f"Update: {update:4d}, Steps: {global_steps:7d}, AvgEpRet: {avg_ep:8.1f}, "
+              f"Loss: {float(total_loss):.4f}, Act: {float(actor_loss):.4f}, Cri: {float(critic_loss):.4f}, "
+              f"Ent: {float(entropy):.4f}, KL: {float(approx_kl):.5f}, ClipFrac: {float(clipfrac):.3f}")
 
 finally:
     env.close()
