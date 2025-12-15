@@ -27,7 +27,7 @@ import flax.linen as nn
 from   jax        import numpy as jnp
 
 
-debug_render            = False
+debug_render            = True
 debug                   = True
 play_frequency          = 50
 num_episodes            = 20000
