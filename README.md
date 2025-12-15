@@ -5,15 +5,8 @@
 
 # Tasks
 
-    - Fix TRPO
-    - Fix PPO
-    - Apply GRPO to PPO
+  - Try to build minimum viable reasoner, using GRPO of DeepSeek R1 (Someday)
 
-
-# Other things I will learn in the near future
-
-    - Align some small LLMs to some preference texts using PPO
-    - Try to build minimum viable reasoner, using GRPO of DeepSeek R1
 
 
 # Algo names and intuition table
@@ -65,17 +58,6 @@
 ```shell
   virtualenv -p python3.13 env && source env/bin/activate && pip install -r requirements313.txt
   pip install "gymnasium[box2d]"
-```
-
-
-# Additional Rocket Lander Gym extension
-
-```shell
-  git clone https://github.com/Jeetu95/Rocket_Lander_Gym.git
-
-  change CONTINUOUS variable in Rocket_Lander_Gym/rocket_lander_gym/envs/rocket_lander.py to False
-
-  cd Rocket_Lander_Gym && pip install .
 ```
 
 
