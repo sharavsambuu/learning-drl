@@ -6,7 +6,6 @@
 #   Meta learns on k-step accumulated extrinsic reward with gamma**k bootstrap.
 #
 
-
 import os
 import random
 import math
@@ -43,17 +42,23 @@ goal_threshold           = 0.08
 
 
 class SumTree:
-    write = 0
     def __init__(self, capacity):
         self.capacity  = capacity
         self.tree      = np.zeros(2*capacity - 1, dtype=np.float32)
-        self.data      = np.zeros(capacity, dtype=object)
+
+        # unfilled slots must be None, not 0 (int), otherwise d[0] crashes
+        self.data      = np.empty(capacity, dtype=object)
+        self.data[:]   = None
+
         self.n_entries = 0
+        self.write     = 0
+
     def _propagate(self, idx, change):
         parent             = (idx - 1) // 2
         self.tree[parent] += change
         if parent != 0:
             self._propagate(parent, change)
+
     def _retrieve(self, idx, s):
         left  = 2 * idx + 1
         right = left + 1
@@ -63,52 +68,92 @@ class SumTree:
             return self._retrieve(left, s)
         else:
             return self._retrieve(right, s-self.tree[left])
+
     def total(self):
         return float(self.tree[0])
+
     def add(self, p, data):
         idx                   = self.write + self.capacity - 1
         self.data[self.write] = data
         self.update(idx, p)
+
         self.write           += 1
         if self.write >= self.capacity:
             self.write = 0
         if self.n_entries < self.capacity:
             self.n_entries += 1
+
     def update(self, idx, p):
         change         = p - self.tree[idx]
         self.tree[idx] = p
         self._propagate(idx, change)
+
     def get(self, s):
         idx     = self._retrieve(0, s)
         dataIdx = idx - self.capacity + 1
-        return (idx, self.tree[idx], self.data[dataIdx])
+
+        # If retrieval lands on an unfilled leaf, return None so sampler can retry.
+        if dataIdx >= self.n_entries:
+            return (idx, self.tree[idx], None)
+
+        data = self.data[dataIdx]
+        if data is None:
+            return (idx, self.tree[idx], None)
+
+        return (idx, self.tree[idx], data)
+
 
 class PERMemory:
     e = 0.01
     a = 0.7
     def __init__(self, capacity):
         self.tree = SumTree(capacity)
+
     def _get_priority(self, error):
         return float((error + self.e) ** self.a)
+
     def add(self, error, sample):
         p = self._get_priority(error)
         self.tree.add(p, sample)
+
     def sample(self, n):
-        batch   = []
+        batch     = []
+        n_entries = self.size()
+        if n_entries <= 0:
+            return batch
+
+        n = min(n, n_entries)
+
         total_p = self.tree.total()
         if total_p <= 0:
             return batch
+
         segment = total_p / n
+        eps     = 1e-6
+
         for i in range(n):
             a = segment * i
             b = segment * (i+1)
-            s = random.uniform(a, b)
-            (idx, p, data) = self.tree.get(s)
-            batch.append((idx, data))
+
+            # Retry within segment to avoid boundary hits that can land on empty/zero-priority subtrees.
+            for _ in range(10):
+                width = b - a
+                if width <= eps:
+                    s = a + 0.5 * width
+                else:
+                    s = a + eps + (width - eps) * random.random()  # (a, b)
+
+                (idx, p, data) = self.tree.get(s)
+                if data is not None:
+                    batch.append((idx, data))
+                    break
+
         return batch
+
     def update(self, idx, error):
         p = self._get_priority(error)
         self.tree.update(idx, p)
+
     def size(self):
         return self.tree.n_entries
 
@@ -353,6 +398,9 @@ try:
 
             if ctrl_memory.size() >= batch_size:
                 batch = ctrl_memory.sample(batch_size)
+                if len(batch) < batch_size:
+                    continue
+
                 idxs, data = zip(*batch)
 
                 states, goals, actions, i_rewards, next_states, g_dones = [], [], [], [], [], []
@@ -382,6 +430,9 @@ try:
 
             if meta_memory.size() >= batch_size:
                 batch = meta_memory.sample(batch_size)
+                if len(batch) < batch_size:
+                    continue
+
                 idxs, data = zip(*batch)
 
                 s0, g, rsum, sk, dones, ksteps = [], [], [], [], [], []
