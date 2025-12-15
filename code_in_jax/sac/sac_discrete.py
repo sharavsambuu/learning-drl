@@ -1,5 +1,5 @@
 #
-# SAC (Discrete) Ultimate + Entropy Plot
+# SAC (Discrete) + Entropy Plot
 #
 #    - Discrete SAC target uses exact expectation over actions (no action sampling in target)
 #    - Twin Q networks + clipped double Q
@@ -410,7 +410,6 @@ try:
                     break
 
                 idxs, b_s, b_a, b_r, b_ns, b_d, b_w = batch
-
                 (
                     q1_params, q1_opt_st   ,
                     q2_params, q2_opt_st   ,
