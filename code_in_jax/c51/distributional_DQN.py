@@ -9,10 +9,16 @@
 #
 # Improved:
 #   1) Network output shape is (batch, n_actions, n_atoms)    (axis=1 stack)
-#   2) Inference always gets a batch dimension               
+#   2) Inference always gets a batch dimension
 #   3) PER tracks actual number of inserted samples           (n_entries)
 #   4) C51 projection is vectorized + JAX-friendly            (no Python loops inside jit)
-#   5) Priority update is batch-computed (fast + consistent) 
+#   5) Priority update is batch-computed (fast + consistent)
+#
+# Visualization Upgrade (FAST):
+#   - No more ax.cla() per step (that is VERY slow)
+#   - Create bar artists once, only update heights
+#   - Plot update runs periodically (plot_every_steps)
+#   - env.render() also runs periodically (render_every_steps)
 #
 # Notes:
 #   - CartPole rewards are {1 per step}, so v_min/v_max can be tighter, but keep as-is for now.
@@ -35,17 +41,21 @@ import numpy as np
 import optax
 
 
-debug_render  = True
-num_episodes  = 500
-batch_size    = 64
-learning_rate = 0.001
-sync_steps    = 100
-memory_length = 1000
-epsilon       = 1.0
-epsilon_decay = 0.001
-epsilon_max   = 1.0
-epsilon_min   = 0.01
-gamma         = 0.99
+debug_render       = True
+num_episodes       = 500
+batch_size         = 64
+learning_rate      = 0.001
+sync_steps         = 100
+memory_length      = 1000
+epsilon            = 1.0
+epsilon_decay      = 0.001
+epsilon_max        = 1.0
+epsilon_min        = 0.01
+gamma              = 0.99
+
+plot_every_steps   = 25     
+render_every_steps = 10      
+pause_seconds      = 0.0001
 
 
 class SumTree:
@@ -76,7 +86,7 @@ class SumTree:
         return self.tree[0]
 
     def add(self, p, data):
-        idx               = self.write + self.capacity - 1
+        idx                  = self.write + self.capacity - 1
         self.data[self.write] = data
         self.update(idx, p)
 
@@ -188,7 +198,6 @@ def inference(params, input_batch):
 def projection_distribution(reward, done, next_state_distribution):
     # next_state_distribution: (n_actions, n_atoms)
 
-    # pick best action by expected value
     q_values         = jnp.sum(next_state_distribution * z_holder[None, :], axis=1)
     best_next_action = jnp.argmax(q_values)
     p_next           = next_state_distribution[best_next_action]  # (n_atoms,)
@@ -200,11 +209,9 @@ def projection_distribution(reward, done, next_state_distribution):
         l  = jnp.int32(jnp.floor(bj))
         u  = jnp.int32(jnp.ceil(bj))
 
-        # if l == u, put all mass there
         same = (l == u).astype(jnp.float32)
         m    = m.at[l].add(same * 1.0)
 
-        # otherwise interpolate
         frac_u = bj - l
         frac_l = 1.0 - frac_u
         m      = m.at[l].add((1.0 - same) * frac_l)
@@ -214,20 +221,17 @@ def projection_distribution(reward, done, next_state_distribution):
     def not_done_case(reward, p_next):
         m  = jnp.zeros((n_atoms,), dtype=jnp.float32)
 
-        Tz = jnp.clip(reward + gamma * z_holder, v_min, v_max)   # (n_atoms,)
-        bj = (Tz - v_min) / dz                                   # (n_atoms,)
-        l  = jnp.int32(jnp.floor(bj))                            # (n_atoms,)
-        u  = jnp.int32(jnp.ceil(bj))                             # (n_atoms,)
+        Tz = jnp.clip(reward + gamma * z_holder, v_min, v_max)
+        bj = (Tz - v_min) / dz
+        l  = jnp.int32(jnp.floor(bj))
+        u  = jnp.int32(jnp.ceil(bj))
 
         same = (l == u).astype(jnp.float32)
 
         frac_u = bj - l
         frac_l = 1.0 - frac_u
 
-        # if l == u, add full mass p_next
         m = m.at[l].add(p_next * same)
-
-        # otherwise distribute
         m = m.at[l].add(p_next * (1.0 - same) * frac_l)
         m = m.at[u].add(p_next * (1.0 - same) * frac_u)
         return m
@@ -241,17 +245,15 @@ def projection_distribution(reward, done, next_state_distribution):
 
 @jax.jit
 def categorical_loss_fn(predicted_distribution, target_distribution, action, reward, done):
-    # predicted_distribution: (n_actions, n_atoms)
-    # target_distribution   : (n_actions, n_atoms)
-    predicted_action_dist = predicted_distribution[action]                              # (n_atoms,)
-    projected_dist        = projection_distribution(reward, done, target_distribution)  # (n_atoms,)
+    predicted_action_dist = predicted_distribution[action]
+    projected_dist        = projection_distribution(reward, done, target_distribution)
     return -jnp.sum(projected_dist * jnp.log(predicted_action_dist + 1e-6))
 
 @jax.jit
 def backpropagate(optimizer_state, model_params, target_model_params, states, actions, rewards, next_states, dones):
     def loss_fn(params):
-        predicted_distributions = nn_module.apply({'params': params             }, states     )  # (B, A, Z)
-        target_distributions    = nn_module.apply({'params': target_model_params}, next_states)  # (B, A, Z)
+        predicted_distributions = nn_module.apply({'params': params             }, states     )
+        target_distributions    = nn_module.apply({'params': target_model_params}, next_states)
 
         losses = jax.vmap(categorical_loss_fn, in_axes=(0, 0, 0, 0, 0))(
             predicted_distributions,
@@ -281,13 +283,23 @@ if debug_render:
 
     for ax in axes:
         ax.set_xlim(float(v_min), float(v_max))
-        ax.set_ylim(0.0, 1.0)  # distributions cap
+        ax.set_ylim(0.0, 1.0)
         ax.set_xlabel("Atom Value (Z)")
         ax.set_ylabel("Probability")
 
     ax_action0.set_title("Action 0")
     ax_action1.set_title("Action 1")
     ax_overlap.set_title("Overlap")
+
+    z_np     = np.array(z_holder, dtype=np.float32)
+    zeros_np = np.zeros_like(z_np, dtype=np.float32)
+
+    # Create bars ONCE (then update heights only)
+    bars_action0  = ax_action0.bar(z_np, zeros_np, alpha=0.85, color=color_action0)
+    bars_action1  = ax_action1.bar(z_np, zeros_np, alpha=0.85, color=color_action1)
+    bars_overlap0 = ax_overlap.bar(z_np, zeros_np, alpha=0.55, color=color_action0, label="Action 0")
+    bars_overlap1 = ax_overlap.bar(z_np, zeros_np, alpha=0.55, color=color_action1, label="Action 1")
+    ax_overlap.legend(loc="upper left")
 
     fig.tight_layout()
     fig.show()
@@ -304,47 +316,43 @@ try:
         while True:
             global_steps += 1
 
-            if np.random.rand() <= epsilon:
-                action = env.action_space.sample()
-            else:
-                outputs = inference(nn_model_params, jnp.asarray([state], dtype=jnp.float32))  # (1, A, Z)
+            outputs_plot = None
+
+            # Compute outputs periodically for plotting (even if exploring)
+            if debug_render and (global_steps % plot_every_steps == 0):
+                outputs_plot = inference(nn_model_params, jnp.asarray([state], dtype=jnp.float32))  # (1, A, Z)
 
                 try:
-                    if debug_render:
-                        dist0 = np.array(outputs[0][0])  # Action 0 dist (n_atoms,)
-                        dist1 = np.array(outputs[0][1])  # Action 1 dist (n_atoms,)
+                    dist0 = np.array(outputs_plot[0][0], dtype=np.float32)
+                    dist1 = np.array(outputs_plot[0][1], dtype=np.float32)
 
-                        ax_action0.cla()
-                        ax_action1.cla()
-                        ax_overlap.cla()
+                    dist0 = np.clip(dist0, 0.0, 1.0)
+                    dist1 = np.clip(dist1, 0.0, 1.0)
 
-                        # Re-apply consistent scales/labels (cla() wipes them)
-                        for ax in (ax_action0, ax_action1, ax_overlap):
-                            ax.set_xlim(float(v_min), float(v_max))
-                            ax.set_ylim(0.0, 1.0)
-                            ax.set_xlabel("Atom Value (Z)")
-                            ax.set_ylabel("Probability")
+                    for bar, h in zip(bars_action0, dist0):
+                        bar.set_height(float(h))
+                    for bar, h in zip(bars_action1, dist1):
+                        bar.set_height(float(h))
 
-                        ax_action0.set_title("Action 0")
-                        ax_action1.set_title("Action 1")
-                        ax_overlap.set_title("Overlap")
+                    for bar, h in zip(bars_overlap0, dist0):
+                        bar.set_height(float(h))
+                    for bar, h in zip(bars_overlap1, dist1):
+                        bar.set_height(float(h))
 
-                        # Plot action-specific
-                        ax_action0.bar(np.array(z_holder), dist0, alpha=0.85, color=color_action0)
-                        ax_action1.bar(np.array(z_holder), dist1, alpha=0.85, color=color_action1)
-
-                        # Plot overlap (same colors)
-                        ax_overlap.bar(np.array(z_holder), dist0, alpha=0.55, color=color_action0, label="Action 0")
-                        ax_overlap.bar(np.array(z_holder), dist1, alpha=0.55, color=color_action1, label="Action 1")
-                        ax_overlap.legend(loc="upper left")
-
-                        fig.canvas.draw()
-                        plt.show(block=False)
-                        plt.pause(0.0001)
+                    fig.canvas.draw_idle()
+                    fig.canvas.flush_events()
+                    plt.pause(pause_seconds)
                 except Exception as e:
                     print(f"Error during plotting: {e}")
 
-                q = jnp.sum(outputs[0] * z_holder[None, :], axis=1)  # (A,)
+            # Epsilon-greedy action
+            if np.random.rand() <= epsilon:
+                action = env.action_space.sample()
+            else:
+                # If we already computed outputs_plot this step, reuse it (avoid double inference)
+                if outputs_plot is None:
+                    outputs_plot = inference(nn_model_params, jnp.asarray([state], dtype=jnp.float32))
+                q = jnp.sum(outputs_plot[0] * z_holder[None, :], axis=1)
                 action = int(jnp.argmax(q))
 
             if epsilon > epsilon_min:
@@ -355,8 +363,8 @@ try:
             new_state = np.array(new_state, dtype=np.float32)
 
             # PER: add transition with priority
-            predicted_current = inference(nn_model_params       , jnp.asarray([state    ], dtype=jnp.float32))[0]  # (A, Z)
-            target_next       = inference(target_nn_model_params, jnp.asarray([new_state], dtype=jnp.float32))[0]  # (A, Z)
+            predicted_current = inference(nn_model_params       , jnp.asarray([state    ], dtype=jnp.float32))[0]
+            target_next       = inference(target_nn_model_params, jnp.asarray([new_state], dtype=jnp.float32))[0]
 
             td_error = categorical_loss_fn(
                 predicted_current                        ,
@@ -390,9 +398,8 @@ try:
                     jnp.asarray(dones      , dtype=jnp.int32  )
                 )
 
-                # Update priorities (batch-wise)
-                predicted_distributions_batch = inference(nn_model_params       , jnp.asarray(states     , dtype=jnp.float32))  # (B, A, Z)
-                target_distributions_batch    = inference(target_nn_model_params, jnp.asarray(next_states, dtype=jnp.float32))  # (B, A, Z)
+                predicted_distributions_batch = inference(nn_model_params       , jnp.asarray(states     , dtype=jnp.float32))
+                target_distributions_batch    = inference(target_nn_model_params, jnp.asarray(next_states, dtype=jnp.float32))
 
                 td_errors_batch = jax.vmap(categorical_loss_fn, in_axes=(0, 0, 0, 0, 0))(
                     predicted_distributions_batch          ,
@@ -412,7 +419,7 @@ try:
             if global_steps % sync_steps == 0:
                 target_nn_model_params = nn_model_params
 
-            if debug_render:
+            if debug_render and (global_steps % render_every_steps == 0):
                 env.render()
 
             if done:
