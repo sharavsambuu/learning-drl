@@ -8,13 +8,13 @@ import numpy as np
 import optax
 
 
-debug_render            = True  
-debug                   = True 
+debug_render            = True
+debug                   = True
 num_episodes            = 5000
 learning_rate           = 0.001
-gamma                   = 0.99  # Discount factor
-sparse_reward_threshold = 50    # Minimum steps to get a reward
-sparse_reward_value     = 10    # Reward value for successful episodes
+gamma                   = 0.99     # Discount factor
+sparse_reward_threshold = 50       # Minimum steps to get a reward
+sparse_reward_value     = 10       # Reward value for successful episodes
 
 
 class SparseCartPoleEnv(gym.Env):
@@ -47,8 +47,10 @@ class SparseCartPoleEnv(gym.Env):
             if debug:
                 print(f"Sparse reward given: {sparse_reward} at step {self.current_steps}")
         return np.array(observation, dtype=np.float32), sparse_reward, terminated, truncated, info
+
     def render(self, mode='human'):
         return self.env.render()
+
     def close(self):
         self.env.close()
 
@@ -61,8 +63,8 @@ class PolicyNetwork(nn.Module):
         x = nn.relu(x)
         x = nn.Dense(features=32)(x)
         x = nn.relu(x)
-        x = nn.Dense(features=self.n_actions)(x)
-        return nn.softmax(x)
+        logits = nn.Dense(features=self.n_actions)(x)  # logits (no softmax)
+        return logits
 
 
 env         = SparseCartPoleEnv(render_mode='human', sparse_reward_threshold=sparse_reward_threshold, sparse_reward_value=sparse_reward_value)
@@ -80,19 +82,22 @@ optimizer_state       = optimizer_def.init(policy_network_params)
 
 @jax.jit
 def policy_inference(params, x):
-    return pg_module.apply({'params': params}, x)
+    return pg_module.apply({'params': params}, x)  # logits
 
 @jax.vmap
-def gather(probability_vec, action_index):
-    return probability_vec[action_index]
+def gather(log_probability_vec, action_index):
+    return log_probability_vec[action_index]
 
 @jax.jit
 def train_step(optimizer_state, policy_network_params, batch):
+    # batch[0] - states
+    # batch[1] - actions
+    # batch[2] - discounted rewards
     def loss_fn(params):
-        action_probabilities_list = pg_module.apply({'params': params}, batch[0])
-        picked_action_probabilities = gather(action_probabilities_list, batch[1])
-        log_probabilities = jnp.log(picked_action_probabilities)
-        losses = jnp.multiply(log_probabilities, batch[2])
+        logits_list                 = pg_module.apply({'params': params}, batch[0])
+        log_probs_list              = jax.nn.log_softmax(logits_list, axis=-1)
+        picked_log_probabilities    = gather(log_probs_list, batch[1])
+        losses                      = jnp.multiply(picked_log_probabilities, batch[2])
         return -jnp.sum(losses)
     loss, gradients = jax.value_and_grad(loss_fn)(policy_network_params)
     updates, new_optimizer_state = optimizer_def.update(gradients, optimizer_state, policy_network_params)
@@ -107,18 +112,22 @@ try:
         states, actions, rewards, dones = [], [], [], []
         state, info    = env.reset()
         state          = np.array(state, dtype=np.float32)
-        episode_reward = 0  
+        episode_reward = 0
+
         while True:
             global_steps += 1
-            action_probabilities  = policy_inference(policy_network_params, jnp.asarray([state]))
-            action_probabilities  = np.array(action_probabilities[0])
-            action_probabilities /= action_probabilities.sum()
-            action = np.random.choice(n_actions, p=action_probabilities)
+
+            logits = policy_inference(policy_network_params, jnp.asarray([state]))
+            probs  = jax.nn.softmax(logits, axis=-1)[0]
+            probs  = np.array(probs)
+            probs  = probs / probs.sum()
+            action = np.random.choice(n_actions, p=probs)
 
             new_state, reward, terminated, truncated, info = env.step(int(action))
             done            = terminated or truncated
             new_state       = np.array(new_state, dtype=np.float32)
-            episode_reward += reward  # Accumulate reward
+            episode_reward += reward
+
             states .append(state )
             actions.append(action)
             rewards.append(reward)
@@ -130,40 +139,50 @@ try:
                 env.render()
 
             if done:
-                episode_rewards.append(episode_reward)  # Store total reward for this episode
+                episode_rewards.append(episode_reward)
+
                 if debug:
                     if episode_reward > 0:
                         print(f"{episode} - Sparse Reward Success! Total reward: {episode_reward}, Steps: {len(rewards)}")
                     else:
                         print(f"{episode} - Sparse Reward Failure. Total reward: {episode_reward}, Steps: {len(rewards)}")
 
-                # Calculate discounted rewards (only if episode is done)
-                episode_length = len(rewards)
-                discounted_rewards = np.zeros_like(rewards)
-                for t in range(0, episode_length):
-                    G_t = 0
-                    for idx, j in enumerate(range(t, episode_length)):
-                        G_t += (gamma ** idx) * rewards[j] * (1 - dones[j])
-                    discounted_rewards[t] = G_t
-                discounted_rewards = (discounted_rewards - np.mean(discounted_rewards)) / (np.std(discounted_rewards) + 1e-5)
+                # in sparse setting, skip training if it is zero reward (otherwise gradients are mostly useless)
+                if episode_reward > 0:
+                    episode_length     = len(rewards)
+                    discounted_rewards = np.zeros(episode_length, dtype=np.float32)
 
-                # Train on the collected trajectory
-                optimizer_state, policy_network_params, loss = train_step(
-                    optimizer_state,
-                    policy_network_params,
-                    (
-                        jnp.asarray(states),
-                        jnp.asarray(actions),
-                        jnp.asarray(discounted_rewards)
+                    # O(T) discounted returns (reverse)
+                    running_return = 0.0
+                    for t in reversed(range(episode_length)):
+                        if dones[t]:
+                            running_return = 0.0
+                        running_return = rewards[t] + gamma * running_return
+                        discounted_rewards[t] = running_return
+
+                    discounted_rewards = discounted_rewards - np.mean(discounted_rewards)
+                    discounted_rewards = discounted_rewards / (np.std(discounted_rewards) + 1e-5)
+
+                    optimizer_state, policy_network_params, loss = train_step(
+                        optimizer_state,
+                        policy_network_params,
+                        (
+                            jnp.asarray(states                               ),
+                            jnp.asarray(actions           , dtype=jnp.int32  ),
+                            jnp.asarray(discounted_rewards, dtype=jnp.float32)
+                        )
                     )
-                )
 
-                if debug:
-                    print(f"Episode {episode}: Loss = {loss:.4f}")
+                    if debug:
+                        print(f"Episode {episode}: Loss = {loss:.4f}")
+                else:
+                    if debug:
+                        print(f"Episode {episode}: skip training (zero sparse reward)")
+
                 break
 
         if episode % 10 == 0:
-            avg_reward = np.mean(episode_rewards[-10:])
+            avg_reward = np.mean(episode_rewards[-10:]) if len(episode_rewards) >= 1 else 0.0
             print(f"Episode {episode}: Average reward over last 10 episodes = {avg_reward:.2f}")
 
 finally:
