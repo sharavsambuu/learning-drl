@@ -43,7 +43,7 @@ end_of_text_token     = "<|endoftext|>"
 seed                  = 42
 
 # phase 1: sft configs 
-sft_total_steps       = 120000
+sft_total_steps       = 10000
 sft_batch_size        = 128
 sft_seq_len           = 192
 sft_learning_rate     = 0.0015
@@ -52,7 +52,7 @@ sft_print_freq        = 1000
 sft_print_count       = 2
 
 # phase 2: grpo configs 
-grpo_total_updates    = 5000
+grpo_total_updates    = 2000
 prompts_per_update    = 16
 group_size            = 8
 gen_len               = 64
@@ -170,12 +170,12 @@ corpus_ids  = np.array(encode_text(corpus_text), dtype=np.int32)
 
 
 class TinyLSTM(nn.Module):
-    vocab_size : int
-    embed_dim  : int
-    hidden_dim : int
-    num_layers : int
-    dropout    : float
-    attn_window: int
+    vocab_size  : int
+    embed_dim   : int
+    hidden_dim  : int
+    num_layers  : int
+    dropout     : float
+    attn_window : int
 
     @nn.compact
     def __call__(self, token_id, carry, deterministic=True):
@@ -233,18 +233,18 @@ def init_carry(batch_size):
     return (tuple(carries), attn_mem)
 
 
-model        = TinyLSTM(
-    vocab_size=vocab_size,
-    embed_dim=embed_dim,
-    hidden_dim=hidden_dim,
-    num_layers=num_lstm_layers,
-    dropout=dropout_rate,
-    attn_window=attn_window
+model = TinyLSTM(
+    vocab_size  = vocab_size     ,
+    embed_dim   = embed_dim      ,
+    hidden_dim  = hidden_dim     ,
+    num_layers  = num_lstm_layers,
+    dropout     = dropout_rate   ,
+    attn_window = attn_window
 )
 
-dummy_token  = jnp.zeros((1,), dtype=jnp.int32)
-dummy_carry  = init_carry(1)
-params       = model.init(jax.random.PRNGKey(seed), dummy_token, dummy_carry, deterministic=True)["params"]
+dummy_token = jnp.zeros((1,), dtype=jnp.int32)
+dummy_carry = init_carry(1)
+params      = model.init(jax.random.PRNGKey(seed), dummy_token, dummy_carry, deterministic=True)["params"]
 
 
 @jax.jit
@@ -364,7 +364,7 @@ sft_lr_schedule = optax.warmup_cosine_decay_schedule(
     end_value    = sft_learning_rate * 0.1
 )
 
-sft_tx       = optax.chain(
+sft_tx = optax.chain(
     optax.clip_by_global_norm(max_grad_norm),
     optax.adam(sft_lr_schedule)
 )
@@ -420,8 +420,8 @@ def ensure_valid_prompt(prompt_ids, min_tokens):
 
 def sample_random_prompt(source_stories, prompt_len):
     prompt_ids = np.full((prompt_len,), pad_id, dtype=np.int32)
-    s   = source_stories[np.random.randint(0, len(source_stories))].replace("\r", "")
-    ids = encode_text(s)
+    s          = source_stories[np.random.randint(0, len(source_stories))].replace("\r", "")
+    ids        = encode_text(s)
 
     if len(ids) <= 1:
         prompt_ids[0] = bos_id
@@ -455,7 +455,7 @@ def sample_snapshot_from(params, n_samples, source_stories):
 
 def reward_hybrid(text, fluency_score):
     # Lexical Check
-    t = text.lower()
+    t     = text.lower()
     words = re.findall(r"[a-z]+", t)
 
     r = 0.0
@@ -520,10 +520,10 @@ grpo_tx = optax.chain(
 
 @jax.jit
 def grpo_train_step(state, frozen_ref_params, rollout_seqs, behavior_logps, advantages, kl_beta_curr, dropout_key):
-    inputs      = rollout_seqs[:, :-1]
-    targets     = rollout_seqs[:,  1:]
-    gen_start   = prompt_len - 1
-    gen_end     = gen_start + gen_len
+    inputs    = rollout_seqs[:, :-1]
+    targets   = rollout_seqs[:,  1:]
+    gen_start = prompt_len - 1
+    gen_end   = gen_start + gen_len
 
     def loss_fn(p):
         logits       = unroll_logits_train(p, inputs, dropout_key)
@@ -624,8 +624,8 @@ for update in range(grpo_total_updates):
     # Rollout (temp=1.0)
     rollout_seqs, behavior_logps = generate_rollout(
         actor_old_params,
-        prompts_j,
-        key,
+        prompts_j       ,
+        key             ,
         temperature=grpo_temp
     )
 
@@ -637,14 +637,14 @@ for update in range(grpo_total_updates):
 
     rewards          = np.zeros((rollout_ids.shape[0],), dtype=np.float32)
     for i in range(rollout_ids.shape[0]):
-        # 3. Hybrid Reward
+        # Hybrid Reward
         r = reward_hybrid(
             decode_ids(rollout_ids[i, prompt_len:]),
             float(fluency_scores[i])
         )
         rewards[i] = r
 
-    # 4. Masked Advantages
+    # Masked Advantages
     advantages, mean_r, mean_std = compute_masked_advantages(
         rewards, prompts_per_update, group_size, use_std_advantage
     )
@@ -657,7 +657,7 @@ for update in range(grpo_total_updates):
     B_total  = int(full_j.shape[0])
     pg_loss = kl_loss = ent_loss = 0.0
 
-    # 5. PPO Update
+    # PPO Update
     for _ in range(ppo_epochs):
         indices = np.random.permutation(B_total)
         for start in range(0, B_total, mini_batch_size):
@@ -667,12 +667,12 @@ for update in range(grpo_total_updates):
             grpo_drop_key, subk = jax.random.split(grpo_drop_key)
 
             grpo_state, _, pg_loss, kl_loss, ent_loss = grpo_train_step(
-                grpo_state      ,
+                grpo_state       ,
                 frozen_ref_params,
-                full_j [mb]     ,
-                oldlp_j[mb]     ,
-                adv_j  [mb]     ,
-                klb_j           ,
+                full_j [mb]      ,
+                oldlp_j[mb]      ,
+                adv_j  [mb]      ,
+                klb_j            ,
                 subk
             )
 
