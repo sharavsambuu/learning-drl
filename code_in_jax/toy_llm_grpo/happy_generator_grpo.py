@@ -1,22 +1,40 @@
 #
 # HAPPY TEXT GENERATOR (Toy LLM)
-# Critic-less GRPO (Group Relative Policy Optimization)
+# Critic-less GRPO (Group Relative Policy Optimization) + PPO-Clip
 #
-# Architecture:
-#   - Char-level LSTM + Tiny Causal Attention (Rolling Window)
-#   - Critic-less PPO with Group Relative Advantages
+# Goal:
+#   Train a tiny char-level language model to generate more "positive / happy" text
+#   without destabilizing the base distribution too hard.
 #
-# Training Phases:
-#   1. SFT (Supervised Fine-Tuning):
-#      - Bias-filtered dataset (positive_stories)
-#      - Learns grammar and happy vocabulary
+# Model:
+#   - Character vocabulary (BOS + PAD + dataset chars)
+#   - 2-Layer LSTM backbone
+#   - Tiny causal attention over a rolling hidden-state window (attn_window)
 #
-#   2. GRPO (Alignment):
-#      - Samples multiple completions per prompt
-#      - Hybrid Reward: Lexical (Happy Words) + Structure (N-grams) + Fluency (Ref Model)
-#      - Masked Advantages: Ignores "best of worst" negative outcomes
-#      - Prompt Mixing: Blends positive/random prompts to ensure robustness
-#      - Frozen Reference Model: Prevents drift
+# Training:
+#   Phase 1) SFT (Supervised Fine-Tuning)
+#     - Dataset: positive_stories (filtered TinyStories)
+#     - Objective: next-token cross-entropy (teacher forcing)
+#       L_sft = -E_t[log π(a_t=target_t | context_t)]
+#
+#   Phase 2) GRPO / PPO (Alignment, critic-less)
+#     - For each update:
+#         * sample prompts (mix positive + all_stories by schedule)
+#         * generate group_size rollouts per prompt using behavior policy π_old
+#         * score with a hybrid reward function (lexical + structure + fluency)
+#         * compute group-relative advantages per prompt (optionally std-normalized)
+#         * update policy with PPO-clip, anchored by a frozen reference π_ref
+#
+#     - Objective (per update, generated region only):
+#       ratio  = exp(log π_new(a_t|s_t) - log π_old(a_t|s_t))
+#       L_grpo = - E_t[min(ratio*A, clip(ratio,1-ε,1+ε)*A)]
+#                + β * KL(π_new || π_ref)
+#                - α * H(π_new)
+#
+# Stability Notes:
+#   - Temperature is kept at 1.0 for rollouts to keep PPO ratios consistent.
+#   - Frozen reference model prevents drift during GRPO.
+#   - Masked advantages keep cold-start learning alive by allowing mildly negative samples.
 #
 
 import os
