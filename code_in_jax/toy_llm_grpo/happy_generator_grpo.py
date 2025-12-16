@@ -43,11 +43,11 @@ end_of_text_token     = "<|endoftext|>"
 seed                  = 42
 
 # phase 1: sft configs 
-sft_total_steps       = 10000
-sft_batch_size        = 128
+sft_total_steps       = 5000
+sft_batch_size        = 64
 sft_seq_len           = 192
 sft_learning_rate     = 0.0015
-sft_warmup_steps      = 2000
+sft_warmup_steps      = 500
 sft_print_freq        = 1000
 sft_print_count       = 2
 
@@ -55,7 +55,7 @@ sft_print_count       = 2
 grpo_total_updates    = 2000
 prompts_per_update    = 16
 group_size            = 8
-gen_len               = 64
+gen_len               = 128
 grpo_temp             = 1.0    # set to 1.0 to match ppo logratio expectations
 
 ppo_epochs            = 4
@@ -459,9 +459,17 @@ def reward_hybrid(text, fluency_score):
     words = re.findall(r"[a-z]+", t)
 
     r = 0.0
+    happy_count = 0
     for w in words:
-        if w in happy_vocab: r += 2.0
-        if w in sad_vocab:   r -= 1.0
+        if w in happy_vocab:
+            r += 2.0
+            happy_count += 1
+        if w in sad_vocab:
+            r -= 1.0
+
+    # discourage keyword spam once it found the happy words
+    if happy_count > 3:
+        r -= 0.6 * float(happy_count - 3)
 
     # Structure Bonus
     ex = t.count("!")
@@ -469,6 +477,10 @@ def reward_hybrid(text, fluency_score):
     if ex > 3: r -= 0.2 * float(ex - 3)
 
     if text.strip().endswith("."): r += 1.0
+
+    # encourage longer, more sentence-like generations (soft shaping)
+    n_words = len(words)
+    r += 0.08 * float(min(n_words, 18))
 
     # N-gram Loop Penalty
     if len(words) > 3:
