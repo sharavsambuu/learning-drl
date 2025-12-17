@@ -289,7 +289,6 @@ try:
                 for start in range(0, batch_size, mini_batch_size):
                     end = start + mini_batch_size
 
-                    # Drop remainder to avoid JAX recompiles on changing shapes
                     if end > batch_size:
                         continue
 

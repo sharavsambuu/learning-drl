@@ -72,7 +72,7 @@ def actor_inference(params, x):
 def backpropagate_actor(optimizer_state, actor_model_params, props):
     # props[0] - states     (B, S)
     # props[1] - actions    (B,)
-    # props[2] - advantages (B,)   (already expanded per-step; no critic baseline)
+    # props[2] - advantages (B,)  
     def loss_fn(params):
         action_probas = actor_module.apply({'params': params}, props[0])
 
@@ -85,7 +85,6 @@ def backpropagate_actor(optimizer_state, actor_model_params, props):
 
         entropies     = -jnp.sum(action_probas * jnp.log(action_probas + 1e-8), axis=1)
 
-        # Same sign convention as your previous code:
         #   - maximize logp * advantage  (=> minimize -logp*adv)
         #   - add entropy bonus          (=> subtract ent_coef * entropy from loss)
         pg_loss       = -jnp.mean(logp * advantages_sg)
@@ -116,8 +115,6 @@ def rollout_trajectory(group_member_id, actor_model_params, seed):
     for _ in range(max_steps):
         action_probabilities = actor_inference(actor_model_params, jnp.asarray([state]))
         action_probabilities = np.array(action_probabilities[0])
-
-        # Note: env is seeded, but this np.random choice is not; kept as-is to match your style.
         action               = np.random.choice(n_actions, p=action_probabilities)
 
         next_state, reward, terminated, truncated, info = env_item.step(int(action))
@@ -132,7 +129,6 @@ def rollout_trajectory(group_member_id, actor_model_params, seed):
 
         step += 1
 
-        # must advance state
         state = next_state
 
         if done_boundary:
@@ -166,7 +162,7 @@ def rollout_group(actor_model_params, seed):
         group_states .append(states [:trajectory_length])
         group_actions.append(actions[:trajectory_length])
 
-    # Group baseline: mean episodic return across the K rollouts
+    # Group baseline, mean episodic return across the K rollouts
     group_mean_reward = float(np.mean(group_total_rewards))
 
     # DeepSeek-style outcome advantage (no std division)

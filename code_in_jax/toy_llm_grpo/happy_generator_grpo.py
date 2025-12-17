@@ -1,44 +1,38 @@
 #
-# HAPPY TEXT GENERATOR (Toy LLM)
+# HAPPY TEXT GENERATOR (Toy LLM) - FULL GLOBAL ATTENTION
 # Critic-less GRPO (Group Relative Policy Optimization) + PPO-Clip
 #
-# Goal:
-#   Train a tiny char-level language model to generate more "positive / happy" text
-#   without destabilizing the base distribution too hard.
+# Зорилго:
+#   Жижиг хэмжээний char-level хэлний моделийг (Toy LLM) сургаж,
+#   ямар ч эхлэл өгсөн бай эерэг/аз жаргалтай текст үүсгэдэг болгох.
 #
-# Model:
-#   - Character vocabulary (BOS + PAD + dataset chars)
-#   - 2-Layer LSTM backbone
-#   - Tiny causal attention over a rolling hidden-state window (attn_window)
+# Модель:
+#   - Тэмдэгт дээр суурилсан Tokenizer (BOS + PAD + dataset chars)
+#   - 2 давхарга бүхий LSTM (Long Short-Term Memory) 
+#   - Causal Mask бүхий Full Global Attention механизм
+#     (Өмнөх бүх token-уудыг санаж чадна)
 #
-# Training:
-#   Phase 1) SFT (Supervised Fine-Tuning)
-#     - Dataset: positive_stories (filtered TinyStories)
-#     - Objective: next-token cross-entropy (teacher forcing)
-#       L_sft = -E_t[log π(a_t=target_t | context_t)]
+# Машин сургалтын дараалал:
+#   1-р шат) SFT (Supervised Fine-Tuning)
+#     - Датасет: TinyStories-оос шүүж авсан эерэг түүхүүд.
+#     - Зорилго: Англи хэлний зөв бичгийн дүрмийг болон өгүүлбэр зүйг сурах.
+#       Next-token prediction (Cross-Entropy Loss).
 #
-#   Phase 2) GRPO / PPO (Alignment, critic-less)
-#     - For each update:
-#         * sample prompts (mix positive + all_stories by schedule)
-#         * generate group_size rollouts per prompt using behavior policy π_old
-#         * score with a hybrid reward function (lexical + structure + fluency)
-#         * compute group-relative advantages per prompt (optionally std-normalized)
-#         * update policy with PPO-clip, anchored by a frozen reference π_ref
-#
-#     - Objective (per update, generated region only):
-#       ratio  = exp(log π_new(a_t|s_t) - log π_old(a_t|s_t))
-#       L_grpo = - E_t[min(ratio*A, clip(ratio,1-ε,1+ε)*A)]
-#                + β * KL(π_new || π_ref)
-#                - α * H(π_new)
-#
-# Stability Notes:
-#   - Temperature is kept at 1.0 for rollouts to keep PPO ratios consistent.
-#   - Frozen reference model prevents drift during GRPO.
-#   - Masked advantages keep cold-start learning alive by allowing mildly negative samples.
+#   2-р шат) GRPO / PPO (Alignment)
+#     - Critic модель ашиглахгүйгээр (Critic-less) сургана.
+#     - Алхам бүрт:
+#         * Prompt буюу эхлэлүүдийг санамсаргүйгээр сонгоно.
+#         * Нэг prompt дээр олон хувилбар (Group) үүсгэнэ (Rollouts).
+#         * Хувилбар бүрийг Reward функцээр үнэлнэ (Lexical + Fluency).
+#         * Грүпп доторх дундаж оноотой харьцуулж Advantage тооцно.
+#         * PPO-Clip аргаар Policy-г шинэчилнэ.
+#     - Тогтворжуулах аргууд:
+#         * Frozen Reference Model ашиглаж KL Divergence хэмжинэ.
+#         * Entropy уналтаас сэргийлэх (Entropy Bonus).
 #
 
 import os
-# prevent jax from pre-allocating all vram
+# JAX нь GPU-ний бүх санах ойг урьдчилж дүүргэхээс сэргийлэх тохиргоо
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"  ] = "platform"
 import re
@@ -60,7 +54,7 @@ end_of_text_token     = "<|endoftext|>"
 
 seed                  = 42
 
-# phase 1: sft configs 
+# 1-р шат: SFT тохиргоонууд
 sft_total_steps       = 5000
 sft_batch_size        = 64
 sft_seq_len           = 192
@@ -69,12 +63,12 @@ sft_warmup_steps      = 500
 sft_print_freq        = 1000
 sft_print_count       = 2
 
-# phase 2: grpo configs 
+# 2-р шат: GRPO тохиргоонууд
 grpo_total_updates    = 2000
 prompts_per_update    = 16
 group_size            = 8
 gen_len               = 128
-grpo_temp             = 1.0    # set to 1.0 to match ppo logratio expectations
+grpo_temp             = 1.0    # PPO log ratio тооцоололд зориулж 1.0 байлгах
 
 ppo_epochs            = 4
 mini_batch_size       = 128
@@ -88,25 +82,25 @@ use_std_advantage     = True
 grpo_print_freq       = 50
 grpo_print_count      = 2
 
-# prompt mixing schedule 
+# Prompt холих хуваарь (Машин сургалтын үе шатнаас хамаарч өөрчлөгдөнө)
 mix_stage1_updates    = 500
 mix_stage2_updates    = 1500
 
-# stability & reward knobs 
+# Тогтворжуулалт болон Reward хязгаарууд
 adv_clip_max          = 5.0
 reward_clip_max       = 10.0
 fluency_threshold     = -2.5
 
-# model params
+# Моделийн параметрүүд
 min_prompt_tokens     = 2
 prompt_len            = 32
+model_max_len         = 320    # Global Attention-д зориулсан санах ойн дээд хязгаар (SFT+Gen багтахаар)
 num_lstm_layers       = 2
 dropout_rate          = 0.10
-attn_window           = 16
 embed_dim             = 64
 hidden_dim            = 256
 
-# lexical definitions
+# Үгсийн сангийн тодорхойлолт (Lexical Rewards)
 happy_vocab           = [
     "happy","joy","joyful","smile","smiled","laugh","laughed","love","loved","kind","nice","fun",
     "good","great","amazing","wonderful","excited","brave","bright","safe","friend","friends"
@@ -122,16 +116,16 @@ random.seed(seed)
 
 
 if not os.path.exists(dataset_path):
-    raise FileNotFoundError(f"Missing dataset file: {dataset_path}")
+    raise FileNotFoundError(f"Өгөгдлийн файл олдсонгүй: {dataset_path}")
 
 with open(dataset_path, "r", encoding="utf-8", errors="ignore") as f:
     raw_text = f.read()
 
-# split raw text into individual stories
+# Түүхүүдийг тусгаарлаж задлах
 all_stories = [s.strip() for s in raw_text.split(end_of_text_token)]
 all_stories = [s for s in all_stories if len(s) > 0]
 
-# filter: keep only stories containing at least one happy word
+# Зөвхөн эерэг үг орсон түүхүүдийг ялгаж авах (SFT-д зориулж)
 positive_stories = []
 for s in all_stories:
     s_lower = s.lower()
@@ -139,10 +133,10 @@ for s in all_stories:
         positive_stories.append(s)
 
 if len(positive_stories) < 100:
-    print("warning: filter too aggressive, falling back to full dataset")
+    print("Warning: Шүүлтүүр хэт түрэмгий байна, бүх датаг ашиглахаар тохирууллаа.")
     positive_stories = all_stories
 
-# build char-level vocab from full dataset
+# Тэмдэгт дээр суурилсан токенжуулалт (Char-level vocab)
 unique_chars = set()
 for s in all_stories:
     for ch in s:
@@ -159,6 +153,7 @@ vocab_size  = len(chars)
 pad_id      = char_to_id[PAD]
 bos_id      = char_to_id[BOS]
 
+# Fallback тэмдэгт (танихгүй тэмдэгт орж ирвэл ашиглах)
 fallback_char = " "
 if fallback_char not in char_to_id:
     fallback_char = "\n" if "\n" in char_to_id else None
@@ -187,21 +182,23 @@ corpus_text = "\n\n".join(positive_stories)
 corpus_ids  = np.array(encode_text(corpus_text), dtype=np.int32)
 
 
-class TinyLSTM(nn.Module):
+# Бяцхан хэлний загвар
+class TinyLLM(nn.Module):
     vocab_size  : int
     embed_dim   : int
     hidden_dim  : int
     num_layers  : int
     dropout     : float
-    attn_window : int
+    max_len     : int    # Attention санах ойн тогтмол урт
 
     @nn.compact
     def __call__(self, token_id, carry, deterministic=True):
-        # carry: (lstm_carries, attn_memory)
-        lstm_carries, attn_mem = carry
+        # carry бүтэц: (lstm_states, attention_memory, current_step_index)
+        lstm_carries, attn_mem, step_idx = carry
 
         x = nn.Embed(num_embeddings=self.vocab_size, features=self.embed_dim)(token_id)
 
+        # LSTM Backbone
         new_carries = []
         for i in range(self.num_layers):
             c_i, h_i      = lstm_carries[i]
@@ -213,21 +210,45 @@ class TinyLSTM(nn.Module):
             new_carries.append((c_i, h))
             x = h
 
-        h_last = x
+        h_last = x  # (Batch, Hidden)
 
-        # rolling attention memory update
-        attn_mem = jnp.concatenate([attn_mem[:, 1:, :], h_last[:, None, :]], axis=1)
+        # Attention Memory Update (Global Context)
+        # JAX дээр inplace update хийж болохгүй тул dynamic slice update ашиглана.
+        # h_last-ийг attn_mem буферын [step_idx] байрлал дээр бичнэ.
+        
+        # Shape бэлдэх: (Batch, 1, Hidden)
+        h_expanded = h_last[:, None, :] 
+        
+        # start_indices: (Batch=0, Time=step_idx, Hidden=0)
+        start_indices = (0, step_idx, 0)
+        
+        # Санах ойг шинэчлэх
+        attn_mem = jax.lax.dynamic_update_slice(attn_mem, h_expanded, start_indices)
 
-        # tiny causal attention
-        q = nn.Dense(features=self.hidden_dim, name="attn_q")(h_last)
-        k = nn.Dense(features=self.hidden_dim, name="attn_k")(attn_mem)
-        v = nn.Dense(features=self.hidden_dim, name="attn_v")(attn_mem)
+        # Full Global Attention
+        q = nn.Dense(features=self.hidden_dim, name="attn_q")(h_last)      # Query: Одоогийн токен
+        k = nn.Dense(features=self.hidden_dim, name="attn_k")(attn_mem)    # Key:   Санах ой (Бүх түүх)
+        v = nn.Dense(features=self.hidden_dim, name="attn_v")(attn_mem)    # Value: Санах ой (Бүх түүх)
 
         scale  = 1.0 / jnp.sqrt(jnp.array(self.hidden_dim, dtype=jnp.float32))
+        
+        # Attention Scores: (Batch, MaxLen)
         scores = jnp.sum(k * q[:, None, :], axis=-1) * scale
-        w      = jax.nn.softmax(scores, axis=-1)
-        ctx    = jnp.sum(v * w[:, :, None], axis=1)
 
+        # Causal Masking: Ирээдүйн токенуудыг (step_idx-ээс хойшхи) харахгүй болгох
+        # Mask: [0, 1, ... max_len-1] <= step_idx
+        idx_seq = jnp.arange(self.max_len)
+        mask    = idx_seq <= step_idx  # (MaxLen,)
+        mask    = mask[None, :]        # (1, MaxLen) broadcast хийхэд бэлдэх
+
+        # Mask-гүй хэсэгт маш бага тоо өгч Softmax-ийг 0 болгоно
+        big_neg = -1e9
+        scores  = jnp.where(mask, scores, big_neg)
+
+        w   = jax.nn.softmax(scores, axis=-1)    # (Batch, MaxLen)
+        ctx = jnp.sum(v * w[:, :, None], axis=1) # (Batch, Hidden)
+
+        # Гаралтын давхарга
         h_cat  = jnp.concatenate([h_last, ctx], axis=-1)
         h_mix  = nn.Dense(features=self.hidden_dim, name="attn_mix")(h_cat)
         h_mix  = nn.tanh(h_mix)
@@ -236,28 +257,34 @@ class TinyLSTM(nn.Module):
 
         logits = nn.Dense(features=self.vocab_size)(h_mix)
 
-        new_carry = (tuple(new_carries), attn_mem)
+        # Дараагийн алхам руу шилжих (step_idx + 1)
+        new_carry = (tuple(new_carries), attn_mem, step_idx + 1)
         return logits, new_carry
 
 
 def init_carry(batch_size):
+    # LSTM төлөвүүдийг үүсгэх
     carries = []
     for _ in range(num_lstm_layers):
         c = jnp.zeros((batch_size, hidden_dim), dtype=jnp.float32)
         h = jnp.zeros((batch_size, hidden_dim), dtype=jnp.float32)
         carries.append((c, h))
 
-    attn_mem = jnp.zeros((batch_size, attn_window, hidden_dim), dtype=jnp.float32)
-    return (tuple(carries), attn_mem)
+    # Attention санах ойг бүрэн хэмжээгээр нь үүсгэх (Batch, ModelMaxLen, Hidden)
+    attn_mem = jnp.zeros((batch_size, model_max_len, hidden_dim), dtype=jnp.float32)
+    
+    # Алхамын тоолуур (0-ээс эхэлнэ)
+    step_idx = 0
+    return (tuple(carries), attn_mem, step_idx)
 
 
-model = TinyLSTM(
+model = TinyLLM(
     vocab_size  = vocab_size     ,
     embed_dim   = embed_dim      ,
     hidden_dim  = hidden_dim     ,
     num_layers  = num_lstm_layers,
     dropout     = dropout_rate   ,
-    attn_window = attn_window
+    max_len     = model_max_len    
 )
 
 dummy_token = jnp.zeros((1,), dtype=jnp.int32)
@@ -289,6 +316,7 @@ def kl_from_logits(logits_new_2d, logits_ref_2d):
 @jax.jit
 def unroll_logits_eval(params, token_seq):
     B, T  = token_seq.shape
+    # Эхлүүлэхдээ step_idx=0 байна
     carry = init_carry(B)
 
     def step_fn(carry, tok):
@@ -318,6 +346,7 @@ def unroll_logits_train(params, token_seq, key):
 
 @jax.jit
 def condition_on_prompt(params, prompt_tokens):
+    # Prompt-ийг уншуулж моделийн дотоод төлөвийг бэлдэх
     B, P  = prompt_tokens.shape
     carry = init_carry(B)
 
@@ -325,6 +354,7 @@ def condition_on_prompt(params, prompt_tokens):
         logits, carry = model.apply({"params": params}, tok, carry, deterministic=True)
         return carry, logits
 
+    # Prompt-ийн төгсгөл дэх carry (step_idx = P байна)
     carry, _ = jax.lax.scan(step_fn, carry, prompt_tokens.T)
     return carry
 
@@ -332,6 +362,7 @@ def condition_on_prompt(params, prompt_tokens):
 @jax.jit
 def generate_rollout(behavior_params, prompt_tokens, key, temperature):
     N, P     = prompt_tokens.shape
+    # Prompt-оос үлдсэн төлөвийг авна
     carry    = condition_on_prompt(behavior_params, prompt_tokens)
     last_tok = prompt_tokens[:, -1]
 
@@ -339,7 +370,7 @@ def generate_rollout(behavior_params, prompt_tokens, key, temperature):
         carry, key, tok = carry_key_tok
         logits, carry   = model.apply({"params": behavior_params}, tok, carry, deterministic=True)
         
-        # temperature scaling (identity if temp=1.0)
+        # Температурын хувиргалт
         logits          = logits / temperature
         
         key, subkey     = jax.random.split(key)
@@ -347,6 +378,7 @@ def generate_rollout(behavior_params, prompt_tokens, key, temperature):
         lp              = logprob_from_logits(logits, next_tok)
         return (carry, key, next_tok), (next_tok, lp)
 
+    # Үргэлжлүүлэн үүсгэх
     (carry, key, _), (gen_toks, gen_lps) = jax.lax.scan(
         gen_step, (carry, key, last_tok), xs=None, length=gen_len
     )
@@ -359,7 +391,7 @@ def generate_rollout(behavior_params, prompt_tokens, key, temperature):
 
 @jax.jit
 def compute_fluency_batch(ref_params, rollout_seqs):
-    # check if ref model considers generated text "likely" (fluency gate)
+    # Fluency Gate: Reference model ашиглан үүсгэсэн текстийн магадлалыг шалгах
     inputs      = rollout_seqs[:, :-1]
     targets     = rollout_seqs[:,  1:]
     logits      = unroll_logits_eval(ref_params, inputs)
@@ -472,7 +504,7 @@ def sample_snapshot_from(params, n_samples, source_stories):
 
 
 def reward_hybrid(text, fluency_score):
-    # Lexical Check
+    # Lexical Check (Үгийн сангийн шалгалт)
     t     = text.lower()
     words = re.findall(r"[a-z]+", t)
 
@@ -485,33 +517,33 @@ def reward_hybrid(text, fluency_score):
         if w in sad_vocab:
             r -= 1.0
 
-    # discourage keyword spam once it found the happy words
+    # Keyword Spamming-ээс сэргийлэх
     if happy_count > 3:
         r -= 0.6 * float(happy_count - 3)
 
-    # Structure Bonus
+    # Structure Bonus (Бүтцийн оноо)
     ex = t.count("!")
     r += 0.1 * min(ex, 3)
     if ex > 3: r -= 0.2 * float(ex - 3)
 
     if text.strip().endswith("."): r += 1.0
 
-    # encourage longer, more sentence-like generations (soft shaping)
+    # Өгүүлбэрийн урттай холбоотой reward (хэт богино байхаас сэргийлнэ)
     n_words = len(words)
     r += 0.08 * float(min(n_words, 18))
 
-    # N-gram Loop Penalty
+    # N-gram Loop Penalty (Давталтын шийтгэл)
     if len(words) > 3:
         trigrams = set()
         for i in range(len(words) - 2):
             tg = (words[i], words[i+1], words[i+2])
             if tg in trigrams:
-                return -5.0 # hard fail on loops
+                return -5.0 # Давталт илэрвэл хатуу шийтгэнэ, GGs
             trigrams.add(tg)
 
-    # Fluency Gate
+    # Fluency Gate (Утгагүй текстийг хаах)
     if fluency_score < fluency_threshold:
-        return -5.0 # reject garbage
+        return -5.0
 
     rr = float(r) + 0.5 * fluency_score
     rr = max(-reward_clip_max, min(reward_clip_max, rr))
@@ -525,8 +557,7 @@ def compute_masked_advantages(rewards, n_prompts, group_size, use_std_norm=True)
 
     adv  = (rg - mean) / std if use_std_norm else (rg - mean)
 
-    # Mask: prevent cold-start stall by keeping slightly negative samples
-    # if they are better than the group average.
+    # Mask, Хэт муу үр дүнгүүдийг сургалтад оруулахгүй байх (Cold-start асуудлаас сэргийлнэ)
     mask = (rg > -1.0).astype(np.float32)
     adv  = adv * mask
 
@@ -564,18 +595,19 @@ def grpo_train_step(state, frozen_ref_params, rollout_seqs, behavior_logps, adva
         onehot       = jax.nn.one_hot(targ_gen, vocab_size)
         logp_new     = jnp.sum(logp_all * onehot, axis=-1)
 
-        # Ratio calc (valid because grpo_temp=1.0)
+        # Ratio тооцоолол
         ratio        = jnp.exp(logp_new - behavior_logps)
         ratio_clip   = jnp.clip(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon)
         adv_sg       = jax.lax.stop_gradient(advantages)[:, None]
 
+        # PPO Loss
         surr1        = ratio      * adv_sg
         surr2        = ratio_clip * adv_sg
         pg_loss      = -jnp.mean(jnp.minimum(surr1, surr2))
 
         ent          = entropy_from_logits(logits_gen.reshape((-1, vocab_size)))
 
-        # KL vs Frozen Ref
+        # KL Divergence vs Frozen Reference Model
         ref_logits   = unroll_logits_eval(frozen_ref_params, inputs)[:, gen_start:gen_end, :]
         kl           = kl_from_logits(
             logits_gen.reshape((-1, vocab_size)),
@@ -605,7 +637,7 @@ def sample_inference(params, prompt_text, n_samples=3):
 print(f"Filtered (Positive) Stories: {len(positive_stories)} / {len(all_stories)}")
 print(f"Vocab size                 : {vocab_size}")
 
-print("\n=== PHASE 1: SFT (Bias to Positive Distribution) ===")
+print("\n=== PHASE 1: SFT үе шат ===")
 sft_drop_key = jax.random.PRNGKey(seed + 111)
 
 for step in range(sft_total_steps):
@@ -637,7 +669,7 @@ grpo_drop_key     = jax.random.PRNGKey(seed + 222)
 for update in range(grpo_total_updates):
     p_all = grpo_all_story_prob(update)
 
-    # Mix prompts (positive bias vs general robustness)
+    # Prompt холих (Эерэг bias болон ерөнхий тогтвортой байдлыг хангах)
     distinct_prompts_list = []
     for _ in range(prompts_per_update):
         src = all_stories if (np.random.rand() < p_all) else positive_stories
@@ -651,7 +683,7 @@ for update in range(grpo_total_updates):
 
     key = jax.random.PRNGKey(np.random.randint(0, 2**31 - 1))
 
-    # Rollout (temp=1.0)
+    # Rollout үүсгэх (temp=1.0)
     rollout_seqs, behavior_logps = generate_rollout(
         actor_old_params,
         prompts_j       ,
@@ -667,14 +699,14 @@ for update in range(grpo_total_updates):
 
     rewards          = np.zeros((rollout_ids.shape[0],), dtype=np.float32)
     for i in range(rollout_ids.shape[0]):
-        # Hybrid Reward
+        # Hybrid Reward тооцох
         r = reward_hybrid(
             decode_ids(rollout_ids[i, prompt_len:]),
             float(fluency_scores[i])
         )
         rewards[i] = r
 
-    # Masked Advantages
+    # Masked Advantages тооцох
     advantages, mean_r, mean_std = compute_masked_advantages(
         rewards, prompts_per_update, group_size, use_std_advantage
     )

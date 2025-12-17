@@ -130,7 +130,7 @@ def actor_inference(params, x):
 def backpropagate_actor(optimizer_state, actor_model_params, props):
     # props[0] - states     (B, S)
     # props[1] - actions    (B,)
-    # props[2] - advantages (B,)   (critic-less: already computed externally)
+    # props[2] - advantages (B,)  
     def loss_fn(params):
         action_probas = actor_module.apply({'params': params}, props[0])
 
@@ -192,7 +192,6 @@ def rollout_trajectory(group_member_id, actor_model_params, seed, epsilon):
 
         step += 1
 
-        # must advance state
         state = next_state
 
         if done_boundary:
@@ -200,7 +199,7 @@ def rollout_trajectory(group_member_id, actor_model_params, seed, epsilon):
 
     trajectory_length = step
 
-    # Outcome / episodic return for GRPO advantage:
+    # Outcome / episodic return for GRPO advantage
     #   in this sparse setup it's either 0.0 or sparse_reward_value.
     total_reward = float(np.sum(rewards[:trajectory_length])) if trajectory_length > 0 else 0.0
 
