@@ -8,24 +8,24 @@
 # хүн шиг задалж боддог (Reasoning) болгож сургах явдал юм.
 #
 # Машин сургалтын арга барил:
-# - Нэг бодлогыг модельд өгөөд олон янзаар бодуулна (Rollouts)
-# - Хариулт бүрийг <think>, <answer> tag ашигласан байдал болон
-#   эцсийн хариу зөв эсэхээр нь дүгнэнэ (Reward Function)
-# - Gradient Accumulation ашиглан VRAM хэмнэж, бүлэг дотроо 
-#   хамгийн сайн байсанд нь урам өгч (Advantage) сургана
+# - Prompt Masking: Асуултыг (Prompt) сургалтад оруулахгүй, зөвхөн 
+#   моделийн өөрийнх нь үүсгэсэн хариулт (Completion) дээр сургана
+# - Stable Advantage: Бүлэг доторх оноог харьцуулахдаа STD-д хуваахгүй
+#   Mean Centering + Clipping хийж тогтворжуулна
+# - KL Divergence тооцохдоо padding болон prompt хэсгийг хасна
+# - Gradient Accumulation: VRAM хэмнэх үүднээс 1, 1-ээр нь цувуулж сургана
 #
 # Тохиргоо:
-# Hardware : RTX 5070 Ti (12GB VRAM-д тааруулсан тохиргоо)
+# Hardware : RTX 5070 Ti (12GB VRAM)
 # Precision: bfloat16 (Санах ойг 2 дахин хэмнэнэ)
 #
 
 import os
-# JAX санах ойн хуваарилалтыг хязгаарлах (VRAM дүүрэхээс сэргийлнэ)
+# JAX санах ойн хуваарилалтыг хязгаарлах буюу VRAM дүүрэхээс сэргийлнэ
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"  ] = "platform"
 
 import re
-import time
 import random
 import numpy as np
 import jax
@@ -33,7 +33,6 @@ import jax.numpy as jnp
 import optax
 from flax import jax_utils
 from flax.training import train_state
-from flax.traverse_util import flatten_dict, unflatten_dict
 from transformers import AutoTokenizer, FlaxLlamaForCausalLM
 from datasets import load_dataset
 
@@ -43,14 +42,15 @@ jax.config.update("jax_default_matmul_precision", "tensorfloat32")
 seed = 42
 np.random.seed(seed)
 random.seed(seed)
-key = jax.random.PRNGKey(seed)
+# JAX Random Key-ийг глобал хувьсагчаар биш, loop дотор дамжуулж ашиглана
+init_key = jax.random.PRNGKey(seed)
 
 
 # HYPERPARAMETERS (12GB VRAM SAFE)
 
 # Модель болон Датасет
 model_id            = "HuggingFaceTB/SmolLM2-1.7B-Instruct"
-max_seq_len         = 1024      # Accumulation ашиглаж байгаа тул урт байж болно
+max_ctx_len         = 2048      # Моделийн тохиргооноос дараа нь шинэчилнэ
 max_gen_len         = 512       # Моделийн "бодох" дээд хязгаар
 
 # GRPO Сургалтын тохиргоо
@@ -58,9 +58,10 @@ total_updates       = 200       # Демо учраас цөөхөн алхам 
 group_size          = 4         # Нэг асуултыг 4 янзаар бодуулж өрсөлдүүлнэ
 mini_batch_size     = 1         # GPU дээр нэг удаад нэг л prompt оруулна
 learning_rate       = 2e-6      # Мэдлэгээ мартахгүйгээр бага багаар сайжрах хурд
-ppo_epochs          = 1         # Нэг rollout дээр хэдэн удаа давтаж сургах вэ
+ppo_epochs          = 2         # Нэг rollout дээр хэдэн удаа давтаж сургах вэ
 clip_epsilon        = 0.2       # PPO clipping range (Хэт огцом өөрчлөлтөөс сэргийлнэ)
 kl_beta             = 0.04      # Хуучин моделиосоо хэт хол зөрөхгүй байх тохиргоо
+adv_clip_range      = 5.0       # Advantage-ийг хэт савлуулахгүйн тулд хязгаарлана
 
 # System Prompt
 system_prompt_text = (
@@ -71,9 +72,9 @@ system_prompt_text = (
 )
 
 print("="*50)
-print("  TINY REASONER: GRPO + ACCUMULATION TRAINING START")
+print("  MINIMUM VIABLE REASONER: GRPO TRAINING")
 print(f"  Model: {model_id}")
-print(f"  Device: {jax.devices()[0]}")
+print(f"  Updates: {total_updates} | Group: {group_size}")
 print("="*50 + "\n")
 
 
@@ -96,13 +97,12 @@ def format_gsm8k_prompt(question):
         {"role": "system", "content": system_prompt_text},
         {"role": "user"  , "content": question          }
     ]
-    # Tokenizer-ийг дараа нь ашиглах тул энд түүхий текст буцаана
     return messages
 
 
 # MODEL & TOKENIZER SETUP
 
-print("[1/3] Tokenizer болон Model ачаалж байна...")
+print("Tokenizer болон Model ачаалж байна...")
 tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
 # Padding token байхгүй бол EOS-ийг ашиглана (Generation хийхэд хэрэгтэй)
 if tokenizer.pad_token is None:
@@ -115,15 +115,47 @@ model = FlaxLlamaForCausalLM.from_pretrained(
     dtype=jnp.bfloat16, # GPU санах ойг 2 дахин хэмнэнэ
 )
 
+# Моделийн өөрийнх нь тохиргооноос Context Window-г уншиж авах
+# Хэрэв олдохгүй бол анхны тохируулсан 2048-аар явна
+try:
+    max_ctx_len = int(getattr(model.config, "max_position_embeddings", max_ctx_len))
+except Exception:
+    pass
+
 # Reference Model (Хөлдөөсөн хувилбар)
 # Санах ой хэмнэхийн тулд жинхэнэ copy үүсгэхгүй
 # JAX-д params_ref = model.params гэхэд санах ойд шинээр зай эзлэхгүй зөвхөн pointer заана 
 # Сургалтын явцад train_state.params өөрчлөгдөхөд params_ref хуучнаараа үлдэнэ
-# Copy-on-write шиг ажиллана
 params     = model.params
 params_ref = model.params 
 
-print("[2/3] Модель амжилттай ачаалагдлаа. (Reasoning хийхэд бэлэн)")
+print(f"Модель амжилттай ачаалагдлаа. (Context: {max_ctx_len})")
+
+
+# JAX HELPERS
+
+def build_attn_mask_from_eos(seqs, eos_id, prompt_len):
+    """
+    EOS token болон PAD token ижилхэн ID-тай байх үед (SmolLM/Llama)
+    энгийн (seq != pad) mask ашиглавал өгүүлбэр дундах EOS-ийг mask хийх эрсдэлтэй.
+    Тиймээс Prompt-ийн дараа гарч ирсэн АНХНЫ EOS token хүртэл л хүчинтэйд тооцно.
+    """
+    # seqs: [Batch, Time]
+    T            = seqs.shape[1]
+    # Prompt хэсгийг алгасаад хайх
+    after_prompt = (jnp.arange(T)[None, :] >= prompt_len).astype(jnp.int32)
+    eos_hits     = (seqs == eos_id).astype(jnp.int32) * after_prompt
+    
+    # Хамгийн эхний EOS-ийн байрлалыг олох
+    first_eos    = jnp.argmax(eos_hits, axis=1)
+    has_eos      = jnp.any(eos_hits == 1, axis=1)
+    
+    # EOS байхгүй бол дуустал, байвал EOS-ийг оролцуулаад таслах
+    end_idx      = jnp.where(has_eos, first_eos + 1, T)
+    
+    # Mask үүсгэх [B, T]
+    mask         = (jnp.arange(T)[None, :] < end_idx[:, None]).astype(jnp.int32)
+    return mask
 
 
 # REWARD FUNCTIONS (дүн тавьдаг багш)
@@ -152,7 +184,8 @@ def extract_ground_truth(text):
 
 def compute_rewards(rollouts, ground_truth_text):
     """
-    GRPO-ийн гол арга, текстийг уншиж оноо өгөх хэсэг
+    GRPO-ийн гол арга, текстийг уншиж оноо өгөх хэсэг.
+    Урт текстэд өгдөг байсан бонусыг багасгаж, зөв хариултад илүү төвлөрнө.
     """
     rewards  = []
     true_val = extract_ground_truth(ground_truth_text)
@@ -161,29 +194,35 @@ def compute_rewards(rollouts, ground_truth_text):
         score = 0.0
         
         # FORMAT REWARDS (XML бүтцээ зөв бичсэн эсэх)
-
-        # <think> tag байгаа эсэх, бодож эхэлсэн үү?
-        if "<think>" in text:
-            score += 0.2
-            if "</think>" in text:
-                score += 0.2
-                # Бодолт хэт богино биш байх ёстой, худлаа таагаагүй байх ёстой
-                thought_content = text.split("<think>")[1].split("</think>")[0]
-                if len(thought_content) > 100:
-                    score += 0.1
+        has_think  = "<think>" in text and "</think>" in text
+        has_answer = "<answer>" in text and "</answer>" in text
         
-        # <answer> tag байгаа эсэх
-        if "<answer>" in text and "</answer>" in text:
-            score += 0.3
-            
-            # CORRECTNESS REWARD, хариу зөв үү
+        if has_think:
+            score += 0.1
+        
+        if has_answer:
+            # Хариултын таг дотор тоо, цэг, таслал, $, зайгаас өөр "хог" байвал шийтгэнэ
+            # Энэ нь моделийг зөвхөн тоо бичдэг болгоход тусална (Strict Parsing)
+            ans_content = text.split("<answer>")[1].split("</answer>")[0].strip()
+            if re.search(r'[^0-9\-\.\,\$\s]', ans_content):
+                score -= 0.5
+            else:
+                score += 0.2
+                
             pred_val = extract_xml_answer(text)
+            
+            # CORRECTNESS REWARD (Хариу зөв үү?)
             if pred_val is not None and true_val is not None:
-                # Маш жижиг зөрүүг (floating point error) зөвшөөрнө
                 if abs(pred_val - true_val) < 1e-4:
-                    score += 2.0  # Зөв бол том шагнал
+                    score += 2.0
+                    # Зөв хариулсан тохиолдолд л reasoning урт байвал урамшуулна
+                    # Гэхдээ <think> байгаа эсэхийг заавал шалгана (Crash-аас сэргийлнэ)
+                    if has_think:
+                        thought = text.split("<think>")[1].split("</think>")[0]
+                        if len(thought) > 100: 
+                            score += 0.2
                 else:
-                    score -= 0.5  # Буруу бол шийтгэл
+                    score -= 0.5
         else:
             # Хариултын tag байхгүй бол формат буруу гэж үзээд хатуу шийтгэнэ
             score -= 1.0
@@ -192,20 +231,24 @@ def compute_rewards(rollouts, ground_truth_text):
         
     return np.array(rewards)
 
-def compute_advantages(rewards):
-    """ Group доторх дундажтай харьцуулж хэн нь 'онц', хэн нь 'муу' сурсныг тооцно """
-    mean = np.mean(rewards)
-    std  = np.std(rewards) + 1e-8
-    # Normalize rewards 
-    advantages = (rewards - mean) / std
+def compute_advantages_stable(rewards):
+    """ 
+    Group доторх дундажтай харьцуулж Advantage тооцно.
+    Жижиг group size үед STD-д хуваах нь эрсдэлтэй тул
+    зөвхөн Mean Centering хийгээд Clipping хийнэ.
+    """
+    mean       = np.mean(rewards)
+    advantages = rewards - mean
+    # Хэт өндөр утгыг хайчилна (Stable Training)
+    advantages = np.clip(advantages, -adv_clip_range, adv_clip_range)
     return advantages
 
 
-# TRAINING STATE & STEP FUNCTION (GRADIENT ACCUMULATION)
+# TRAINING STATE & OPTIMIZER
 
 # Adafactor optimizer болон MultiSteps ашиглан VRAM хэмнэнэ
 # every_k_schedule=group_size гэдэг нь group_size удаа алхам хийсний дараа 
-# сая нэг удаа жингээ шинэчилнэ гэсэн үг (Accumulation)
+# сая нэг удаа жингээ шинэчилнэ гэсэн үг (Gradient Accumulation)
 optimizer = optax.chain(
     optax.clip_by_global_norm(1.0),
     optax.adafactor(learning_rate=learning_rate)
@@ -219,93 +262,100 @@ train_state_obj = train_state.TrainState.create(
 )
 
 @jax.jit
-def train_step(state, params_ref, input_ids, attention_mask, advantages, old_log_probs):
+def train_step(state, params_ref, input_ids, attention_mask, advantages, old_log_probs, prompt_len):
     """
     GRPO Update Step (PPO Logic)
-    Accumulation хийж байгаа тул энэ функц жижиг batch (1 ширхэг) дээр ажиллана
+    Prompt Masking болон KL calculation агуулсан
     """
     def loss_fn(p):
-        # Одоогийн моделийн Logits тооцох
         outputs = state.apply_fn(input_ids=input_ids, attention_mask=attention_mask, params=p)
         logits  = outputs.logits
+        all_lps = jax.nn.log_softmax(logits, axis=-1)
         
-        # Сүүлийн token-оос бусад бүх token-ий log_softmax авах
-        # (Shift хийх шаардлагатай: input[i] нь input[i+1]-ийг таамаглана)
-        all_log_probs = jax.nn.log_softmax(logits, axis=-1)
-        
-        # Target Log Probs (яг сонгосон token-уудын магадлал)
-        # input_ids shape: [B, SeqLen] -> action_log_probs shape: [B, SeqLen-1]
-        action_log_probs = jnp.take_along_axis(
-            all_log_probs[:, :-1, :], 
+        # Action Log Probs (Shifted right)
+        # input[i] нь input[i+1]-ийг таамаглана
+        act_lps = jnp.take_along_axis(
+            all_lps[:, :-1, :], 
             input_ids[:, 1:, None], 
             axis=-1
         ).squeeze(-1)
         
-        # Masking (Padding хэсгийг тооцохгүй, зөвхөн жинхэнэ текст дээр сурна)
-        loss_mask = attention_mask[:, 1:]
+        # Prompt Masking
+        # Зөвхөн prompt-оос хойшхи token-ууд дээр сургана
+        # Асуултыг цээжлэх биш, хариулт дээр сайжрах ёстой
+        seq_len   = input_ids.shape[1]
+        pos_idxs  = jnp.arange(seq_len - 1)[None, :] 
+        gen_mask  = (pos_idxs >= (prompt_len - 1)).astype(jnp.int32)
+        
+        # Padding mask + Gen mask
+        # attention_mask[:, 1:] нь padding-ийг хасна
+        loss_mask = attention_mask[:, 1:] * gen_mask
         
         # PPO Ratio Calculation
-        # old_log_probs нь гадна талд аль хэдийн shift хийгдсэн тул шууд ашиглана
-        ratio = jnp.exp(action_log_probs - old_log_probs)
+        ratio = jnp.exp(act_lps - old_log_probs)
         
         # Surrogate Loss - PPO-ийн гол томъёо
-        adv_broadcast = advantages[:, None] 
-        surr1         = ratio * adv_broadcast
-        surr2         = jnp.clip(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * adv_broadcast
-        ppo_loss      = -jnp.minimum(surr1, surr2)
+        adv_broad = advantages[:, None] 
+        surr1     = ratio * adv_broad
+        surr2     = jnp.clip(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * adv_broad
+        ppo_loss  = -jnp.minimum(surr1, surr2)
         
-        # KL Divergence Penalty (Хэт галзуурахаас сэргийлнэ)
-        ref_outputs   = state.apply_fn(input_ids=input_ids, attention_mask=attention_mask, params=params_ref)
-        ref_logits    = ref_outputs.logits
-        ref_log_probs = jax.nn.log_softmax(ref_logits, axis=-1)
+        # KL Divergence (Зөвхөн generated tokens дээр)
+        ref_out   = state.apply_fn(input_ids=input_ids, attention_mask=attention_mask, params=params_ref)
+        ref_lps   = jax.nn.log_softmax(ref_out.logits, axis=-1)
         
-        kl_div = jnp.exp(all_log_probs) * (all_log_probs - ref_log_probs)
-        kl_div = jnp.sum(kl_div, axis=-1) # Sum over vocab
+        kl_full   = jnp.sum(jnp.exp(all_lps) * (all_lps - ref_lps), axis=-1)
+        kl_gen    = kl_full[:, :-1] 
         
-        # Total Loss = PPO Loss + KL Penalty
-        total_loss = jnp.sum((ppo_loss + kl_beta * kl_div[:, :-1]) * loss_mask) / jnp.sum(loss_mask)
+        # Total Loss
+        # Mask ашиглан дунджийг зөв тооцох (Sum / Count)
+        valid_toks = jnp.sum(loss_mask) + 1e-8
+        final_loss = jnp.sum((ppo_loss + kl_beta * kl_gen) * loss_mask) / valid_toks
         
-        return total_loss, (jnp.mean(kl_div), jnp.mean(ratio))
+        # Stats for logging
+        avg_kl     = jnp.sum(kl_gen * loss_mask) / valid_toks
+        avg_ratio  = jnp.sum(ratio * loss_mask) / valid_toks
+        
+        return final_loss, (avg_kl, avg_ratio)
 
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    (loss, (mean_kl, mean_ratio)), grads = grad_fn(state.params)
+    (loss, (m_kl, m_ratio)), grads = grad_fn(state.params)
     
     # MultiSteps optimizer ашиглаж байгаа тул apply_gradients нь
     # градиентыг цуглуулж байгаад k алхмын дараа жинг шинэчилнэ
     new_state = state.apply_gradients(grads=grads)
-    
-    return new_state, loss, mean_kl
+    return new_state, loss, m_kl, m_ratio
 
-# Generate функц (Олон хувилбараар бодуулж үзэх)
-def generate_rollouts_batched(state, prompt_ids, prompt_mask):
-    # Prompt-ийг group_size удаа хувилна
-    # Inference дээр VRAM ачаалал бага тул batch-аар хийж болно
-    # Хэрэв энд OOM өгвөл loop-д оруулж болно
+def generate_rollouts_batched(state, prompt_ids, prompt_mask, key, max_new):
+    """
+    Rollout generation хийхдээ explicit PRNG key болон уртын хязгаарыг ашиглана.
+    Мөн EOS token-ийг зааж өгснөөр модель дуусах цэгээ мэднэ.
+    """
     batch_input = jnp.repeat(prompt_ids, group_size, axis=0)
     
-    # Flax generate ашиглах
     outputs = model.generate(
         batch_input,
-        params         = state.params          ,
-        max_new_tokens = max_gen_len           ,
-        do_sample      = True                  ,
-        temperature    = 0.8                   ,  # Reasoning хийхэд хэт бага биш, хэт их биш temp зүгээр
-        top_k          = 50                    ,
+        params         = state.params,
+        max_new_tokens = max_new,
+        do_sample      = True,
+        temperature    = 0.8,
+        top_k          = 50,
         pad_token_id   = tokenizer.pad_token_id,
-        prng_key       = jax.random.PRNGKey(int(time.time()))
+        eos_token_id   = tokenizer.eos_token_id, # Generation зогсох нөхцөл
+        prng_key       = key 
     )
-    
     return outputs.sequences
 
 
 # MAIN TRAINING LOOP
 
 print("\n" + "="*50)
-print("  PHASE 2: GRPO LOOP - Reasoner болгох сургалт")
-print(f"  Updates: {total_updates} | Group Size: {group_size}")
+print("  PHASE 2: GRPO LOOP (ACCUMULATED + MASKED)")
+print(f"  Updates: {total_updates} | Group: {group_size} | Epochs: {ppo_epochs}")
 print("="*50 + "\n")
 
 step_counter = 0
+curr_key     = init_key
 
 while step_counter < total_updates:
     # Датасетээс санамсаргүй нэг жишээ авах
@@ -316,76 +366,93 @@ while step_counter < total_updates:
     
     # Prompt бэлтгэх
     messages   = format_gsm8k_prompt(question)
-    input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    input_text += "<think>"
+    input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True) + "<think>"
+    inputs     = tokenizer(input_text, return_tensors="np", max_length=max_ctx_len, truncation=True)
     
-    inputs      = tokenizer(input_text, return_tensors="np", max_length=max_seq_len, truncation=True)
-    prompt_ids  = jnp.array(inputs['input_ids'     ])
-    prompt_mask = jnp.array(inputs['attention_mask'])
+    prompt_ids = jnp.array(inputs['input_ids'])
+    prompt_len = prompt_ids.shape[1]
     
-    # Rollout үе шат (Олон хувилбараар бодуулах)
+    # Context цонх шалгалт
+    # Prompt хэт урт бол generation хийх зай үлдэхгүй тул алгасна
+    if prompt_len >= max_ctx_len - 50:
+        continue
+        
+    # Safe max tokens calculation (Context limit-ээс хэтрэхгүй байх)
+    # 0 болон хасах утга гарахаас сэргийлж дор хаяж 1 token үүсгэнэ
+    safe_max_new = max(1, min(max_gen_len, max_ctx_len - prompt_len))
+    
+    # Rollout үе шат
+    curr_key, gen_key = jax.random.split(curr_key)
     try:
-        sequences = generate_rollouts_batched(train_state_obj, prompt_ids, prompt_mask)
+        sequences = generate_rollouts_batched(train_state_obj, prompt_ids, None, gen_key, safe_max_new)
     except Exception as e:
-        print(f"[Warning] Generation failed (OOM?): {e}")
+        print(f"[Gen Error] {e}")
         jax.clear_caches()
         continue
 
-    # Reward тооцоолох (Багшийн үнэлгээ)
+    # Reward & Advantage тооцох
     decoded_texts = tokenizer.batch_decode(sequences, skip_special_tokens=True)
     rewards       = compute_rewards(decoded_texts, ground_truth_raw)
-    advantages    = compute_advantages(rewards)
+    advantages    = compute_advantages_stable(rewards) 
     
-    # Old Log Probs (No Grad) - Хуучин мэдлэгтэйгээ харьцуулахын тулд
-    attn_mask = (sequences != tokenizer.pad_token_id).astype(jnp.int32)
+    # Old Log Probs (Training step дотор биш гадна талд бүтнээр нь авна)
+    # Энгийн (seq != pad) биш, EOS-ийг зөв тооцох тусгай mask ашиглана
+    attn_mask = build_attn_mask_from_eos(sequences, tokenizer.eos_token_id, prompt_len)
+    
     def get_log_probs(p, ids, mask):
-        logits    = model(input_ids=ids, attention_mask=mask, params=p).logits
-        log_probs = jax.nn.log_softmax(logits, axis=-1)
+        logits = model(input_ids=ids, attention_mask=mask, params=p).logits
+        lps    = jax.nn.log_softmax(logits, axis=-1)
         # Shift хийгдсэн (сүүлийн token хасагдсан) утга буцаана
-        return jnp.take_along_axis(log_probs[:, :-1, :], ids[:, 1:, None], axis=-1).squeeze(-1)
+        return jnp.take_along_axis(lps[:, :-1, :], ids[:, 1:, None], axis=-1).squeeze(-1)
 
     try:
         old_log_probs = get_log_probs(train_state_obj.params, sequences, attn_mask)
     except Exception as e:
-        print(f"[Ref Error] {e}")
-        jax.clear_caches()
-        continue
+         print(f"[Ref Error] {e}")
+         jax.clear_caches()
+         continue
 
-    # Train Step - Gradient Accumulation Loop
-    # VRAM хэмнэхийн тулд 4 жишээг 1, 1-ээр нь цувуулж гүйлгэнэ
-    adv_jax    = jnp.array(advantages)
-    batch_loss = 0
-    batch_kl   = 0
+    # Training Step - Gradient Accumulation Loop
+    adv_jax     = jnp.array(advantages)
+    batch_loss  = 0
+    batch_kl    = 0
+    batch_ratio = 0
     
     try:
-        for i in range(group_size):
-            # i-р жишээг сугалж авах (Shape: [1, SeqLen])
-            # Энэ нь VRAM-д маш бага ачаалал өгнө
-            sub_seq  = sequences    [i:i+1]
-            sub_mask = attn_mask    [i:i+1]
-            sub_adv  = adv_jax      [i:i+1]
-            sub_old  = old_log_probs[i:i+1]
-            
-            # Энэ функц group_size удаа дуудагдана 
-            # MultiSteps optimizer үүнийг автоматаар цуглуулж байгаад 
-            # хамгийн сүүлийн алхам дээр жингээ шинэчилнэ
-            train_state_obj, loss_val, kl_val = train_step(
-                train_state_obj, 
-                params_ref     , 
-                sub_seq        , 
-                sub_mask       , 
-                sub_adv        , 
-                sub_old
-            )
-            batch_loss += loss_val
-            batch_kl   += kl_val
+        # PPO Epochs: Нэг rollout дээр олон удаа давтаж сургах нь үр дүнтэй
+        # Gradient accumulation учир epoch бүрт optimizer update хийгдэнэ
+        for _ in range(ppo_epochs):
+            for i in range(group_size):
+                sub_seq  = sequences    [i:i+1]
+                sub_mask = attn_mask    [i:i+1]
+                sub_adv  = adv_jax      [i:i+1]
+                sub_old  = old_log_probs[i:i+1]
+                
+                # Prompt_len-ийг дамжуулж зөв masking хийнэ
+                train_state_obj, loss_val, kl_val, ratio_val = train_step(
+                    train_state_obj, 
+                    params_ref     , 
+                    sub_seq        , 
+                    sub_mask       , 
+                    sub_adv        , 
+                    sub_old        ,
+                    prompt_len
+                )
+                batch_loss  += loss_val
+                batch_kl    += kl_val
+                batch_ratio += ratio_val
             
         step_counter += 1
         
         # Явцыг хэвлэж харах
         if step_counter % 5 == 0:
-            avg_r = np.mean(rewards)
-            print(f"[Step {step_counter:3d}] Reward: {avg_r:+.2f} | Loss: {batch_loss/group_size:.4f} | KL: {batch_kl/group_size:.4f}")
+            avg_r     = np.mean(rewards)
+            divisor   = group_size * ppo_epochs
+            avg_loss  = batch_loss  / divisor
+            avg_kl_v  = batch_kl    / divisor
+            avg_ratio = batch_ratio / divisor
+            
+            print(f"[Step {step_counter:3d}] Reward: {avg_r:+.2f} | Loss: {avg_loss:.4f} | KL: {avg_kl_v:.4f} | Ratio: {avg_ratio:.4f}")
             
         if step_counter % 20 == 0:
             best_idx = np.argmax(rewards)
@@ -400,12 +467,11 @@ while step_counter < total_updates:
             print("-"*30 + "\n")
             
     except Exception as e:
-        print(f"[Error] Update step failed: {e}")
+        print(f"[Train Error] {e}")
         jax.clear_caches()
         continue
 
 print("\n=== СУРГАЛТ АМЖИЛТТАЙ ДУУСЛАА ===")
-print("Одоо модель <think> tag ашиглан боддог болсон байх ёстой.")
 
 # Төгсгөлийн шалгалт
 test_q   = "If I have 5 apples and eat 2, how many do I have?"
@@ -417,7 +483,8 @@ final_gen = model.generate(
     jnp.array(test_tok['input_ids']),
     params         = train_state_obj.params,
     max_new_tokens = 200,
-    do_sample      = False  # Шалгалтын үед санамсаргүй байдлыг унтраана (Greedy)
+    do_sample      = False,
+    eos_token_id   = tokenizer.eos_token_id
 )
 print("\nFINAL TEST ANSWER:")
 print(tokenizer.decode(final_gen.sequences[0], skip_special_tokens=True))
