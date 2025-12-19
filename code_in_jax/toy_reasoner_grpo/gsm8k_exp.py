@@ -17,7 +17,7 @@ ds = load_dataset("gsm8k", "main")
     
 # Train болон Test хэсгийн хэмжээг харах
 print(f"Train size: {len(ds['train'])}")
-print(f"Test size:  {len(ds['test'])}")
+print(f"Test size:  {len(ds['test' ])}")
 print("-" * 30)
 
 # Жишээ өгөгдөл авч шалгах

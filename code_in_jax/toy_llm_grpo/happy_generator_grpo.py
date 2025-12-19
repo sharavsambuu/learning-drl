@@ -1,28 +1,21 @@
 #
-# HAPPY TEXT GENERATOR WITH GRPO (TOY LLM HELLO WORLD)
+# HAPPY TEXT GENERATOR TRANSFORMER WITH GRPO TUNING
 #
 # Зорилго
-# Энэхүү код нь орчин үеийн LLM буюу хэлний том моделийн сургалтын арга барил болох 
-# GRPO алгоритмыг энгийн түвшинд хэрэгжүүлж үзэх ингэхдээ TinyStories өгөгдөл дээр 
+# Энэхүү код нь орчин үеийн LLM ийг alignment хийхэд хэрэглэдэг сургалтын арга барил болох 
+# GRPO алгоритмыг хамгийн хялбар түвшинд хэрэгжүүлж үзэх, ингэхдээ TinyStories өгөгдөл дээр 
 # суурилан англи хэл сурч улмаар GRPO ашиглан үргэлж эерэг аз жаргалтай түүх зохиодог 
-# Happy текст үүсгүүр бүтээх явдал юм
+# байхаар happy текст үүсгүүр бүтээх явдал юм.
 #
-# Архитектур
-# Backbone нь 2 давхаргат LSTM сүлжээний хамтаар
-# Global Attention буюу тэмдэгт бүр өмнөх түүхээ харах боломжтой бүтэц
-#
-# Сургалтын үе шатууд
+# Машин сургалтын үе шатууд
 # PHASE 1 буюу SFT (Supervised Fine-Tuning)
-# Модель үсэг үг өгүүлбэр зүйг сурна
-# Зорилго нь хэлний дүрмийн хувьд зөв текст бичдэг болох
+#   Модель үсэг, үг бүтэх, өгүүлбэр зүй гэх мэтийг сурна.
+#   Зорилго нь хэлний дүрмийн хувьд зөв текст бичдэг болох.
 #
 # PHASE 2 буюу GRPO (Alignment Reinforcement Learning)
-# Модель Happy байх шагнал буюу Reward ын төлөө суралцана
-# Critic модель ашиглахгүйгээр Memory Efficient байдлаар өөрийн үүсгэсэн олон хувилбарууд 
-# дундаас шилдэгийг нь сонгох замаар бодлогоо шинэчилнэ
-#
-# Тохиргоо 
-# 12GB GPU Optimized
+#   Модель happy байх шагнал буюу Reward-ын төлөө суралцана.
+#   Critic модель ашиглахгүйгээр Memory Efficient байдлаар өөрийн үүсгэсэн олон 
+#   хувилбарууд дундаас шилдгийг нь сонгох замаар alignment хийнэ.
 #
 
 import os
@@ -46,31 +39,31 @@ end_of_text_token     = "<|endoftext|>"
 seed                  = 42
 
 
-# HYPERPARAMETERS (12GB VRAM зориулсан тохиргоо)
+# HYPERPARAMETERS, RTX 5070 Ti 12GB VRAM зориулсан тохиргоо
 
 # SFT буюу Supervised Fine-Tuning үе шатны тохиргоо
 sft_total_steps       = 5000
-sft_batch_size        = 64      # GPU тооцооллох хэсгийг завгүй байлгана 
-sft_seq_len           = 256     # 12GB VRAM д багтах аюулгүй урт
-sft_learning_rate     = 0.0015
-sft_warmup_steps      = 400
+sft_batch_size        = 128     
+sft_seq_len           = 256     # Context window
+sft_learning_rate     = 5e-4    
+sft_warmup_steps      = 200
 sft_sample_freq       = 500     # Хэдэн алхам тутамд SFT үр дүнг хэвлэж харах вэ
 
 # GRPO буюу Reinforcement Learning үе шатны тохиргоо
 grpo_total_updates    = 1500
-prompts_per_update    = 4       # Нэг алхамд 4 prompt үржих нь 16 group тэнцүү 64 rollout буюу Batch тай ижил
 group_size            = 16      # GRPO ийн харьцуулалт хийх бүлгийн хэмжээ
-gen_len               = 256     # Үүсгэх текстийн урт SFT тэй ижил
-grpo_temp             = 1.0     # Текст үүсгэх үеийн санамсаргүй байдал
+prompts_per_update    = 4       # Нэг алхамд 4 prompt үржихдэг нь 16 group буюу 64 rollout
+gen_len               = 256     # Үүсгэх текстийн урт
+grpo_temp             = 0.9     # Текст үүсгэх температур
 grpo_sample_freq      = 20      # Хэдэн update тутамд үр дүнг хэвлэж харах вэ
 
 # PPO буюу Proximal Policy Optimization тохиргоо
 ppo_epochs            = 3
-mini_batch_size       = 64      # Update хийх хурдыг дэмжинэ
+mini_batch_size       = 64      
 clip_epsilon          = 0.2
-entropy_coeff         = 0.02    # Моделийг хэт нэг хэвийн болохоос сэргийлнэ
-grpo_lr               = 0.0004
-max_grad_norm         = 0.5
+entropy_coeff         = 0.01    
+grpo_lr               = 2e-5    # Fine-tuning үед маш бага Learning Rate хэрэг болно
+max_grad_norm         = 1.0
 
 # Dynamic KL Divergence буюу Модель галзуурахаас сэргийлэх тохиргоо
 kl_beta               = 0.04    # Анхны шийтгэлийн хэмжээ
@@ -79,10 +72,11 @@ kl_alpha              = 1.2     # Beta-г өөрчлөх хурд
 
 # Моделийн дотоод бүтцийн тохиргоо
 prompt_len            = 48
-model_max_len         = 320     # 256 нэмэх нь 48 тэнцүү 304 тул нөөцтэйгөөр 320
-num_lstm_layers       = 2
-embed_dim             = 32      # Тэмдэгт учраас бага байхад болно
-hidden_dim            = 128     # Тооцооллыг хөнгөлж Batch Size ийг нэмэх боломж олгоно
+model_max_len         = 320     # Positional Embedding-д хэрэгтэй
+num_layers            = 4       # Transformer блокуудын тоо 
+num_heads             = 4       # Multi-head attention heads
+embed_dim             = 128     # Embedding size 
+dropout_rate          = 0.1     # Overfitting-ээс сэргийлнэ
 
 # Эерэг болон сөрөг үгсийн сан
 happy_vocab = ["happy", "joy", "joyful", "smile", "smiled", "laugh", "laughed", "love", "loved", "kind", "nice", "fun", "good", "great", "amazing", "wonderful", "excited", "brave", "bright", "safe", "friend", "friends"]
@@ -95,10 +89,9 @@ random.seed(seed)
 
 # DATASET AND TOKENIZATION
 
-# Файлаас унших хэсэг
 if not os.path.exists(dataset_path):
     print(f"Анхаар {dataset_path} файл олдсонгүй Жишээ текст ашиглана")
-    raw_text = "Once upon a time there was a happy robot. It loved to smile. " * 1000
+    raw_text = "Once upon a time there was a happy robot. It loved to smile. " * 2000
 else:
     with open(dataset_path, "r", encoding="utf-8", errors="ignore") as f:
         raw_text = f.read()
@@ -127,70 +120,111 @@ def decode_ids(ids):
 corpus_text = "\n\n".join(positive_stories)
 corpus_ids  = np.array(encode_text(corpus_text), dtype=np.int32)
 
-print(f"Vocab Size: {vocab_size}")
-print(f"Total Chars: {len(corpus_ids)}")
+print(f"Vocab Size  : {vocab_size}")
+print(f"Total Chars : {len(corpus_ids)}")
 
 
-# MODEL ARCHITECTURE (TinyLLM)
+# MODEL ARCHITECTURE, TinyTransformer
 
-class TinyLLM(nn.Module):
-    vocab_size: int; embed_dim: int; hidden_dim: int; num_layers: int; max_len: int
+class CausalSelfAttention(nn.Module):
+    embed_dim: int
+    num_heads: int
 
     @nn.compact
-    def __call__(self, token_id, carry, deterministic=True):
-        # carry нь lstm states болон attention memory мөн current step index агуулна
-        lstm_carries, attn_mem, step_idx = carry
-        x = nn.Embed(self.vocab_size, self.embed_dim)(token_id)
+    def __call__(self, x, mask=None, deterministic=True):
+        head_dim = self.embed_dim // self.num_heads
+        q = nn.Dense(self.embed_dim)(x)
+        k = nn.Dense(self.embed_dim)(x)
+        v = nn.Dense(self.embed_dim)(x)
 
-        # LSTM Layers буюу дараалсан мэдээллийг боловсруулах хэсэг
-        new_carries = []
-        for i in range(self.num_layers):
-            c_i, h_i      = lstm_carries[i]
-            (c_i, h_i), h = nn.LSTMCell(self.hidden_dim, name=f"lstm_{i}")((c_i, h_i), x)
-            new_carries.append((c_i, h))
-            x = h  # LSTM ийн гаралтыг дараагийн давхарга руу дамжуулна
+        # Split heads
+        q = q.reshape(x.shape[0], x.shape[1], self.num_heads, head_dim)
+        k = k.reshape(x.shape[0], x.shape[1], self.num_heads, head_dim)
+        v = v.reshape(x.shape[0], x.shape[1], self.num_heads, head_dim)
 
-        # Global Attention Update буюу санах ойг шинэчлэх хэсэг
-        # Одоогийн LSTM ийн гаралтыг санах ойн step_idx байрлалд бичнэ
-        h_expanded = x[:, None, :]
-        attn_mem   = jax.lax.dynamic_update_slice(attn_mem, h_expanded, (0, step_idx, 0))
+        # Attention score
+        attn_weights = jnp.einsum('bqhd,bkhd->bhqk', q, k) / math.sqrt(head_dim)
+        
+        # Causal Masking (ирээдүйг харахгүй байх)
+        if mask is not None:
+            attn_weights = jnp.where(mask, attn_weights, -1e9)
+            
+        attn_weights = jax.nn.softmax(attn_weights, axis=-1)
+        
+        # Гаралтыг нэгтгэх
+        out = jnp.einsum('bhqk,bkhd->bqhd', attn_weights, v)
+        out = out.reshape(x.shape[0], x.shape[1], self.embed_dim)
+        return nn.Dense(self.embed_dim)(out)
 
-        # Attention буюу өнгөрсөн бүх мэдээлэл рүү хандах хэсэг
-        q = nn.Dense(self.hidden_dim, name="attn_q")(x)
-        k = nn.Dense(self.hidden_dim, name="attn_k")(attn_mem)
-        v = nn.Dense(self.hidden_dim, name="attn_v")(attn_mem)
+class MLP(nn.Module):
+    embed_dim: int
+    
+    @nn.compact
+    def __call__(self, x):
+        x = nn.Dense(self.embed_dim * 4)(x)
+        x = nn.gelu(x)
+        x = nn.Dense(self.embed_dim)(x)
+        return x
 
-        scores = jnp.sum(k * q[:, None, :], axis=-1) / jnp.sqrt(self.hidden_dim)
-        # Masking буюу ирээдүйн хараахан бичигдээгүй хэсгийг харахгүй болгох
-        mask   = jnp.arange(self.max_len) <= step_idx
-        scores = jnp.where(mask[None, :], scores, -1e9)
-        w      = jax.nn.softmax(scores, axis=-1)
-        ctx    = jnp.sum(v * w[:, :, None], axis=1)
+class Block(nn.Module):
+    embed_dim: int
+    num_heads: int
+    
+    @nn.compact
+    def __call__(self, x, mask=None, deterministic=True):
+        # Attention with Residual
+        x = x + CausalSelfAttention(self.embed_dim, self.num_heads)(nn.LayerNorm()(x), mask, deterministic)
+        # MLP with Residual
+        x = x + MLP(self.embed_dim)(nn.LayerNorm()(x))
+        return x
 
-        # Output Projection буюу гаралтын хэсэг
-        h_mix  = nn.Dense(self.hidden_dim)(jnp.concatenate([x, ctx], axis=-1))
-        h_mix  = nn.LayerNorm()(nn.tanh(h_mix))
-        logits = nn.Dense(self.vocab_size)(h_mix)
+class TinyTransformer(nn.Module):
+    vocab_size: int; embed_dim: int; num_layers: int; num_heads: int; max_len: int
 
-        return logits, (tuple(new_carries), attn_mem, step_idx + 1)
+    @nn.compact
+    def __call__(self, tokens, deterministic=True):
+        b, t = tokens.shape
+        
+        # Token & Positional Embeddings
+        tok_emb = nn.Embed(self.vocab_size, self.embed_dim)(tokens)
+        pos_emb = nn.Embed(self.max_len, self.embed_dim)(jnp.arange(t))
+        x = tok_emb + pos_emb[None, :, :]
+        
+        # Causal Mask (lower triangular)
+        mask = jnp.tril(jnp.ones((t, t))) == 1
+        mask = mask[None, None, :, :] # [Batch, Head, Q, K]
 
-def init_carry(batch_size):
-    # Эхлэлийн төлөвийг тэгээр дүүргэх
-    carries  = tuple((jnp.zeros((batch_size, hidden_dim)), jnp.zeros((batch_size, hidden_dim))) for _ in range(num_lstm_layers))
-    attn_mem = jnp.zeros((batch_size, model_max_len, hidden_dim))
-    return (carries, attn_mem, 0)
+        # Transformer Blocks
+        for _ in range(self.num_layers):
+            x = Block(self.embed_dim, self.num_heads)(x, mask, deterministic)
+
+        x = nn.LayerNorm()(x)
+        logits = nn.Dense(self.vocab_size)(x)
+        return logits
+
 
 # Моделийг цэнэглэн эхлүүлэх
-model  = TinyLLM(vocab_size, embed_dim, hidden_dim, num_lstm_layers, model_max_len)
-params = model.init(jax.random.PRNGKey(seed), jnp.zeros((1,), jnp.int32), init_carry(1), deterministic=True)["params"]
+model  = TinyTransformer(vocab_size, embed_dim, num_layers, num_heads, model_max_len)
+# Dummy input
+dummy_in = jnp.zeros((1, sft_seq_len), dtype=jnp.int32)
+params   = model.init(jax.random.PRNGKey(seed), dummy_in, deterministic=True)["params"]
 
 
-# JAX HELPER FUNCTIONS
+# JAX HELPERS
 
 @jax.jit
 def logprob_from_logits(logits, actions):
-    # Сонгосон токенуудын log probability-ийг тооцох
-    return jnp.take_along_axis(jax.nn.log_softmax(logits, -1), actions[:, None], 1).squeeze(1)
+    # Logits  хэлбэр нь [B, T, V] эсвэл [B, V] байж болно
+    # Actions хэлбэр нь [B, T]    эсвэл [B] байна
+    # сүүлийн хэмжээс (vocab) дээрээс сонгосон үйлдлийн магадлалыг авах хэрэгтэй (axis=-1)
+    
+    logp = jax.nn.log_softmax(logits, axis=-1)
+    
+    # Take along axis шаардлагаар actions-ийн хэмжээсийг өргөтгөх
+    # [..., None] нь төгсгөлд нь 1 хэмжээс нэмнэ -> [B, T, 1] эсвэл [B, 1]
+    selected_logp = jnp.take_along_axis(logp, actions[..., None], axis=-1)
+    
+    return selected_logp.squeeze(-1)
 
 @jax.jit
 def kl_from_logits(logits_new, logits_ref):
@@ -200,36 +234,52 @@ def kl_from_logits(logits_new, logits_ref):
 
 @jax.jit
 def unroll_logits_eval(params, token_seq):
-    # Өгөгдсөн дарааллын дагуу моделийг ажиллуулж logits гаргах training mode
-    def step_fn(carry, tok):
-        logits, carry = model.apply({"params": params}, tok, carry, deterministic=True)
-        return carry, logits
-    _, logits_seq = jax.lax.scan(step_fn, init_carry(token_seq.shape[0]), token_seq.T)
-    return jnp.transpose(logits_seq, (1, 0, 2))
+    # Transformer дээр unroll хийнэ гэдэг нь зүгээр л шууд дуудаад ажиллуулах явдал юм
+    return model.apply({"params": params}, token_seq, deterministic=True)
 
 @jax.jit
 def generate_rollout(behavior_params, prompt_tokens, key, temperature):
-    # Prompt хэсгийг уншуулж carry төлөвийг бэлдэх хэсэг
-    def condition_step(carry, tok):
-        logits, carry = model.apply({"params": behavior_params}, tok, carry, deterministic=True)
-        return carry, logits
-    carry, _ = jax.lax.scan(condition_step, init_carry(prompt_tokens.shape[0]), prompt_tokens.T)
+    """
+    Transformer Generation Loop
+    KV-Cache ашиглаагүй Toy Model учир давталт бүрт context-ийг дахин тооцоолно.
+    """
+    B, P = prompt_tokens.shape
+    
+    # Текст үүсгэх давталт - Loop state
+    # current_seq: Одоо байгаа бүх текст (padding-тай)
+    final_seq_len = P + gen_len
+    # Эхлээд Prompt-ийг оруулаад үлдсэнийг Pad хийнэ
+    current_seq = jnp.pad(prompt_tokens, ((0,0), (0, gen_len)), constant_values=pad_id)
+    
+    def scan_body(carry, i):
+        seq, k = carry
+        
+        # Моделийг ажиллуулах
+        logits = model.apply({"params": behavior_params}, seq, deterministic=True)
+        
+        # Дараагийн таамаглах ёстой индекс: PromptLen + i - 1
+        # Жишээ нь: Prompt 48 урттай. i=0 үед 47-р индексийн гаралт нь 48-р үгийг таана.
+        pred_idx = P + i - 1
+        pred_logits = logits[:, pred_idx, :] # [Batch, Vocab]
+        
+        k, sk    = jax.random.split(k)
+        next_tok = jax.random.categorical(sk, pred_logits / temperature).astype(jnp.int32)
+        next_lp  = logprob_from_logits(pred_logits, next_tok)
+        
+        # Дарааллыг шинэчлэх (PromptLen + i байрлалд бичих)
+        write_idx   = P + i
+        new_tok_col = next_tok[:, None]
+        seq         = jax.lax.dynamic_update_slice(seq, new_tok_col, (0, write_idx))
+        
+        return (seq, k), (next_tok, next_lp)
 
-    # Текст үргэлжлүүлэн үүсгэх буюу auto-regressive generation
-    def gen_step(carry_key_tok, _):
-        carry, key, tok = carry_key_tok
-        logits, carry   = model.apply({"params": behavior_params}, tok, carry, deterministic=True)
-        key, subkey     = jax.random.split(key)
-        # Temperature sampling хийх
-        next_tok        = jax.random.categorical(subkey, logits / temperature, axis=-1).astype(jnp.int32)
-        return (carry, key, next_tok), (next_tok, logprob_from_logits(logits, next_tok))
-
-    # Gen len урттай текст үүсгэх
-    _, (gen_toks, gen_lps) = jax.lax.scan(gen_step, (carry, key, prompt_tokens[:, -1]), length=gen_len)
-    return jnp.concatenate([prompt_tokens, gen_toks.T], axis=1), gen_lps.T
+    # Run scan
+    (final_seq, _), (gen_toks, gen_lps) = jax.lax.scan(scan_body, (current_seq, key), jnp.arange(gen_len))
+    
+    return final_seq, gen_lps.T
 
 
-# REWARD FUNCTION (Rule-based)
+# REWARD FUNCTION, Rule-based
 
 def reward_hybrid_pro(text, fluency_score):
     """
@@ -280,8 +330,6 @@ def reward_hybrid_pro(text, fluency_score):
 def compute_grpo_advantages(rewards, n_prompts, g_size):
     """
     GRPO ийн гол логик буюу групп доторх харьцуулалт
-    Prompt бүрийн хувьд үүсгэсэн 16 хувилбарын дунджийг олж
-    түүнээс дээгүүр оноо авсныг нь Advantage гэж үзнэ
     """
     rg   = rewards.reshape(n_prompts, g_size)
     mean = np.mean(rg, axis=1, keepdims=True)
@@ -290,24 +338,30 @@ def compute_grpo_advantages(rewards, n_prompts, g_size):
     return adv.reshape(-1).astype(np.float32), float(mean.mean())
 
 
-# PHASE, 1 SFT (Supervised Fine-Tuning)
+# PHASE 1, SFT (Supervised Fine-Tuning)
 
-sft_tx    = optax.chain(optax.clip_by_global_norm(max_grad_norm), optax.adam(optax.warmup_cosine_decay_schedule(0, sft_learning_rate, sft_warmup_steps, sft_total_steps)))
+sft_tx    = optax.chain(optax.clip_by_global_norm(max_grad_norm), optax.adamw(optax.warmup_cosine_decay_schedule(0, sft_learning_rate, sft_warmup_steps, sft_total_steps), weight_decay=1e-4))
 sft_state = train_state.TrainState.create(apply_fn=model.apply, params=params, tx=sft_tx)
 
 @jax.jit
 def sft_step(state, batch):
     def loss_fn(p):
-        logits = unroll_logits_eval(p, batch[:, :-1])
-        mask   = (batch[:, 1:] != pad_id).astype(jnp.float32)
-        loss   = optax.softmax_cross_entropy_with_integer_labels(logits, batch[:, 1:])
+        # Transformer: Input = batch, Target = Shifted Batch
+        logits = unroll_logits_eval(p, batch) # [B, T, V]
+        
+        # Shift targets: Input "A B C", Label "B C D"
+        logits_trunc = logits[:, :-1, :]
+        labels       = batch [:, 1:    ]
+        
+        mask   = (labels != pad_id).astype(jnp.float32)
+        loss   = optax.softmax_cross_entropy_with_integer_labels(logits_trunc, labels)
         return jnp.sum(loss * mask) / jnp.sum(mask)
     loss, grads = jax.value_and_grad(loss_fn)(state.params)
     return state.apply_gradients(grads=grads), loss
 
 print("\n" + "="*50)
-print("  PHASE 1: SFT - Суурь хэлний мэдлэг олгох")
-print(f"  Steps: {sft_total_steps} | Batch: {sft_batch_size} | Seq: {sft_seq_len}")
+print("  PHASE 1: SFT - Суурь хэлний мэдлэг олгох (Transformer)")
+print(f"  Steps: {sft_total_steps} | Batch: {sft_batch_size} | Device: GPU (JIT)")
 print("="*50 + "\n")
 
 for step in range(sft_total_steps):
@@ -332,8 +386,10 @@ for step in range(sft_total_steps):
         test_prompt = test_prompt.at[0, :len(start_phr)].set(jnp.array(start_phr))
         
         sample, _   = generate_rollout(sft_state.params, test_prompt, test_key, 0.8)
-        decoded     = decode_ids(sample[0, prompt_len:])
-        print(f"   >> Sample: {decoded[:120]}...")
+        # Pad-ийг хасаж хэвлэх
+        decoded     = decode_ids(sample[0])
+        # Prompt хэсгийг алгасаж харуулах (Transformer output нь full seq байдаг)
+        print(f"   >> Sample: {decoded[len(decode_ids(test_prompt[0])):][:120]}...")
 
 
 # PHASE 2, GRPO (Group Relative Policy Optimization)
@@ -343,20 +399,33 @@ frozen_ref = grpo_state.params # Reference модель буюу SFT ээс су
 
 @jax.jit
 def grpo_step(state, ref_params, rollouts, old_lps, advs, beta):
-    gen_start, gen_end = prompt_len - 1, prompt_len - 1 + gen_len
+    # Transformer дээр rollouts нь бүтэн [Prompt + Gen] байна
+    # зөвхөн Gen хэсгийн логит дээр loss тооцно.
+    gen_start = prompt_len
+    
     def loss_fn(p):
-        # Шинэ logits тооцох
-        logits = unroll_logits_eval(p, rollouts[:, :-1])[:, gen_start:gen_end]
-        logp   = logprob_from_logits(logits, rollouts[:, prompt_len:])
+        # Шинэ logits тооцох (Бүтэн seq дээр гүйлгэнэ)
+        logits_all = unroll_logits_eval(p, rollouts) # [B, T, V]
+        
+        # Prompt-ийн төгсгөлөөс эхлээд generation-ий төгсгөл хүртэлх таамаглах
+        # i-р индекс дээрхи logit i+1 ийг таана
+        # rollouts[:, prompt_len:] буюу үүсгэсэн токенуудын магадлалыг хайна
+        # эдгээр нь logits[:, prompt_len-1 : -1] дотор байгаа
+        
+        logits_gen = logits_all[:, gen_start-1:-1, :]
+        logp       = logprob_from_logits(logits_gen, rollouts[:, gen_start:])
         
         # PPO Ratio буюу шинэ болон хуучин магадлалын харьцаа
+        # old_lps нь generate_rollout-аас ирсэн (зөвхөн gen part)
         ratio  = jnp.exp(logp - old_lps)
         surr1  = ratio * advs[:, None]
         surr2  = jnp.clip(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * advs[:, None]
         
         # KL Divergence буюу Reference ээс хэт зөрөхгүй байх тохиргоо
-        ref_logits = unroll_logits_eval(ref_params, rollouts[:, :-1])[:, gen_start:gen_end]
-        kl         = kl_from_logits(logits.reshape((-1, vocab_size)), ref_logits.reshape((-1, vocab_size)))
+        ref_logits_all = unroll_logits_eval(ref_params, rollouts)
+        ref_logits_gen = ref_logits_all[:, gen_start-1:-1, :]
+        
+        kl = kl_from_logits(logits_gen, ref_logits_gen)
         
         pg_loss = -jnp.mean(jnp.minimum(surr1, surr2))
         return pg_loss + beta * kl, (pg_loss, kl)
@@ -373,11 +442,11 @@ for update in range(grpo_total_updates):
     # Санамсаргүй prompt бэлдэх
     p_list = []
     for _ in range(prompts_per_update):
-        story = random.choice(all_stories)
-        ids   = encode_text(story)
-        start = random.randint(0, max(0, len(ids) - prompt_len))
-        p_ids = np.full((prompt_len,), pad_id, dtype=np.int32)
-        chunk = ids[start:start+prompt_len]
+        story              = random.choice(all_stories)
+        ids                = encode_text(story)
+        start              = random.randint(0, max(0, len(ids) - prompt_len))
+        p_ids              = np.full((prompt_len,), pad_id, dtype=np.int32)
+        chunk              = ids[start:start+prompt_len]
         p_ids[:len(chunk)] = chunk
         p_list.append(p_ids)
     
@@ -387,9 +456,12 @@ for update in range(grpo_total_updates):
     rollouts, behavior_lps = generate_rollout(grpo_state.params, jnp.asarray(prompts), key, grpo_temp)
     
     # Fluency Score буюу Reference моделиор шалгах
-    ref_lps_all = unroll_logits_eval(frozen_ref, rollouts[:, :-1])
-    target_lps  = logprob_from_logits(ref_lps_all[:, prompt_len-1:-1], rollouts[:, prompt_len:])
-    fluency     = np.array(jnp.mean(target_lps, axis=1))
+    # Rollouts нь [B, SeqLen], Ref model-оор оруулаад generated part-ийн logprob авна
+    ref_lps_all    = unroll_logits_eval(frozen_ref, rollouts)
+    # i-р индекс дээрхи logit i+1 ийг таана
+    ref_gen_logits = ref_lps_all[:, prompt_len-1:-1, :]
+    target_lps     = logprob_from_logits(ref_gen_logits, rollouts[:, prompt_len:])
+    fluency        = np.array(jnp.mean(target_lps, axis=1))
     
     # Reward Calculation болон Advantages тооцох
     rewards        = np.array([reward_hybrid_pro(decode_ids(rollouts[i, prompt_len:]), fluency[i]) for i in range(rollouts.shape[0])])
@@ -413,11 +485,11 @@ for update in range(grpo_total_updates):
         # Хамгийн өндөр оноо авсан жишээг харуулах
         best_idx = np.argmax(rewards)
         best_txt = decode_ids(rollouts[best_idx, prompt_len:])
-        print(f"   >> Best Sample: {best_txt[:160]}...")
+        print(f"   >> Хамгийн сайн дээж: {best_txt[:160]}...")
 
 print("\n=== СУРГАЛТ ДУУСЛАА ===")
 # Төгсгөлийн шалгалт
-final_prompt = np.full((1, prompt_len), pad_id, dtype=np.int32)
+final_prompt        = np.full((1, prompt_len), pad_id, dtype=np.int32)
 final_prompt[0, :4] = encode_text("Once")[:4]
-final_rollout, _ = generate_rollout(grpo_state.params, jnp.asarray(final_prompt), jax.random.PRNGKey(999), 0.8)
-print(f"Final Result: {decode_ids(final_rollout[0, prompt_len:])}")
+final_rollout, _    = generate_rollout(grpo_state.params, jnp.asarray(final_prompt), jax.random.PRNGKey(999), 0.8)
+print(f"Сүүлийн үр дүн: {decode_ids(final_rollout[0, prompt_len:])}")
