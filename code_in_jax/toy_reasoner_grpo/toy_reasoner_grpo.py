@@ -11,7 +11,8 @@
 # - Нэг бодлогыг модельд өгөөд олон янзаар бодуулна (Rollouts)
 # - Хариулт бүрийг <think>, <answer> tag ашигласан байдал болон
 #   эцсийн хариу зөв эсэхээр нь дүгнэнэ (Reward Function)
-# - Бүлэг дотроо хамгийн сайн байсанд нь урам өгч (Advantage), мууг нь шийтгэнэ
+# - Gradient Accumulation ашиглан VRAM хэмнэж, бүлэг дотроо 
+#   хамгийн сайн байсанд нь урам өгч (Advantage) сургана
 #
 # Тохиргоо:
 # Hardware : RTX 5070 Ti (12GB VRAM-д тааруулсан тохиргоо)
@@ -45,11 +46,11 @@ random.seed(seed)
 key = jax.random.PRNGKey(seed)
 
 
-# HYPERPARAMETERS (12GB VRAM)
+# HYPERPARAMETERS (12GB VRAM SAFE)
 
 # Модель болон Датасет
 model_id            = "HuggingFaceTB/SmolLM2-1.7B-Instruct"
-max_seq_len         = 1024      # Асуулт + Бодолт + Хариулт багтах хэмжээ
+max_seq_len         = 1024      # Accumulation ашиглаж байгаа тул урт байж болно
 max_gen_len         = 512       # Моделийн "бодох" дээд хязгаар
 
 # GRPO Сургалтын тохиргоо
@@ -70,7 +71,7 @@ system_prompt_text = (
 )
 
 print("="*50)
-print("  TINY REASONER: GRPO TRAINING START")
+print("  TINY REASONER: GRPO + ACCUMULATION TRAINING START")
 print(f"  Model: {model_id}")
 print(f"  Device: {jax.devices()[0]}")
 print("="*50 + "\n")
@@ -108,7 +109,6 @@ if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 
 # Моделийг bfloat16 форматаар ачаалах (VRAM хэмнэх гол арга)
-# from_pt=True үед _do_init=False байж болохгүй 
 model = FlaxLlamaForCausalLM.from_pretrained(
     model_id,
     from_pt=True,       # PyTorch жингээс хөрвүүлж байна
@@ -201,10 +201,17 @@ def compute_advantages(rewards):
     return advantages
 
 
-# TRAINING STATE & STEP FUNCTION
+# TRAINING STATE & STEP FUNCTION (GRADIENT ACCUMULATION)
 
-# Adafactor optimizer нь Adam-аас бага санах ой эзэлдэг тул 1B+ модельд яг тохирно
-optimizer       = optax.adafactor(learning_rate=learning_rate)
+# Adafactor optimizer болон MultiSteps ашиглан VRAM хэмнэнэ
+# every_k_schedule=group_size гэдэг нь group_size удаа алхам хийсний дараа 
+# сая нэг удаа жингээ шинэчилнэ гэсэн үг (Accumulation)
+optimizer = optax.chain(
+    optax.clip_by_global_norm(1.0),
+    optax.adafactor(learning_rate=learning_rate)
+)
+optimizer = optax.MultiSteps(optimizer, every_k_schedule=group_size)
+
 train_state_obj = train_state.TrainState.create(
     apply_fn = model.__call__,
     params   = params        ,
@@ -214,7 +221,8 @@ train_state_obj = train_state.TrainState.create(
 @jax.jit
 def train_step(state, params_ref, input_ids, attention_mask, advantages, old_log_probs):
     """
-    GRPO Update Step (PPO Logic) - Энд PPO аргаар неорон сүлжээг сургана
+    GRPO Update Step (PPO Logic)
+    Accumulation хийж байгаа тул энэ функц жижиг batch (1 ширхэг) дээр ажиллана
     """
     def loss_fn(p):
         # Одоогийн моделийн Logits тооцох
@@ -255,13 +263,15 @@ def train_step(state, params_ref, input_ids, attention_mask, advantages, old_log
         kl_div = jnp.sum(kl_div, axis=-1) # Sum over vocab
         
         # Total Loss = PPO Loss + KL Penalty
-        # KL нь [B, SeqLen], loss_mask нь [B, SeqLen-1] тул KL-ээс сүүлийнхийг хасна
         total_loss = jnp.sum((ppo_loss + kl_beta * kl_div[:, :-1]) * loss_mask) / jnp.sum(loss_mask)
         
         return total_loss, (jnp.mean(kl_div), jnp.mean(ratio))
 
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
     (loss, (mean_kl, mean_ratio)), grads = grad_fn(state.params)
+    
+    # MultiSteps optimizer ашиглаж байгаа тул apply_gradients нь
+    # градиентыг цуглуулж байгаад k алхмын дараа жинг шинэчилнэ
     new_state = state.apply_gradients(grads=grads)
     
     return new_state, loss, mean_kl
@@ -269,22 +279,22 @@ def train_step(state, params_ref, input_ids, attention_mask, advantages, old_log
 # Generate функц (Олон хувилбараар бодуулж үзэх)
 def generate_rollouts_batched(state, prompt_ids, prompt_mask):
     # Prompt-ийг group_size удаа хувилна
-    # prompt_ids: [1, Seq] -> [Group, Seq]
+    # Inference дээр VRAM ачаалал бага тул batch-аар хийж болно
+    # Хэрэв энд OOM өгвөл loop-д оруулж болно
     batch_input = jnp.repeat(prompt_ids, group_size, axis=0)
     
     # Flax generate ашиглах
     outputs = model.generate(
         batch_input,
-        params         = state.params,
-        max_new_tokens = max_gen_len,
-        do_sample      = True,
-        temperature    = 0.8, # Reasoning хийхэд хэт бага биш, хэт их биш temp зүгээр
-        top_k          = 50,
+        params         = state.params          ,
+        max_new_tokens = max_gen_len           ,
+        do_sample      = True                  ,
+        temperature    = 0.8                   ,  # Reasoning хийхэд хэт бага биш, хэт их биш temp зүгээр
+        top_k          = 50                    ,
         pad_token_id   = tokenizer.pad_token_id,
         prng_key       = jax.random.PRNGKey(int(time.time()))
     )
     
-    # Generate хийсэн token-ууд (Prompt + Generated)
     return outputs.sequences
 
 
@@ -307,8 +317,6 @@ while step_counter < total_updates:
     # Prompt бэлтгэх
     messages   = format_gsm8k_prompt(question)
     input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    
-    # Prompt-ийн төгсгөлд "<think>" нэмж өгвөл моделийг за одоо бодож эхлээрэй гэсэн сигналыг дараалалд өгнө
     input_text += "<think>"
     
     inputs      = tokenizer(input_text, return_tensors="np", max_length=max_seq_len, truncation=True)
@@ -317,10 +325,10 @@ while step_counter < total_updates:
     
     # Rollout үе шат (Олон хувилбараар бодуулах)
     try:
-        # sequences shape: [GroupSize, TotalLen]
         sequences = generate_rollouts_batched(train_state_obj, prompt_ids, prompt_mask)
     except Exception as e:
         print(f"[Warning] Generation failed (OOM?): {e}")
+        jax.clear_caches()
         continue
 
     # Reward тооцоолох (Багшийн үнэлгээ)
@@ -328,58 +336,73 @@ while step_counter < total_updates:
     rewards       = compute_rewards(decoded_texts, ground_truth_raw)
     advantages    = compute_advantages(rewards)
     
-    # Policy Update үе шат (Моделио сургах)
-    seq_len   = sequences.shape[1]
-    attn_mask = (sequences != tokenizer.pad_token_id).astype(jnp.int32)
-    
     # Old Log Probs (No Grad) - Хуучин мэдлэгтэйгээ харьцуулахын тулд
+    attn_mask = (sequences != tokenizer.pad_token_id).astype(jnp.int32)
     def get_log_probs(p, ids, mask):
         logits    = model(input_ids=ids, attention_mask=mask, params=p).logits
         log_probs = jax.nn.log_softmax(logits, axis=-1)
         # Shift хийгдсэн (сүүлийн token хасагдсан) утга буцаана
         return jnp.take_along_axis(log_probs[:, :-1, :], ids[:, 1:, None], axis=-1).squeeze(-1)
 
-    old_log_probs = get_log_probs(train_state_obj.params, sequences, attn_mask)
+    try:
+        old_log_probs = get_log_probs(train_state_obj.params, sequences, attn_mask)
+    except Exception as e:
+        print(f"[Ref Error] {e}")
+        jax.clear_caches()
+        continue
 
-    # Train Step - Жингээ шинэчлэх
-    adv_jax  = jnp.array(advantages)
-    
-    loss_val = 0
-    kl_val   = 0
+    # Train Step - Gradient Accumulation Loop
+    # VRAM хэмнэхийн тулд 4 жишээг 1, 1-ээр нь цувуулж гүйлгэнэ
+    adv_jax    = jnp.array(advantages)
+    batch_loss = 0
+    batch_kl   = 0
     
     try:
-        train_state_obj, loss_val, kl_val = train_step(
-            train_state_obj, 
-            params_ref     , 
-            sequences      , 
-            attn_mask      , 
-            adv_jax        ,
-            old_log_probs
-        )
+        for i in range(group_size):
+            # i-р жишээг сугалж авах (Shape: [1, SeqLen])
+            # Энэ нь VRAM-д маш бага ачаалал өгнө
+            sub_seq  = sequences    [i:i+1]
+            sub_mask = attn_mask    [i:i+1]
+            sub_adv  = adv_jax      [i:i+1]
+            sub_old  = old_log_probs[i:i+1]
+            
+            # Энэ функц group_size удаа дуудагдана 
+            # MultiSteps optimizer үүнийг автоматаар цуглуулж байгаад 
+            # хамгийн сүүлийн алхам дээр жингээ шинэчилнэ
+            train_state_obj, loss_val, kl_val = train_step(
+                train_state_obj, 
+                params_ref     , 
+                sub_seq        , 
+                sub_mask       , 
+                sub_adv        , 
+                sub_old
+            )
+            batch_loss += loss_val
+            batch_kl   += kl_val
+            
         step_counter += 1
+        
+        # Явцыг хэвлэж харах
+        if step_counter % 5 == 0:
+            avg_r = np.mean(rewards)
+            print(f"[Step {step_counter:3d}] Reward: {avg_r:+.2f} | Loss: {batch_loss/group_size:.4f} | KL: {batch_kl/group_size:.4f}")
+            
+        if step_counter % 20 == 0:
+            best_idx = np.argmax(rewards)
+            print("\n" + "-"*30)
+            print(f"QUESTION: {question[:100]}...")
+            print(f"BEST SAMPLE (R={rewards[best_idx]:.1f}):")
+            output_sample = decoded_texts[best_idx]
+            if "<think>" in output_sample:
+                print(output_sample.split("<think>", 1)[1][:300] + "...")
+            else:
+                print(output_sample[:200] + "...")
+            print("-"*30 + "\n")
+            
     except Exception as e:
         print(f"[Error] Update step failed: {e}")
         jax.clear_caches()
         continue
-
-    # Явцыг хэвлэж харах
-    if step_counter % 5 == 0:
-        avg_r = np.mean(rewards)
-        print(f"[Step {step_counter:3d}] Reward: {avg_r:+.2f} | Loss: {loss_val:.4f} | KL: {kl_val:.4f}")
-        
-    if step_counter % 20 == 0:
-        # Хамгийн сайн хариултыг сонирхох
-        best_idx = np.argmax(rewards)
-        print("\n" + "-"*30)
-        print(f"QUESTION: {question[:100]}...")
-        print(f"BEST SAMPLE (R={rewards[best_idx]:.1f}):")
-        output_sample = decoded_texts[best_idx]
-        # <think> хэсгийг нь л голчилж харъя
-        if "<think>" in output_sample:
-            print(output_sample.split("<think>", 1)[1][:300] + "...")
-        else:
-            print(output_sample[:200] + "...")
-        print("-"*30 + "\n")
 
 print("\n=== СУРГАЛТ АМЖИЛТТАЙ ДУУСЛАА ===")
 print("Одоо модель <think> tag ашиглан боддог болсон байх ёстой.")
