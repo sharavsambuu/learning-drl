@@ -10,3 +10,8 @@ numpy
 jupyter
 matplotlib
 scipy
+jaxtyping 
+kagglehub 
+treescope
+transformers 
+sentencepiece

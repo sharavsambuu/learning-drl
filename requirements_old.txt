@@ -1,5 +1,0 @@
-gym
-jax
-jaxlib==0.1.56+cuda101
-flax
-ray

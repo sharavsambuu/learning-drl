@@ -38,10 +38,6 @@
 | **\* FQF (Fully Parameterized Quantile Function)** | "Ultimate Distributional RL" - learns to model the *entire CDF shape* directly, adaptively choosing key quantiles for data-efficient, powerful representation.                                                                                       |
 
 
-# Environment
-
-    Python3.13
-
 
 # Dependencies
 
@@ -58,34 +54,14 @@
 ```shell
   virtualenv -p python3.13 env && source env/bin/activate && pip install -r requirements313.txt
   pip install "gymnasium[box2d]"
+  pip install --upgrade "jax[cuda13]"
 ```
 
-
-# Google's Jax and Flax
-
-    https://github.com/google/jax
-    https://github.com/google/flax
-
-  Variables can be vary, change those variables according to your machine specs
-
-
-```shell
-	PYTHON_VERSION=cp38  # alternatives: cp36, cp37, cp38
-	CUDA_VERSION=cuda101  # alternatives: cuda100, cuda101, cuda102, cuda110
-	PLATFORM=manylinux2010_x86_64  # alternatives: manylinux2010_x86_64
-	BASE_URL='https://storage.googleapis.com/jax-releases'
-	pip install --upgrade $BASE_URL/$CUDA_VERSION/jaxlib-0.1.51-$PYTHON_VERSION-none-$PLATFORM.whl
-	pip install --upgrade jax  # install jax
-	pip install --upgrade flax
-```
 
 
 # When on-deman GPU resource utilization needed
 
 ```shell
-    export XLA_PYTHON_CLIENT_ALLOCATOR=platform
+export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 ````
 
-# References
-
-    https://github.com/joaogui1/RL-JAX/tree/master/DQN
