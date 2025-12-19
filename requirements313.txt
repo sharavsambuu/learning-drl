@@ -15,3 +15,4 @@ kagglehub
 treescope
 transformers 
 sentencepiece
+datasets
