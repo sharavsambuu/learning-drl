@@ -191,7 +191,7 @@ def compute_rewards(rollouts, ground_truth_text):
         score = 0.0
         
         # FORMAT REWARDS (XML бүтцээ зөв бичсэн эсэх)
-        has_think  = "<think>"  in text and "</think>"  in text
+        has_think  = "<think>" in text and "</think>" in text
         has_answer = "<answer>" in text and "</answer>" in text
         
         if has_think:
@@ -264,8 +264,8 @@ def train_step(state, input_ids, attention_mask, advantages, old_log_probs, ref_
     KV Cache-ийг сургалтын үед салгана.
     """
     def loss_fn(p):
-        # use_cache=False нь сургалтын үед VRAM хэмнэнэ
-        outputs = state.apply_fn(input_ids=input_ids, attention_mask=attention_mask, params=p, use_cache=False)
+        # Flax __call__ дээр use_cache байхгүй, config-оор зохицуулагддаг эсвэл ignore хийгдэнэ
+        outputs = state.apply_fn(input_ids=input_ids, attention_mask=attention_mask, params=p)
         logits  = outputs.logits
         
         # PPO Correctness: Logits-ийг temperature-д хувааж байж log_softmax хийнэ
@@ -368,7 +368,7 @@ while step_counter < total_updates:
     # Reference моделийг "snapshot" хийх буюу шинэчлэх
     # Санах ой хэмнэх чухал алхам
     if step_counter % 20 == 0:
-        # jax.tree_map -> jax.tree_util.tree_map (JAX v0.6.0)
+        # jax.tree_map -> jax.tree_util.tree_map (JAX v0.6.0 Fix)
         params_ref = jax.tree_util.tree_map(lambda x: x, train_state_obj.params)
 
     # Датасетээс санамсаргүй нэг жишээ авах
@@ -385,13 +385,13 @@ while step_counter < total_updates:
     # Энэ нь JIT recompile хийгдэхээс сэргийлнэ
     inputs = tokenizer(
         input_text, 
-        return_tensors = "np", 
-        max_length     = prompt_max_len, 
-        truncation     = True,
-        padding        = "max_length"
+        return_tensors="np", 
+        max_length=prompt_max_len, 
+        truncation=True,
+        padding="max_length"
     )
     
-    prompt_ids  = jnp.array(inputs['input_ids'     ])
+    prompt_ids  = jnp.array(inputs['input_ids'])
     prompt_mask = jnp.array(inputs['attention_mask'])
     prompt_len  = int(np.sum(inputs['attention_mask'])) # Real length for skip logic
     gen_start   = prompt_ids.shape[1]                   # Fixed masking padded length 
@@ -424,8 +424,8 @@ while step_counter < total_updates:
     attn_mask = build_attn_mask_from_eos(sequences, tokenizer.eos_token_id, gen_start)
     
     def get_log_probs(p, ids, mask):
-        # use_cache=False чухал тохиргоо (VRAM)
-        logits = model(input_ids=ids, attention_mask=mask, params=p, use_cache=False).logits
+        # Flax __call__ дээр use_cache байхгүй
+        logits = model(input_ids=ids, attention_mask=mask, params=p).logits
         lps    = jax.nn.log_softmax(logits / gen_temp, axis=-1)
         return jnp.take_along_axis(lps[:, :-1, :], ids[:, 1:, None], axis=-1).squeeze(-1)
 
