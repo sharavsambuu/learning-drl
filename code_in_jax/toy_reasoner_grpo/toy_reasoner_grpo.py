@@ -131,28 +131,35 @@ print(f"Модель амжилттай ачаалагдлаа. (Context Limit: 
 
 # JAX HELPERS
 
-def build_attn_mask_from_eos(seqs, eos_id, prompt_len):
+def build_attn_mask_from_eos(seqs, prompt_mask_fixed, eos_id, prompt_len_fixed):
     """
-    EOS token болон PAD token ижилхэн ID-тай байх үед (SmolLM/Llama)
-    энгийн (seq != pad) mask ашиглавал өгүүлбэр дундах EOS-ийг mask хийх эрсдэлтэй.
-    Тиймээс Prompt-ийн дараа гарч ирсэн АНХНЫ EOS token хүртэл л хүчинтэйд тооцно.
+    EOS token болон PAD token ижилхэн ID-тай байх үед generation болон prompt 
+    хоёрын mask-ийг зөв хослуулах шаардлагатай. Prompt хэсгийн original padding 
+    болон generation хэсгийн EOS cutoff-ийг нэгтгэж mask үүсгэнэ.
     """
     # seqs: [Batch, Time]
-    T            = seqs.shape[1]
-    # Prompt хэсгийг алгасаад хайх
-    after_prompt = (jnp.arange(T)[None, :] >= prompt_len).astype(jnp.int32)
-    eos_hits     = (seqs == eos_id).astype(jnp.int32) * after_prompt
+    B, T = seqs.shape
     
-    # Хамгийн эхний EOS-ийн байрлалыг олох
-    first_eos    = jnp.argmax(eos_hits, axis=1)
-    has_eos      = jnp.any(eos_hits == 1, axis=1)
+    # Prompt mask-ийг бүх batch дээр broadcast хийж сунгах
+    prompt_mask_full = jnp.zeros((B, T), dtype=jnp.int32)
+    pm = jnp.broadcast_to(prompt_mask_fixed.astype(jnp.int32), (B, prompt_len_fixed))
+    prompt_mask_full = prompt_mask_full.at[:, :prompt_len_fixed].set(pm)
     
-    # EOS байхгүй бол дуустал, байвал EOS-ийг оролцуулаад таслах
-    end_idx      = jnp.where(has_eos, first_eos + 1, T)
+    # Generation хэсэгт EOS хайх
+    idx       = jnp.arange(T)[None, :]
+    is_gen    = (idx >= prompt_len_fixed)
     
-    # Mask үүсгэх [B, T]
-    mask         = (jnp.arange(T)[None, :] < end_idx[:, None]).astype(jnp.int32)
-    return mask
+    eos_hits  = ((seqs == eos_id) & is_gen)
+    has_eos   = jnp.any(eos_hits, axis=1)
+    first_eos = jnp.argmax(eos_hits, axis=1)
+    
+    # EOS олдвол тэр хүртэл, олдохгүй бол дуустал
+    end_idx   = jnp.where(has_eos, first_eos + 1, T)
+    gen_mask  = (idx < end_idx[:, None]).astype(jnp.int32)
+    
+    # Prompt болон Gen хэсгийн mask-ийг нэгтгэх
+    final_mask = jnp.where(idx < prompt_len_fixed, prompt_mask_full, gen_mask).astype(jnp.int32)
+    return final_mask
 
 
 # REWARD FUNCTIONS (дүн тавьдаг багш)
@@ -162,8 +169,8 @@ def extract_xml_answer(text):
     try:
         if "<answer>" in text and "</answer>" in text:
             ans_part = text.split("<answer>")[1].split("</answer>")[0]
-            # Тоо, цэг, хасах тэмдгийг үлдээгээд бусдыг цэвэрлэх
-            number = re.findall(r'-?\$?\d{1,3}(?:,\d{3})*(?:\.\d+)?', ans_part)
+            # Тоо, цэг, хасах тэмдгийг үлдээгээд бусдыг цэвэрлэх (Regex Fixed for large numbers)
+            number = re.findall(r'-?\$?\d+(?:,\d{3})*(?:\.\d+)?', ans_part)
             if number:
                 return float(number[-1].replace(',', '').replace('$', ''))
     except:
@@ -174,9 +181,16 @@ def extract_ground_truth(text):
     """ GSM8K-ийн '#### 42' форматаас зөв хариуг авах """
     if "####" in text:
         ans_part = text.split("####")[-1].strip()
-        number = re.findall(r'-?\$?\d{1,3}(?:,\d{3})*(?:\.\d+)?', ans_part)
+        number = re.findall(r'-?\$?\d+(?:,\d{3})*(?:\.\d+)?', ans_part)
         if number:
             return float(number[-1].replace(',', '').replace('$', ''))
+    return None
+
+def extract_last_number(text):
+    """ XML tag байхгүй үед ч текстээс хамгийн сүүлийн тоог сугалж авах (Fallback) """
+    number = re.findall(r'-?\$?\d+(?:,\d{3})*(?:\.\d+)?', text)
+    if number:
+        return float(number[-1].replace(',', '').replace('$', ''))
     return None
 
 def compute_rewards(rollouts, ground_truth_text):
@@ -221,8 +235,13 @@ def compute_rewards(rollouts, ground_truth_text):
                 else:
                     score -= 0.5
         else:
-            # Хариултын tag байхгүй бол формат буруу гэж үзээд хатуу шийтгэнэ
-            score -= 1.0
+            # Tag байхгүй үед шууд шийтгэхгүйгээр хариуг шалгаж үзэх (Cold Start)
+            # Хэрэв хариу зөв бол бага зэрэг урамшуулж сургалтыг гацаанаас гаргана
+            pred_val = extract_last_number(text)
+            if pred_val is not None and true_val is not None and abs(pred_val - true_val) < 1e-4:
+                score += 1.0
+            else:
+                score -= 0.5
 
         rewards.append(score)
         
@@ -343,8 +362,7 @@ def generate_rollouts_batched(state, prompt_ids, prompt_mask, key, max_new):
             max_new_tokens = max_new,
             do_sample      = True,
             temperature    = gen_temp,
-            # PPO тархалттай нийцүүлэхийн тулд Top-K=0 байна
-            top_k          = 0,
+            # Top-K=0 үед зарим хувилбар дээр алдаа заадаг тул арилгав
             pad_token_id   = tokenizer.pad_token_id,
             eos_token_id   = tokenizer.eos_token_id, 
             prng_key       = sk 
@@ -419,9 +437,8 @@ while step_counter < total_updates:
     advantages    = compute_advantages_stable(rewards) 
     
     # Old Log Probs & Reference Log Probs
-    # Padding ашигласан үед EOS нь padding дотор нуугдах эрсдэлтэй тул
-    # зөвхөн generation эхэлсэн цэгээс (gen_start) хойшхи EOS-ийг хайна
-    attn_mask = build_attn_mask_from_eos(sequences, tokenizer.eos_token_id, gen_start)
+    # Prompt mask-ийг дамжуулж, generation mask-тай хослуулан бүрэн mask үүсгэнэ
+    attn_mask = build_attn_mask_from_eos(sequences, prompt_mask, tokenizer.eos_token_id, gen_start)
     
     def get_log_probs(p, ids, mask):
         # Flax __call__ дээр use_cache байхгүй
