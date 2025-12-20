@@ -20,6 +20,7 @@
 # Hardware : 10GB VRAM Optimization
 # Precision: bfloat16 (Санах ойг 2 дахин хэмнэнэ)
 #
+#
 
 import os
 # JAX санах ойн хуваарилалтыг хязгаарлах буюу VRAM дүүрэхээс сэргийлнэ
@@ -122,25 +123,41 @@ model = FlaxLlamaForCausalLM.from_pretrained(
 
 # Reference Model (Dynamic Snapshot)
 # 10GB VRAM-д багтаахын тулд жинхэнэ хуулбар үүсгэхгүй
-# Сургалтын явцад үе үе шинэчлэгдэх pointer ашиглана
+# Params Ref-ийг тусгаарлахын тулд tree_map ашиглаж хуулбар үүсгэнэ
 params     = model.params
-params_ref = model.params 
+params_ref = jax.tree_util.tree_map(lambda x: x, model.params)
 
 print(f"Модель амжилттай ачаалагдлаа. (Context Limit: {max_ctx_len})")
 
 
 # JAX HELPERS
 
-def build_attn_mask_from_eos(seqs, prompt_mask_fixed, eos_id, prompt_len_fixed):
+def sanitize_prompt_tail(text, special_tokens):
     """
-    EOS token болон PAD token ижилхэн ID-тай байх үед generation болон prompt 
-    хоёрын mask-ийг зөв хослуулах шаардлагатай. Prompt хэсгийн original padding 
-    болон generation хэсгийн EOS cutoff-ийг нэгтгэж mask үүсгэнэ.
+    Chat template-ийн төгсгөлд санамсаргүй special token (EOS гэх мэт) 
+    орж ирэхээс сэргийлж, төгсгөлийн special токенуудыг цэвэрлэнэ.
+    Ингэснээр модель хариултаа үргэлжлүүлэх боломжтой болно.
+    """
+    t = text.rstrip()
+    changed = True
+    while changed:
+        changed = False
+        for tok in special_tokens:
+            if tok and t.endswith(tok):
+                t = t[:-len(tok)].rstrip()
+                changed = True
+    return t
+
+def build_attn_mask_from_eos(seqs, prompt_mask_fixed, eos_id):
+    """
+    Right padding + fixed width prompt үед generation нь fixed width-ийн ард нэмэгддэг.
+    Prompt хэсэгт tokenizer-ийн mask-ийг ашиглаж, generation хэсгийг EOS хүртэл тасална.
     """
     # seqs: [Batch, Time]
     B, T = seqs.shape
     
     # Prompt mask-ийг бүх batch дээр broadcast хийж сунгах
+    prompt_len_fixed = prompt_mask_fixed.shape[1]
     prompt_mask_full = jnp.zeros((B, T), dtype=jnp.int32)
     pm = jnp.broadcast_to(prompt_mask_fixed.astype(jnp.int32), (B, prompt_len_fixed))
     prompt_mask_full = prompt_mask_full.at[:, :prompt_len_fixed].set(pm)
@@ -162,14 +179,14 @@ def build_attn_mask_from_eos(seqs, prompt_mask_fixed, eos_id, prompt_len_fixed):
     return final_mask
 
 
-# REWARD FUNCTIONS (дүн тавьдаг багш)
+# REWARD FUNCTIONS
 
 def extract_xml_answer(text):
     """ <answer>123</answer> дотроос тоог нь сугалж авах """
     try:
         if "<answer>" in text and "</answer>" in text:
             ans_part = text.split("<answer>")[1].split("</answer>")[0]
-            # Тоо, цэг, хасах тэмдгийг үлдээгээд бусдыг цэвэрлэх (Regex Fixed for large numbers)
+            # Тоо, цэг, хасах тэмдгийг үлдээгээд бусдыг цэвэрлэх
             number = re.findall(r'-?\$?\d+(?:,\d{3})*(?:\.\d+)?', ans_part)
             if number:
                 return float(number[-1].replace(',', '').replace('$', ''))
@@ -187,7 +204,7 @@ def extract_ground_truth(text):
     return None
 
 def extract_last_number(text):
-    """ XML tag байхгүй үед ч текстээс хамгийн сүүлийн тоог сугалж авах (Fallback) """
+    """ XML tag байхгүй үед ч текстээс хамгийн сүүлийн тоог сугалж авах (Cold start fallback) """
     number = re.findall(r'-?\$?\d+(?:,\d{3})*(?:\.\d+)?', text)
     if number:
         return float(number[-1].replace(',', '').replace('$', ''))
@@ -195,7 +212,7 @@ def extract_last_number(text):
 
 def compute_rewards(rollouts, ground_truth_text):
     """
-    GRPO-ийн гол арга, текстийг уншиж оноо өгөх хэсэг.
+    GRPO-ийн гол арга, текст уншиж оноо өгөх хэсэг.
     Урт текстэд өгдөг байсан бонусыг багасгаж, зөв хариултад илүү төвлөрнө.
     """
     rewards  = []
@@ -205,14 +222,14 @@ def compute_rewards(rollouts, ground_truth_text):
         score = 0.0
         
         # FORMAT REWARDS (XML бүтцээ зөв бичсэн эсэх)
-        has_think  = "<think>" in text and "</think>" in text
+        has_think  = "<think>"  in text and "</think>"  in text
         has_answer = "<answer>" in text and "</answer>" in text
         
         if has_think:
             score += 0.1
         
         if has_answer:
-            # Хариултын таг дотор тоо, цэг, таслал, $, зайгаас өөр "хог" байвал шийтгэнэ
+            # Хариултын таг дотор тоо, цэг, таслал, $, зайгаас өөр хог байвал шийтгэнэ
             # Энэ нь моделийг зөвхөн тоо бичдэг болгоход тусална (Strict Parsing)
             ans_content = text.split("<answer>")[1].split("</answer>")[0].strip()
             if re.search(r'[^0-9\-\.\,\$\s]', ans_content):
@@ -226,8 +243,8 @@ def compute_rewards(rollouts, ground_truth_text):
             if pred_val is not None and true_val is not None:
                 if abs(pred_val - true_val) < 1e-4:
                     score += 2.0
-                    # Зөв хариулсан тохиолдолд л reasoning урт байвал урамшуулна
-                    # Гэхдээ <think> байгаа эсэхийг заавал шалгана (Crash-аас сэргийлнэ)
+                    # Зөв хариулсан тохиолдолд reasoning урт байвал урамшуулна
+                    # Гэхдээ <think> байгаа эсэхийг заавал шалгана 
                     if has_think:
                         thought = text.split("<think>")[1].split("</think>")[0]
                         if len(thought) > 100: 
@@ -255,7 +272,7 @@ def compute_advantages_stable(rewards):
     """
     mean       = np.mean(rewards)
     advantages = rewards - mean
-    # Хэт өндөр утгыг хайчилна (Stable Training)
+    # Хэт өндөр утгыг тогтоон барина (Stable Training)
     advantages = np.clip(advantages, -adv_clip_range, adv_clip_range)
     return advantages
 
@@ -263,11 +280,12 @@ def compute_advantages_stable(rewards):
 # TRAINING STATE & OPTIMIZER
 
 # Adafactor optimizer болон MultiSteps ашиглан VRAM хэмнэнэ
+# Every K schedule: Group size * PPO Epochs хэмжээгээр accumulation хийнэ
 optimizer = optax.chain(
     optax.clip_by_global_norm(1.0),
     optax.adafactor(learning_rate=learning_rate)
 )
-optimizer = optax.MultiSteps(optimizer, every_k_schedule=group_size)
+optimizer = optax.MultiSteps(optimizer, every_k_schedule=group_size * ppo_epochs)
 
 train_state_obj = train_state.TrainState.create(
     apply_fn = model.__call__,
@@ -276,7 +294,7 @@ train_state_obj = train_state.TrainState.create(
 )
 
 @jax.jit
-def train_step(state, input_ids, attention_mask, advantages, old_log_probs, ref_log_probs, prompt_len):
+def train_step(state, input_ids, attention_mask, advantages, old_log_probs, ref_log_probs, prompt_len_real):
     """
     GRPO Update Step (PPO Logic - VRAM Optimized)
     ParamsRef-ийг гаднаас дамжуулдаг болгосноор VRAM хэмнэнэ.
@@ -302,7 +320,8 @@ def train_step(state, input_ids, attention_mask, advantages, old_log_probs, ref_
         # Зөвхөн prompt-оос хойшхи token-ууд дээр сургана
         seq_len   = input_ids.shape[1]
         pos_idxs  = jnp.arange(seq_len - 1)[None, :] 
-        gen_mask  = (pos_idxs >= (prompt_len - 1)).astype(jnp.int32)
+        # Generation boundary нь real prompt length-ээр тодорхойлогдоно
+        gen_mask  = (pos_idxs >= (prompt_len_real - 1)).astype(jnp.int32)
         
         # Padding mask + Gen mask
         loss_mask = attention_mask[:, 1:] * gen_mask
@@ -382,8 +401,11 @@ print("="*50 + "\n")
 step_counter = 0
 curr_key     = init_key
 
+# Special tokens жагсаалтыг бэлдэх
+special_tokens = list(getattr(tokenizer, "all_special_tokens", []) or [])
+
 while step_counter < total_updates:
-    # Reference моделийг "snapshot" хийх буюу шинэчлэх
+    # Reference моделийг snapshot хийх буюу шинэчлэх
     # Санах ой хэмнэх чухал алхам
     if step_counter % 20 == 0:
         # jax.tree_map -> jax.tree_util.tree_map (JAX v0.6.0 Fix)
@@ -395,9 +417,12 @@ while step_counter < total_updates:
     question         = example['question']
     ground_truth_raw = example['answer'  ]
     
-    # Prompt бэлтгэх (Fixed Shape)
-    messages   = format_gsm8k_prompt(question)
-    input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True) + "<think>"
+    # Prompt бэлтгэх (Fixed Shape + Sanitize)
+    messages    = format_gsm8k_prompt(question)
+    base_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    # Special tokens цэвэрлэх нь prompt-ийг нээлттэй үлдээхэд тусална
+    base_prompt = sanitize_prompt_tail(base_prompt, special_tokens)
+    input_text  = base_prompt + "<think>"
     
     # JAX Shape тогтвортой байх шаардлагатай тул padding хийнэ
     # Энэ нь JIT recompile хийгдэхээс сэргийлнэ
@@ -409,13 +434,13 @@ while step_counter < total_updates:
         padding="max_length"
     )
     
-    prompt_ids  = jnp.array(inputs['input_ids'])
-    prompt_mask = jnp.array(inputs['attention_mask'])
-    prompt_len  = int(np.sum(inputs['attention_mask'])) # Real length for skip logic
-    gen_start   = prompt_ids.shape[1]                   # Fixed masking padded length 
+    prompt_ids      = jnp.array(inputs['input_ids'])
+    prompt_mask     = jnp.array(inputs['attention_mask'])
+    # Real length буюу жинхэнэ prompt дуусах цэгийг тодорхойлох
+    prompt_len_real = int(np.sum(inputs['attention_mask']))
     
     # Prompt хэт урт бол алгасах
-    if prompt_len >= prompt_max_len - 2:
+    if prompt_len_real >= prompt_max_len - 2:
         continue
         
     # Safe max tokens
@@ -424,7 +449,7 @@ while step_counter < total_updates:
     # Rollout үе шат
     curr_key, gen_key = jax.random.split(curr_key)
     try:
-        # Энд одоо sequential generation + fixed input ажиллана
+        # sequential generation + fixed input ажиллана
         sequences = generate_rollouts_batched(train_state_obj, prompt_ids, prompt_mask, gen_key, safe_max_new)
     except Exception as e:
         print(f"[Gen Error] {e}")
@@ -437,8 +462,8 @@ while step_counter < total_updates:
     advantages    = compute_advantages_stable(rewards) 
     
     # Old Log Probs & Reference Log Probs
-    # Prompt mask-ийг дамжуулж, generation mask-тай хослуулан бүрэн mask үүсгэнэ
-    attn_mask = build_attn_mask_from_eos(sequences, prompt_mask, tokenizer.eos_token_id, gen_start)
+    # Mask үүсгэхдээ Fixed shape ашиглана
+    attn_mask = build_attn_mask_from_eos(sequences, prompt_mask, tokenizer.eos_token_id)
     
     def get_log_probs(p, ids, mask):
         # Flax __call__ дээр use_cache байхгүй
@@ -465,7 +490,7 @@ while step_counter < total_updates:
          jax.clear_caches()
          continue
 
-    # Training Step - Gradient Accumulation Loop
+    # Training Step, Gradient Accumulation Loop
     adv_jax     = jnp.array(advantages)
     batch_loss  = 0
     batch_kl    = 0
@@ -482,7 +507,7 @@ while step_counter < total_updates:
                 sub_ref  = ref_log_probs[i:i+1]
                 
                 # Update function руу ref_model дамжуулахгүй, зөвхөн утгыг нь өгнө
-                # gen_start (Fixed)-ийг дамжуулж prompt masking зөв хийнэ
+                # prompt_len_real-ийг дамжуулж prompt masking зөв хийнэ
                 train_state_obj, loss_val, kl_val, ratio_val = train_step(
                     train_state_obj, 
                     sub_seq        , 
@@ -490,7 +515,7 @@ while step_counter < total_updates:
                     sub_adv        , 
                     sub_old        , 
                     sub_ref        ,
-                    gen_start
+                    prompt_len_real
                 )
                 batch_loss  += loss_val
                 batch_kl    += kl_val
@@ -528,10 +553,12 @@ while step_counter < total_updates:
 print("\n=== СУРГАЛТ АМЖИЛТТАЙ ДУУСЛАА ===")
 
 # Төгсгөлийн шалгалт
-test_q   = "If I have 5 apples and eat 2, how many do I have?"
-test_msg = format_gsm8k_prompt(test_q)
-test_in  = tokenizer.apply_chat_template(test_msg, tokenize=False, add_generation_prompt=True) + "<think>"
-test_tok = tokenizer(test_in, return_tensors="np")
+test_q    = "If I have 5 apples and eat 2, how many do I have?"
+test_msg  = format_gsm8k_prompt(test_q)
+test_base = tokenizer.apply_chat_template(test_msg, tokenize=False, add_generation_prompt=True)
+test_base = sanitize_prompt_tail(test_base, special_tokens)
+test_in   = test_base + "<think>"
+test_tok  = tokenizer(test_in, return_tensors="np")
 
 final_gen = model.generate(
     jnp.array(test_tok['input_ids']),
