@@ -12,11 +12,12 @@
 #   моделийн өөрийнх нь үүсгэсэн хариулт (Completion) дээр сургана
 # - Stable Advantage: Бүлэг доторх оноог харьцуулахдаа STD-д хуваахгүй
 #   Mean Centering + Clipping хийж тогтворжуулна
-# - KL Divergence тооцохдоо padding болон prompt хэсгийг хасна
+# - Fixed Shapes: JAX JIT recompilation-аас сэргийлэхийн тулд
+#   бүх prompt-ийг тогтмол урттай болгож pad хийнэ
 # - Gradient Accumulation: VRAM хэмнэх үүднээс 1, 1-ээр нь цувуулж сургана
 #
 # Тохиргоо:
-# Hardware : RTX 5070 Ti (12GB VRAM)
+# Hardware : 10GB VRAM Optimization
 # Precision: bfloat16 (Санах ойг 2 дахин хэмнэнэ)
 #
 
@@ -27,14 +28,14 @@ os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"  ] = "platform"
 
 import re
 import random
-import numpy as np
+import numpy         as np
 import jax
-import jax.numpy as jnp
+import jax.numpy     as jnp
 import optax
-from flax import jax_utils
-from flax.training import train_state
-from transformers import AutoTokenizer, FlaxLlamaForCausalLM
-from datasets import load_dataset
+from   flax          import jax_utils
+from   flax.training import train_state
+from   transformers  import AutoTokenizer, FlaxLlamaForCausalLM
+from   datasets      import load_dataset
 
 # RTX GPU дээр тооцооллыг хурдасгах
 jax.config.update("jax_default_matmul_precision", "tensorfloat32")
@@ -46,12 +47,14 @@ random.seed(seed)
 init_key = jax.random.PRNGKey(seed)
 
 
-# HYPERPARAMETERS (12GB VRAM SAFE)
+# HYPERPARAMETERS (10GB VRAM OPTIMIZED)
 
 # Модель болон Датасет
 model_id            = "HuggingFaceTB/SmolLM2-1.7B-Instruct"
-max_ctx_len         = 2048      # Моделийн тохиргооноос дараа нь шинэчилнэ
-max_gen_len         = 512       # Моделийн "бодох" дээд хязгаар
+max_ctx_len         = 1536      # 10GB VRAM-д багтаахын тулд context багасгав
+max_gen_len         = 256       # Reasoning хэт урт байвал VRAM дүүрэх эрсдэлтэй
+# Fixed Shape буюу JAX JIT-ийг дахин ачааллуулахгүйн тулд тогтмол урт
+prompt_max_len      = max_ctx_len - max_gen_len 
 
 # GRPO Сургалтын тохиргоо
 total_updates       = 200       # Демо учраас цөөхөн алхам сургах
@@ -62,6 +65,7 @@ ppo_epochs          = 2         # Нэг rollout дээр хэдэн удаа д
 clip_epsilon        = 0.2       # PPO clipping range (Хэт огцом өөрчлөлтөөс сэргийлнэ)
 kl_beta             = 0.04      # Хуучин моделиосоо хэт хол зөрөхгүй байх тохиргоо
 adv_clip_range      = 5.0       # Advantage-ийг хэт савлуулахгүйн тулд хязгаарлана
+gen_temp            = 0.8       # Sampling болон PPO Logits scaling хийх температур
 
 # System Prompt
 system_prompt_text = (
@@ -75,6 +79,7 @@ print("="*50)
 print("  MINIMUM VIABLE REASONER: GRPO TRAINING")
 print(f"  Model: {model_id}")
 print(f"  Updates: {total_updates} | Group: {group_size}")
+print(f"  VRAM Safe Mode: Context {max_ctx_len} | Gen {max_gen_len} | Pad {prompt_max_len}")
 print("="*50 + "\n")
 
 
@@ -115,21 +120,13 @@ model = FlaxLlamaForCausalLM.from_pretrained(
     dtype=jnp.bfloat16, # GPU санах ойг 2 дахин хэмнэнэ
 )
 
-# Моделийн өөрийнх нь тохиргооноос Context Window-г уншиж авах
-# Хэрэв олдохгүй бол анхны тохируулсан 2048-аар явна
-try:
-    max_ctx_len = int(getattr(model.config, "max_position_embeddings", max_ctx_len))
-except Exception:
-    pass
-
-# Reference Model (Хөлдөөсөн хувилбар)
-# Санах ой хэмнэхийн тулд жинхэнэ copy үүсгэхгүй
-# JAX-д params_ref = model.params гэхэд санах ойд шинээр зай эзлэхгүй зөвхөн pointer заана 
-# Сургалтын явцад train_state.params өөрчлөгдөхөд params_ref хуучнаараа үлдэнэ
+# Reference Model (Dynamic Snapshot)
+# 10GB VRAM-д багтаахын тулд жинхэнэ хуулбар үүсгэхгүй
+# Сургалтын явцад үе үе шинэчлэгдэх pointer ашиглана
 params     = model.params
 params_ref = model.params 
 
-print(f"Модель амжилттай ачаалагдлаа. (Context: {max_ctx_len})")
+print(f"Модель амжилттай ачаалагдлаа. (Context Limit: {max_ctx_len})")
 
 
 # JAX HELPERS
@@ -138,7 +135,7 @@ def build_attn_mask_from_eos(seqs, eos_id, prompt_len):
     """
     EOS token болон PAD token ижилхэн ID-тай байх үед (SmolLM/Llama)
     энгийн (seq != pad) mask ашиглавал өгүүлбэр дундах EOS-ийг mask хийх эрсдэлтэй.
-    Тиймээс Prompt-ийн дараа гарч ирсэн АНХНЫ EOS token хүртэл л хүчинтэйд тооцно.
+    Тиймээс Prompt-ийн дараа гарч ирсэн анхны EOS token хүртэл л хүчинтэйд тооцно.
     """
     # seqs: [Batch, Time]
     T            = seqs.shape[1]
@@ -247,8 +244,6 @@ def compute_advantages_stable(rewards):
 # TRAINING STATE & OPTIMIZER
 
 # Adafactor optimizer болон MultiSteps ашиглан VRAM хэмнэнэ
-# every_k_schedule=group_size гэдэг нь group_size удаа алхам хийсний дараа 
-# сая нэг удаа жингээ шинэчилнэ гэсэн үг (Gradient Accumulation)
 optimizer = optax.chain(
     optax.clip_by_global_norm(1.0),
     optax.adafactor(learning_rate=learning_rate)
@@ -262,18 +257,22 @@ train_state_obj = train_state.TrainState.create(
 )
 
 @jax.jit
-def train_step(state, params_ref, input_ids, attention_mask, advantages, old_log_probs, prompt_len):
+def train_step(state, input_ids, attention_mask, advantages, old_log_probs, ref_log_probs, prompt_len):
     """
-    GRPO Update Step (PPO Logic)
-    Prompt Masking болон KL calculation агуулсан
+    GRPO Update Step (PPO Logic - VRAM Optimized)
+    ParamsRef-ийг гаднаас дамжуулдаг болгосноор VRAM хэмнэнэ.
+    KV Cache-ийг сургалтын үед салгана.
     """
     def loss_fn(p):
-        outputs = state.apply_fn(input_ids=input_ids, attention_mask=attention_mask, params=p)
+        # use_cache=False нь сургалтын үед VRAM хэмнэнэ
+        outputs = state.apply_fn(input_ids=input_ids, attention_mask=attention_mask, params=p, use_cache=False)
         logits  = outputs.logits
-        all_lps = jax.nn.log_softmax(logits, axis=-1)
+        
+        # PPO Correctness: Logits-ийг temperature-д хувааж байж log_softmax хийнэ
+        # Энэ нь rollout хийсэн тархалттай нийцүүлж байгаа хэрэг юм
+        all_lps = jax.nn.log_softmax(logits / gen_temp, axis=-1)
         
         # Action Log Probs (Shifted right)
-        # input[i] нь input[i+1]-ийг таамаглана
         act_lps = jnp.take_along_axis(
             all_lps[:, :-1, :], 
             input_ids[:, 1:, None], 
@@ -282,13 +281,11 @@ def train_step(state, params_ref, input_ids, attention_mask, advantages, old_log
         
         # Prompt Masking
         # Зөвхөн prompt-оос хойшхи token-ууд дээр сургана
-        # Асуултыг цээжлэх биш, хариулт дээр сайжрах ёстой
         seq_len   = input_ids.shape[1]
         pos_idxs  = jnp.arange(seq_len - 1)[None, :] 
         gen_mask  = (pos_idxs >= (prompt_len - 1)).astype(jnp.int32)
         
         # Padding mask + Gen mask
-        # attention_mask[:, 1:] нь padding-ийг хасна
         loss_mask = attention_mask[:, 1:] * gen_mask
         
         # PPO Ratio Calculation
@@ -300,12 +297,10 @@ def train_step(state, params_ref, input_ids, attention_mask, advantages, old_log
         surr2     = jnp.clip(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * adv_broad
         ppo_loss  = -jnp.minimum(surr1, surr2)
         
-        # KL Divergence (Зөвхөн generated tokens дээр)
-        ref_out   = state.apply_fn(input_ids=input_ids, attention_mask=attention_mask, params=params_ref)
-        ref_lps   = jax.nn.log_softmax(ref_out.logits, axis=-1)
-        
-        kl_full   = jnp.sum(jnp.exp(all_lps) * (all_lps - ref_lps), axis=-1)
-        kl_gen    = kl_full[:, :-1] 
+        # KL Divergence (Approximated Token-wise KL)
+        # 10GB VRAM дээр бүтэн Reference Forward хийхгүйн тулд
+        # зөвхөн сонгогдсон token-ий logprob зөрүүг ашиглана (act_lps - ref_lps)
+        kl_gen    = (act_lps - ref_log_probs)
         
         # Total Loss
         # Mask ашиглан дунджийг зөв тооцох (Sum / Count)
@@ -321,30 +316,42 @@ def train_step(state, params_ref, input_ids, attention_mask, advantages, old_log
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
     (loss, (m_kl, m_ratio)), grads = grad_fn(state.params)
     
-    # MultiSteps optimizer ашиглаж байгаа тул apply_gradients нь
-    # градиентыг цуглуулж байгаад k алхмын дараа жинг шинэчилнэ
     new_state = state.apply_gradients(grads=grads)
     return new_state, loss, m_kl, m_ratio
 
 def generate_rollouts_batched(state, prompt_ids, prompt_mask, key, max_new):
     """
-    Rollout generation хийхдээ explicit PRNG key болон уртын хязгаарыг ашиглана.
-    Мөн EOS token-ийг зааж өгснөөр модель дуусах цэгээ мэднэ.
+    Rollout generation хийхдээ PPO математиктай нийцүүлэхийн тулд
+    Top-K sampling-ийг унтрааж (0), зөвхөн Temperature ашиглана.
+    JIT recompilation-аас сэргийлж fixed shape (prompt_mask)-тай ажиллана.
+    10GB VRAM дээр Batch=4 OOM эрсдэлтэй тул sequential generation хийнэ.
     """
-    batch_input = jnp.repeat(prompt_ids, group_size, axis=0)
+    # Batch=1 Generation Loop
+    sequences = []
+    k         = key
     
-    outputs = model.generate(
-        batch_input,
-        params         = state.params,
-        max_new_tokens = max_new,
-        do_sample      = True,
-        temperature    = 0.8,
-        top_k          = 50,
-        pad_token_id   = tokenizer.pad_token_id,
-        eos_token_id   = tokenizer.eos_token_id, # Generation зогсох нөхцөл
-        prng_key       = key 
-    )
-    return outputs.sequences
+    # 10GB VRAM дээр Batch=4 үед KV Cache дүүрэх эрсдэлтэй
+    # Тиймээс 1, 1-ээр нь цувуулж (Sequential) үүсгэнэ
+    for _ in range(group_size):
+        k, sk = jax.random.split(k)
+        
+        # Sequential Generate with Mask
+        out = model.generate(
+            prompt_ids,
+            attention_mask = prompt_mask, # Fixed shape masking
+            params         = state.params,
+            max_new_tokens = max_new,
+            do_sample      = True,
+            temperature    = gen_temp,
+            # PPO тархалттай нийцүүлэхийн тулд Top-K=0 байна
+            top_k          = 0,
+            pad_token_id   = tokenizer.pad_token_id,
+            eos_token_id   = tokenizer.eos_token_id, 
+            prng_key       = sk 
+        )
+        sequences.append(out.sequences)
+        
+    return jnp.concatenate(sequences, axis=0)
 
 
 # MAIN TRAINING LOOP
@@ -358,33 +365,48 @@ step_counter = 0
 curr_key     = init_key
 
 while step_counter < total_updates:
+    # Reference моделийг snapshot хийх буюу шинэчлэх
+    # Санах ой хэмнэх чухал алхам
+    if step_counter % 20 == 0:
+        params_ref = jax.tree_map(lambda x: x, train_state_obj.params)
+
     # Датасетээс санамсаргүй нэг жишээ авах
     idx              = random.randint(0, len(dataset) - 1)
     example          = dataset[idx]
     question         = example['question']
     ground_truth_raw = example['answer'  ]
     
-    # Prompt бэлтгэх
+    # Prompt бэлтгэх (Fixed Shape)
     messages   = format_gsm8k_prompt(question)
     input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True) + "<think>"
-    inputs     = tokenizer(input_text, return_tensors="np", max_length=max_ctx_len, truncation=True)
     
-    prompt_ids = jnp.array(inputs['input_ids'])
-    prompt_len = prompt_ids.shape[1]
+    # JAX Shape тогтвортой байх шаардлагатай тул padding хийнэ
+    # Энэ нь JIT recompile хийгдэхээс сэргийлнэ
+    inputs = tokenizer(
+        input_text, 
+        return_tensors = "np", 
+        max_length     = prompt_max_len, 
+        truncation     = True,
+        padding        = "max_length"
+    )
     
-    # Context цонх шалгалт
-    # Prompt хэт урт бол generation хийх зай үлдэхгүй тул алгасна
-    if prompt_len >= max_ctx_len - 50:
+    prompt_ids  = jnp.array(inputs['input_ids'     ])
+    prompt_mask = jnp.array(inputs['attention_mask'])
+    prompt_len  = int(np.sum(inputs['attention_mask'])) # skip logic
+    gen_start   = prompt_ids.shape[1]                   # padded length for masking
+    
+    # Prompt хэт урт бол алгасах
+    if prompt_len >= prompt_max_len - 2:
         continue
         
-    # Safe max tokens calculation (Context limit-ээс хэтрэхгүй байх)
-    # 0 болон хасах утга гарахаас сэргийлж дор хаяж 1 token үүсгэнэ
-    safe_max_new = max(1, min(max_gen_len, max_ctx_len - prompt_len))
+    # Safe max tokens 
+    safe_max_new = max_gen_len
     
     # Rollout үе шат
     curr_key, gen_key = jax.random.split(curr_key)
     try:
-        sequences = generate_rollouts_batched(train_state_obj, prompt_ids, None, gen_key, safe_max_new)
+        # Энд одоо sequential generation + fixed input ажиллана
+        sequences = generate_rollouts_batched(train_state_obj, prompt_ids, prompt_mask, gen_key, safe_max_new)
     except Exception as e:
         print(f"[Gen Error] {e}")
         jax.clear_caches()
@@ -395,18 +417,31 @@ while step_counter < total_updates:
     rewards       = compute_rewards(decoded_texts, ground_truth_raw)
     advantages    = compute_advantages_stable(rewards) 
     
-    # Old Log Probs (Training step дотор биш гадна талд бүтнээр нь авна)
-    # Энгийн (seq != pad) биш, EOS-ийг зөв тооцох тусгай mask ашиглана
-    attn_mask = build_attn_mask_from_eos(sequences, tokenizer.eos_token_id, prompt_len)
+    # Old Log Probs & Reference Log Probs
+    # Padding ашигласан үед EOS нь padding дотор нуугдах эрсдэлтэй тул
+    # зөвхөн generation эхэлсэн цэгээс (gen_start) хойшхи EOS-ийг хайна
+    attn_mask = build_attn_mask_from_eos(sequences, tokenizer.eos_token_id, gen_start)
     
     def get_log_probs(p, ids, mask):
-        logits = model(input_ids=ids, attention_mask=mask, params=p).logits
-        lps    = jax.nn.log_softmax(logits, axis=-1)
-        # Shift хийгдсэн (сүүлийн token хасагдсан) утга буцаана
+        # use_cache=False чухал тохиргоо (VRAM)
+        logits = model(input_ids=ids, attention_mask=mask, params=p, use_cache=False).logits
+        lps    = jax.nn.log_softmax(logits / gen_temp, axis=-1)
         return jnp.take_along_axis(lps[:, :-1, :], ids[:, 1:, None], axis=-1).squeeze(-1)
 
     try:
-        old_log_probs = get_log_probs(train_state_obj.params, sequences, attn_mask)
+        old_list, ref_list = [], []
+        
+        # 4 ширхэг rollout-ийг цувуулж бодно (Peak Memory Reduction)
+        for i in range(group_size):
+            sub_seq  = sequences[i:i+1]
+            sub_mask = attn_mask[i:i+1]
+            
+            old_list.append(get_log_probs(train_state_obj.params, sub_seq, sub_mask))
+            ref_list.append(get_log_probs(params_ref,             sub_seq, sub_mask))
+            
+        old_log_probs = jnp.concatenate(old_list, axis=0)
+        ref_log_probs = jnp.concatenate(ref_list, axis=0)
+        
     except Exception as e:
          print(f"[Ref Error] {e}")
          jax.clear_caches()
@@ -420,23 +455,24 @@ while step_counter < total_updates:
     
     try:
         # PPO Epochs: Нэг rollout дээр олон удаа давтаж сургах нь үр дүнтэй
-        # Gradient accumulation учир epoch бүрт optimizer update хийгдэнэ
         for _ in range(ppo_epochs):
             for i in range(group_size):
                 sub_seq  = sequences    [i:i+1]
                 sub_mask = attn_mask    [i:i+1]
                 sub_adv  = adv_jax      [i:i+1]
                 sub_old  = old_log_probs[i:i+1]
+                sub_ref  = ref_log_probs[i:i+1]
                 
-                # Prompt_len-ийг дамжуулж зөв masking хийнэ
+                # Update function руу ref_model дамжуулахгүй, зөвхөн утгыг нь өгнө
+                # gen_start (Fixed)-ийг дамжуулж prompt masking зөв хийнэ
                 train_state_obj, loss_val, kl_val, ratio_val = train_step(
                     train_state_obj, 
-                    params_ref     , 
                     sub_seq        , 
                     sub_mask       , 
                     sub_adv        , 
-                    sub_old        ,
-                    prompt_len
+                    sub_old        , 
+                    sub_ref        ,
+                    gen_start
                 )
                 batch_loss  += loss_val
                 batch_kl    += kl_val

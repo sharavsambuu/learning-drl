@@ -389,7 +389,6 @@ frozen_ref = grpo_state.params
 @jax.jit
 def grpo_step_minibatch(state, ref_params, rollouts, old_lps, advs, beta):
     # Gradient Accumulation ашиглан санах ой хэмнэх (64 -> 16 chunk)
-    # Input reshape: [Total, ...] -> [AccumSteps, MiniBatch, ...]
     r_rollouts = rollouts.reshape(accum_steps, mini_batch_size, -1)
     r_lps      = old_lps.reshape(accum_steps, mini_batch_size, -1)
     r_advs     = advs.reshape(accum_steps, mini_batch_size)
@@ -403,8 +402,7 @@ def grpo_step_minibatch(state, ref_params, rollouts, old_lps, advs, beta):
             # Logits тооцоолох
             logits_all = unroll_logits_eval(p, b_roll)
             
-            # PPO Consistency, Scale logits by temperature before processing
-            # Энэ нь rollout хийх үеийн policy болон сургалтын үеийн policy ижил байх нөхцөл
+            # PPO Consistency
             logits_gen = logits_all[:, gen_start-1:-1, :] / grpo_temp
             
             # Сонгогдсон action-уудын logprob
@@ -419,12 +417,12 @@ def grpo_step_minibatch(state, ref_params, rollouts, old_lps, advs, beta):
             surr1  = ratio * b_adv[:, None]
             surr2  = jnp.clip(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * b_adv[:, None]
             
-            # KL Divergence (Reference Logits мөн Scale хийгдэх ёстой)
+            # KL Divergence
             ref_logits_all = unroll_logits_eval(ref_params, b_roll)
             ref_logits_gen = ref_logits_all[:, gen_start-1:-1, :] / grpo_temp
             kl = kl_from_logits(logits_gen, ref_logits_gen)
 
-            # Entropy Bonus (Distribution Entropy)
+            # Entropy Bonus
             entropy = -jnp.sum(p_full * logp_full, axis=-1).mean()
             
             # Нэгдгэсэн loss
@@ -439,13 +437,15 @@ def grpo_step_minibatch(state, ref_params, rollouts, old_lps, advs, beta):
     # mini-batches дээр scan давталт
     _, (all_grads, all_losses, all_aux) = jax.lax.scan(compute_grad, state, jnp.arange(accum_steps))
     
-    # Дундаж градиэнтүүд болон хэмжилтүүд 
-    grads_avg = jax.tree_map(lambda x: jnp.sum(x, axis=0) / accum_steps, all_grads)
+    # Дундаж градиэнтүүд (jax.tree_map v0.6.0 дээр устсан учраас jax.tree_util.tree_map)
+    grads_avg = jax.tree_util.tree_map(lambda x: jnp.sum(x, axis=0) / accum_steps, all_grads)
     avg_loss  = jnp.mean(all_losses)
     avg_pg    = jnp.mean(all_aux[0])
     avg_kl    = jnp.mean(all_aux[1])
     
     return state.apply_gradients(grads=grads_avg), avg_loss, avg_pg, avg_kl
+
+
 
 print("\n" + "="*50)
 print("  PHASE 2: GRPO - Happy бодлого сургах (Accumulation)")
@@ -507,7 +507,7 @@ for update in range(grpo_total_updates):
     if update % grpo_sample_freq == 0:
         best_idx = np.argmax(rewards)
         best_txt = decode_ids(rollouts[best_idx, prompt_len:])
-        print(f"   >> Хамгийн сайн дээж: {best_txt[:160]}...")
+        print(f"   >> Хамгийн сайн дээж : {best_txt[:160]}...")
 
 print("\n=== СУРГАЛТ ДУУСЛАА ===")
 final_prompt        = np.full((1, prompt_len), pad_id, dtype=np.int32)
