@@ -51,7 +51,7 @@ init_key = jax.random.PRNGKey(seed)
 
 # Модель болон Датасет
 model_id            = "HuggingFaceTB/SmolLM2-1.7B-Instruct"
-max_ctx_len         = 1536      # 10GB VRAM-д багтаахын тулд context багасгав
+max_ctx_len         = 1536      # 10GB VRAM-д багтаах context урт
 max_gen_len         = 256       # Reasoning хэт урт байвал VRAM дүүрэх эрсдэлтэй
 # Fixed Shape буюу JAX JIT-ийг дахин ачааллуулахгүйн тулд тогтмол урт
 prompt_max_len      = max_ctx_len - max_gen_len 
@@ -135,7 +135,7 @@ def build_attn_mask_from_eos(seqs, eos_id, prompt_len):
     """
     EOS token болон PAD token ижилхэн ID-тай байх үед (SmolLM/Llama)
     энгийн (seq != pad) mask ашиглавал өгүүлбэр дундах EOS-ийг mask хийх эрсдэлтэй.
-    Тиймээс Prompt-ийн дараа гарч ирсэн анхны EOS token хүртэл л хүчинтэйд тооцно.
+    Тиймээс Prompt-ийн дараа гарч ирсэн АНХНЫ EOS token хүртэл л хүчинтэйд тооцно.
     """
     # seqs: [Batch, Time]
     T            = seqs.shape[1]
@@ -191,7 +191,7 @@ def compute_rewards(rollouts, ground_truth_text):
         score = 0.0
         
         # FORMAT REWARDS (XML бүтцээ зөв бичсэн эсэх)
-        has_think  = "<think>" in text and "</think>" in text
+        has_think  = "<think>"  in text and "</think>"  in text
         has_answer = "<answer>" in text and "</answer>" in text
         
         if has_think:
@@ -328,7 +328,7 @@ def generate_rollouts_batched(state, prompt_ids, prompt_mask, key, max_new):
     """
     # Batch=1 Generation Loop
     sequences = []
-    k         = key
+    k = key
     
     # 10GB VRAM дээр Batch=4 үед KV Cache дүүрэх эрсдэлтэй
     # Тиймээс 1, 1-ээр нь цувуулж (Sequential) үүсгэнэ
@@ -365,10 +365,11 @@ step_counter = 0
 curr_key     = init_key
 
 while step_counter < total_updates:
-    # Reference моделийг snapshot хийх буюу шинэчлэх
+    # Reference моделийг "snapshot" хийх буюу шинэчлэх
     # Санах ой хэмнэх чухал алхам
     if step_counter % 20 == 0:
-        params_ref = jax.tree_map(lambda x: x, train_state_obj.params)
+        # jax.tree_map -> jax.tree_util.tree_map (JAX v0.6.0)
+        params_ref = jax.tree_util.tree_map(lambda x: x, train_state_obj.params)
 
     # Датасетээс санамсаргүй нэг жишээ авах
     idx              = random.randint(0, len(dataset) - 1)
@@ -392,14 +393,14 @@ while step_counter < total_updates:
     
     prompt_ids  = jnp.array(inputs['input_ids'     ])
     prompt_mask = jnp.array(inputs['attention_mask'])
-    prompt_len  = int(np.sum(inputs['attention_mask'])) # skip logic
-    gen_start   = prompt_ids.shape[1]                   # padded length for masking
+    prompt_len  = int(np.sum(inputs['attention_mask'])) # Real length for skip logic
+    gen_start   = prompt_ids.shape[1]                   # Fixed masking padded length 
     
     # Prompt хэт урт бол алгасах
     if prompt_len >= prompt_max_len - 2:
         continue
         
-    # Safe max tokens 
+    # Safe max tokens
     safe_max_new = max_gen_len
     
     # Rollout үе шат
