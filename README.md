@@ -9,6 +9,7 @@
 
 
 
+
 # Algo names and intuition table
 
 
