@@ -1,5 +1,5 @@
 #
-# HAPPY TEXT GENERATOR — CWRRT TRANSFORMER + GRPO TUNING
+# HAPPY TEXT GENERATOR - CWRRT TRANSFORMER + GRPO TUNING
 # Архитектур:
 #   CWRRT, Cross-Window Residual Recurrent Transformer, Sharavsambuu.G (2026/01/01)
 #
@@ -27,6 +27,9 @@ from   jax           import numpy as jnp
 from   flax.training import train_state
 
 
+# -----------------------------
+# Hyperparameters
+# -----------------------------
 dataset_path          = "tinystories-small.txt"
 end_of_text_token     = "<|endoftext|>"
 seed                  = 42
@@ -93,14 +96,14 @@ else:
     with open(dataset_path, "r", encoding="utf-8", errors="ignore") as f:
         raw_text = f.read()
 
-all_stories            = [s.strip() for s in raw_text.split(end_of_text_token) if len(s.strip()) > 50]
-unique_chars           = sorted(list(set("".join(all_stories))))
+all_stories    = [s.strip() for s in raw_text.split(end_of_text_token) if len(s.strip()) > 50]
+unique_chars   = sorted(list(set("".join(all_stories))))
 
-PAD, BOS, EOS          = "<PAD>", "<BOS>", "<EOS>"
-chars                  = [PAD, BOS, EOS] + unique_chars
-char_to_id             = {c: i for i, c in enumerate(chars)}
-id_to_char             = {i: c for c, i in char_to_id.items()}
-vocab_size             = len(chars)
+PAD, BOS, EOS  = "<PAD>", "<BOS>", "<EOS>"
+chars          = [PAD, BOS, EOS] + unique_chars
+char_to_id     = {c: i for i, c in enumerate(chars)}
+id_to_char     = {i: c for c, i in char_to_id.items()}
+vocab_size     = len(chars)
 pad_id, bos_id, eos_id = char_to_id[PAD], char_to_id[BOS], char_to_id[EOS]
 
 def encode_text(text):
@@ -115,7 +118,6 @@ for s in all_stories[:2000]:
 corpus_ids = np.array(flat, dtype=np.int32)
 
 print(f"Vocab Size: {vocab_size}, Tokens: {len(corpus_ids)}")
-
 
 # -----------------------------
 # CWRRT МОДЕЛ (RECURRENT TRANSFORMER)
@@ -171,9 +173,9 @@ class Block(nn.Module):
 class CWRRTWindowCell(nn.Module):
     """
     CWRRT Cell:
-    - Memory Adapter (Active)
-    - KV Recompute inside loop 
-    - Output Masking 
+    - Memory state saved before masking
+    - Boolean causal mask
+    - Inputs as Tuple
     """
     vocab_size   : int
     embed_dim    : int
@@ -187,7 +189,8 @@ class CWRRTWindowCell(nn.Module):
     deterministic: bool = True
 
     @nn.compact
-    def __call__(self, carry, tokens_w, pos_offset):
+    def __call__(self, carry, inputs):
+        tokens_w, pos_offset = inputs 
         mem, ssum = carry
         
         B, T = tokens_w.shape
@@ -210,7 +213,7 @@ class CWRRTWindowCell(nn.Module):
         x          = x + (carry_proj * alpha[None, :])[:, None, :]
 
         # Mask Preparation
-        causal_tt   = (jnp.tril(jnp.ones((T, T))) == 1)
+        causal_tt   = jnp.tril(jnp.ones((T, T), dtype=bool))
         mem_to_all  = jnp.ones((T, O), dtype=bool)
         causal      = jnp.concatenate([mem_to_all, causal_tt], axis=1)[None, None, :, :]
         
@@ -220,23 +223,24 @@ class CWRRTWindowCell(nn.Module):
         )
         mask = causal & key_ok[:, None, None, :]
 
-        # Transformer Blocks 
+        # Transformer Blocks (KV Loop)
         for i in range(self.num_layers):
             kv = jnp.concatenate([mem, x], axis=1) 
             x  = Block(self.embed_dim, self.num_heads, name=f"b{i}")(x, mask, kv=kv, deterministic=self.deterministic)
 
         x = nn.LayerNorm()(x)
+
+        # Update Memories (masking хийхээс өмнө хадгалах)
+        new_mem = x[:, -O:, :] 
         
         # Output Masking
         m = (tokens_w != pad_id).astype(jnp.float32)
-        x = x * m[:, :, None]
+        x = x * m[:, :, None] 
         
         logits = nn.Dense(self.vocab_size)(x)
-
-        # Update Memories
-        new_mem = x[:, -O:, :]
         
-        summary = jnp.sum(x, axis=1) / (jnp.sum(m, axis=1, keepdims=True) + 1e-6)
+        # Masked Pooling
+        summary = jnp.sum(x * m[:, :, None], axis=1) / (jnp.sum(m, axis=1, keepdims=True) + 1e-6)
         
         lam       = jax.nn.sigmoid(self.param("lam_p", nn.initializers.constant(_logit(self.lambda_init)), (self.embed_dim,)))
         new_ssum  = (ssum * lam[None, :]) + (summary * (1.0 - lam[None, :]))
@@ -245,7 +249,7 @@ class CWRRTWindowCell(nn.Module):
 
 class CWRRTTransformer(nn.Module):
     vocab_size  : int
-    embed_dim   : int
+    embed_dim   : int 
     num_layers  : int
     num_heads   : int
     window_len  : int
@@ -256,8 +260,8 @@ class CWRRTTransformer(nn.Module):
 
     @nn.compact
     def __call__(self, tokens_long, deterministic=True):
-        B, N       = tokens_long.shape
-        W, O, S    = self.window_len, self.overlap, self.window_len - self.overlap
+        B, N    = tokens_long.shape
+        W, O, S = self.window_len, self.overlap, self.window_len - self.overlap
 
         n_win      = 1 if N <= W else int(math.ceil((N - W) / S)) + 1
         total_len  = W + (n_win - 1) * S
@@ -270,7 +274,7 @@ class CWRRTTransformer(nn.Module):
             CWRRTWindowCell,
             variable_broadcast = "params",
             split_rngs         = {"params": False, "dropout": True},
-            in_axes            = (0, 0), # (windows, starts)
+            in_axes            = 0,
             out_axes           = 0
         )
 
@@ -288,7 +292,7 @@ class CWRRTTransformer(nn.Module):
             lambda_init   = self.lambda_init,
             alpha_init    = self.alpha_init ,
             deterministic = deterministic
-        )((init_mem, init_ssum), windows, starts) 
+        )((init_mem, init_ssum), (windows, starts))
 
         out = logits_ws[0]
         if n_win > 1:
@@ -336,12 +340,16 @@ def generate_rollout(params, prompts, key):
         logits = model.apply({"params": params}, seq, deterministic=True)[:, P+i-1, :]
         logits = logits.at[:, pad_id].set(-1e9)
         logits = logits.at[:, bos_id].set(-1e9)
+        
         k, sk  = jax.random.split(k)
         tok    = jax.random.categorical(sk, logits / grpo_temp).astype(jnp.int32)
+        
         tok    = jnp.where(done, eos_id, tok)
         lp     = logprob_from_logits(logits / grpo_temp, tok)
+        
         seq    = jax.lax.dynamic_update_slice(seq, tok[:, None], (0, P+i))
         done   = jnp.logical_or(done, tok == eos_id)
+
         return (seq, k, done), (tok, lp)
 
     (final, _, _), (_, lps) = jax.lax.scan(body, (curr, key, done), jnp.arange(gen_len))
@@ -406,7 +414,7 @@ def sft_step(state, batch, rng):
     return state.apply_gradients(grads=grads), loss
 
 print("\n" + "="*72)
-print("  PHASE 1: SFT - Суурь хэлний мэдлэг (CWRRT v4 Final)")
+print("  PHASE 1: SFT - Суурь хэлний мэдлэг (CWRRT v6 Final Polish)")
 print(f"  Steps: {sft_total_steps} | Batch: {sft_batch_size} | Dim: {embed_dim}")
 print("="*72 + "\n")
 
@@ -438,17 +446,17 @@ gc.collect()
 # PHASE 2: GRPO
 # -----------------------------
 grpo_state = train_state.TrainState.create(
-    apply_fn=model.apply,
-    params=learned_params,
-    tx=optax.chain(optax.clip_by_global_norm(max_grad_norm), optax.adam(grpo_lr))
+    apply_fn = model.apply,
+    params   = learned_params,
+    tx       = optax.chain(optax.clip_by_global_norm(max_grad_norm), optax.adam(grpo_lr))
 )
 frozen_ref = grpo_state.params
 
 @jax.jit
 def grpo_minibatch_update(state, ref_params, rollouts, old_lps, advs, beta):
     r_roll = rollouts.reshape(accum_steps, mini_batch_size, -1)
-    r_lps  = old_lps.reshape(accum_steps, mini_batch_size, -1)
-    r_adv  = advs.reshape(accum_steps, mini_batch_size)
+    r_lps  = old_lps .reshape(accum_steps, mini_batch_size, -1)
+    r_adv  = advs    .reshape(accum_steps, mini_batch_size)
 
     def compute_grad(carry, i):
         curr_st = carry
@@ -473,7 +481,7 @@ def grpo_minibatch_update(state, ref_params, rollouts, old_lps, advs, beta):
         return curr_st, (grads, aux)
 
     _, (all_grads, auxs) = jax.lax.scan(compute_grad, state, jnp.arange(accum_steps))
-    avg_grads            = jax.tree_util.tree_map(lambda x: jnp.mean(x, axis=0), all_grads)
+    avg_grads = jax.tree_util.tree_map(lambda x: jnp.mean(x, axis=0), all_grads)
     return state.apply_gradients(grads=avg_grads), jnp.mean(auxs[0]), jnp.mean(auxs[1])
 
 print("\n" + "="*72)
@@ -522,7 +530,7 @@ for update in range(grpo_total_updates):
     if update % grpo_sample_freq == 0:
         best_idx = np.argmax(rewards)
         print("-" * 50)
-        print(f"   >> дээж (Update {update}):")
+        print(f"   >> Шилдэг дээж (Update {update}):")
         print(decode_ids(rollouts[best_idx]))
         print("-" * 50)
 
