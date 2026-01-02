@@ -1,0 +1,225 @@
+Vocab Size: 99, Tokens: 1588465
+
+========================================================================
+  PHASE 1: SFT - Суурь хэлний мэдлэг (CWRRT v6 Final Polish)
+  Steps: 10000 | Batch: 16 | Dim: 256
+========================================================================
+
+[SFT] Алхам     0 | Loss: 5.0803
+[SFT] Алхам   500 | Loss: 1.8583
+--------------------------------------------------
+   >> Дээж (Step 500):
+Once upon a timeh wnce upon there was loved hofr. The ly wof tracanlllled won Mun in ther. The soomm bet thes dokst whore. Ancited hocke alll jull on the det notck. She line pid t A t wom skit houte but, ban sate befouce nd for me. The sad the ton. The she is spreied dod whit could ame but noulOne day day her a vow jor al ta he to so with toy tewit. He sappplaid the dids to the gradd. Once he day, wared was lwith with was some the tatce the hiUt waze fin the to wagas ro it athe Tbre nod haze il dord bef orelld her per with grieds and worfte. She was fach drind saxse oken id he big adror troul was liggl hirange bis.
+Luly pan ashe sher were sked to felet to way tay the der ownthed toyo ber neand din't a freand the won.
+The dent to beltt to he to frie ongg rshe oud ime wit. An hn was so the oun fom was ho wef tan theatl way lus very do pevery ine to pome. He wall ha the sow hrmom qoreniang me a ware. She was to are donespy fiobe to ight. He prened hel to beaing and alled The klay bin hery haramy we want. She smil te jo thend th
+--------------------------------------------------
+[SFT] Алхам  1000 | Loss: 1.4287
+--------------------------------------------------
+   >> Дээж (Step 1000):
+Once upon a timence upore and Towld ball big man in theirl. But was so on loved his and make Timmy was be had nowmeked his mom way. One day, he ward, they bot flower comple.
+But they was a lots black of the bear morer was and playint on a girdend in the fat could of we for eat to feeaingal to.
+"I'm st coban't't warmitt and Ben. He was a vicure!" Tomy sad, "His you you hat girt and said, "He liughter!"
+Delied if big home so get so a new alking the breembing is and the for somet in the litle sky. They suny, he shooute little baboutside little bowe the to go the semelfed and it went. She looked to themer around, them tools im to shouy it. She nots squicket inside to fun of were rod a every so the could ran knerats it. He was a losng the could ful she ratter.
+--------------------------------------------------
+[SFT] Алхам  1500 | Loss: 1.2342
+--------------------------------------------------
+   >> Дээж (Step 1500):
+Once upon a timewe a talk to bale were to there ball. They went there toys amazing and her mom feel boy. He was playing said, "You worke to go in they clean. It is mild.
+She said not the sky family come her made whated to it. Annd hid got and said. After mommy and said "Yes," he tole sory!"
+Whuten the bigg much the onsay the got and closer the fore she can shiny and have his toy. But the made went happy!" They that day so explained to his much a that things boack to everyop. The couldn't wait for can picture the slide pictures.
+--------------------------------------------------
+[SFT] Алхам  2000 | Loss: 1.2130
+--------------------------------------------------
+   >> Дээж (Step 2000):
+Once upon a timencen upon a time there was a kitch. Carefully who like the very head beautiful they would for cating and and with the place. One day, the sew a so happy and made her mommyserged, but he did new better the popecet the sunnide.
+As he granched to seentam in the believed to her tried to his friend, but he duck couldn't big pick with it was to were it bright. It was a big smile be careful back in the little good and the over sweet friends in they felt slide.
+One day, Daddy box the forevers and watched that the shadler his tranger. She was so happy and it her felt being bird swas they he'd anything a park. She asked his they looked back and every sad they up underfull fun animals things and the same and safe?
+--------------------------------------------------
+[SFT] Алхам  2500 | Loss: 1.1160
+--------------------------------------------------
+   >> Дээж (Step 2500):
+Once upon a timence there was a little. It mearusure who was very friends. One day her mom asked his toys car. They were big friends was reminder bitte what being forest.
+The end.
+--------------------------------------------------
+[SFT] Алхам  3000 | Loss: 1.1027
+--------------------------------------------------
+   >> Дээж (Step 3000):
+Once upon a timence there was a boy welling in the park. One day, he asked her fun walk in its ran and made him would pink in him olse time. One day, he saw something ened him that he saw a walk tiny. He was trying proud of place.
+The mom and the play with the big came bath to her and and smile too run of ofllect the could make. She told him to started to help hand. One sunny was so happy to bed. They were why was busy the pin the couldn't leave, they had a brew and came to see things and couldn't wait to people their able to garden. The firshed trummy went to see until like better, they kept at try kind the thought them.
+Inside to help milk, "I have you butterfly!" a the big smile for the bring red wish beetter. But then, he decided to sure and take it went down to touch it bed. He was so happy bomise so that he could him creation. She kept away animals and saw that day on the could be new new feel of places.
+But a big and that it's was done a big good to use with the beach a special to eat the at. And his fun away too down
+--------------------------------------------------
+[SFT] Алхам  3500 | Loss: 1.0820
+--------------------------------------------------
+   >> Дээж (Step 3500):
+Once upon a timence upon a time, there was a girl named Lily. She loved to play with her toys colectes with her toys, and her mommy and hurt happier can make in that shes are of it and worked it. Lily and Sarah was so happy. "He happy!"
+Johnny smiled. Her mom gave her a loud come over the see thanked the trail to help him. Max was a little boy was very huged and couldn't like some to help even all her nice.
+One day, he wanted to stell for a was very excited. She went on the enter figure and and soon her side wigggot into the task and saw it up in her got stop her backyard with the could for her new on he was strong. His she saw Finnally, as for he noticed to help ecream all dry day felt, he saw a bad worked to go aloud perfect the kity. They decided to eat the couldn't espon with the bons kept on the store and cllapped on always began to the butterfly in the sky to dirty.
+Pen the mouse worked him to be with the cave it a special quetiou. He tried not was nowman and owards. He was so happy and came big up his to edoo. She cra
+--------------------------------------------------
+[SFT] Алхам  4000 | Loss: 1.0121
+--------------------------------------------------
+   >> Дээж (Step 4000):
+Once upon a time there was a little boy named Timmy. Timmy loved to pull in the nightly. They were playing with her mommy and daddy.
+Mummy said, "Let's go to the other and we to be on the floor." Her mommy, my was happy and the house, knew he wanted to go to on the slide.
+Kimmy went to the old Lily's mom said, "Don't worry, Mom. You're showed some good?" Her mommy said, "Don't worry, Lily. So said, "You know you to play with Timmy. I play with his try in the pretty and grabbed of cross." Her mom said, "Thank you, mommy.
+Timmy and Timmy to made to the oday, make it's how other the grage soakes Anna.
+--------------------------------------------------
+[SFT] Алхам  4500 | Loss: 1.0422
+--------------------------------------------------
+   >> Дээж (Step 4500):
+Once upon a timehe was a little girl was white show Ince because he was a big bad. He hopped around that he cookies and content.
+The bird was so happy that he door was about to his birds. They would chased a lots of light things. They all was so happy!
+He saw so excited that she kind.
+He found a big and the boy and food a show the marched the best flying and having fun. They little girl was a little girl curled and for the teddy bear. Jack ran offered the blue with a picture the foreve who being dance. It started so much children of the room. She felt very proud and put her picture of the birds before.
+The Quickly got a gobye and said, "Thank you, why out get hungry. It is the strong?"
+Lily knew that the they all put around the ice call day. The bird was Ben safe things and counted to open to the popped them. Then, he reemembered the snower friends to make out of her. And the fun day in the liont to the streetched than the more.
+--------------------------------------------------
+[SFT] Алхам  5000 | Loss: 0.9465
+--------------------------------------------------
+   >> Дээж (Step 5000):
+Once upon a timeupon a time, there was a little girl named Lily. She loved to pick the park, so she found a picture of the days and found a way.
+One day, the bird daughter was so happy. Everyone was so excited to go to teal things that new of the trees. Evenione day, a fireplace too. The bird wanted to take a vase.
+Suddenly, he saw a dangerous and wanted to play with her mom for the spilled was fun, "Oh, little beak! I was the park and many can help. Ben scared, she saw money of the porce of the room to of the toys.
+She took her drawing and said, "Yes, let's go poppy away!" Lily smiled. She gave the lion her reging back to her how lots offf it because her favorite thing.
+The rabbit that bad was gone before had good special my anymore. They spilled with her mom hugged Max.
+--------------------------------------------------
+[SFT] Алхам  5500 | Loss: 1.0078
+--------------------------------------------------
+   >> Дээж (Step 5500):
+Once upon a timehta day important named Timmy. Timmy loved to play with his big bucket. He loved to play with that made a big by and named Timmy. Timmy took his backyard. Timmy was still is a big hug and see they would be a big ball day.
+The record bulb he was wa colourful such he was always going to rest. They cat scared he stronger. Suddenly, she tried to the top him. They worked and saw a big plants outside.
+The cat. But then came to get the duck and not know who was much fun. He wanted to the sky, and the enough, happy that the lady and a key more.
+So, they felt scared to the sky. They had man followed for the laund inside. He house, he wanted to swim could stop sharing. It was very proud. But Freddy was so safe she could load and started to make things. Striped sat down to get the ball the bag blocks in the swan they started the fish and shook each other friends.
+--------------------------------------------------
+[SFT] Алхам  6000 | Loss: 0.9713
+--------------------------------------------------
+   >> Дээж (Step 6000):
+Once upon a timeupon a time, there was a pole man and very brother with a started a naughty. He was three years old and wanted to play with. One day, the purre saw a big very surprise, he was happy to of new three years old. They special girl adventure the worked for under she was still plants.
+One day, Tom and saw a small a bunny the ground. One day, Benny was Fluffy with the birds when she saw a friend to go the room. The end.
+--------------------------------------------------
+[SFT] Алхам  6500 | Loss: 0.9668
+--------------------------------------------------
+   >> Дээж (Step 6500):
+Once upon a timeupon a time, there was away frolow. It was so prince so many called Daisy went for a lot. He couldn't believe he candy. It was a little bit slides up with them.
+Everyone was so that he lost his game in the ground, and find a wam. It was so big speak in the water and play with him a big better. He said she was so happy! He put and felt so he was so grateful.
+So, Jack and Jill smiled and went back to the applace. He knew he had crushrose started to pull it once and smiling it was time. For then on, he was so excited and started to crawl and slowimmy. From that day on, Max and Jack was so happy!
+They wanted to see what happening about the beautiful so enjoy there, like meadow. They played together and find something fun.
+--------------------------------------------------
+[SFT] Алхам  7000 | Loss: 0.9821
+--------------------------------------------------
+   >> Дээж (Step 7000):
+Once upon a timeon there was a family called Amy. One day, he plant his toy car of land something stone. He walked at the bione.
+One day, he saw a boy was big farmer. He smiled and kept sitting some dress that Then he had a brave. It was not to hurt. Tim looked around all the world playing, but the beave good for a tree.
+After a few minutes and counting. He put the door one from the face. He decided to record and said, "I'm sorry. I'll do the box and it to borrow.
+The snapped and waved with a glown back to the water. The bird felt flower, the leaves the tired to eat the pebble with his long. She shopped off!
+John kept playing on the little girl neededed to some playing out a she would get from the markerching of her to get when I help you have made a magical special creature lower about things.
+--------------------------------------------------
+[SFT] Алхам  7500 | Loss: 0.9435
+--------------------------------------------------
+   >> Дээж (Step 7500):
+Once upon a timehe was a boy named Timmy. Timmy loved to play outside and he was very happy. One day, he went to the barn in the sand. The help met a big and a boy with his spider. The man said, "I not fight on! You can catch the strunk to me it a my neighbora."
+Tom was so proud of the rice and reach in and drinks. They learned the played and down. She made his adventure to move. They said, "I like it very pretty are to need. I will the best down and ride to play mess. That is happy to share to come in the edge nes curious."
+Lily knew that the big dog new they both and the tree. They did not went to bed. They all learned and he was so happy. They do not want to the floor. They had to make small look. They said, "Thanks you for you, children this travel and get the train and their tweet. It is so much better with a lively tree and went in.
+Mommy and Jane were playing outside. They played on the jar friend. He not make thing to his ducks and moved to play with his children. The little girl was so sad. So, the mad to a a caref
+--------------------------------------------------
+[SFT] Алхам  8000 | Loss: 0.9590
+--------------------------------------------------
+   >> Дээж (Step 8000):
+Once upon a timeon. She was a little bird came. The baby didn't like to fly and rainbow. One day, he saw a big hug. She knew it was playing outside in the sunshine. She looked up and the view weell.
+Lily and Ben heard with her tall day long. She did not give the room, she puppy some game of her kite. She was so excited and jumped up a shiny room.
+The dog was sad because she had puts the door of the circus. She learned so helpful soon it she knew it was time from the basket. It was so serth!
+She knew her mom started to jumping her back her mom. She had a friend
+Lily's hugged her a mission. She went to have made a fun important to see what it was too her mom.
+Lily was so happy that her friends to her spotted it tasty on her shell. She was so happy and put them with butterfly walking and it was important to get hurt and it was not to the ocean before.
+When they got in a playing with a sea with so bad gave him a creature of brother. Her mom realized at the slide like his fake picnic.
+--------------------------------------------------
+[SFT] Алхам  8500 | Loss: 0.9345
+--------------------------------------------------
+   >> Дээж (Step 8500):
+Once upon a time” there was a little girl named Lily. She loved to run and laughed and she wanted to Max were feeling much. One day, Lily's daddy the swing and didn't want to eat a pol. She went up the middle of colorful and laugh a big small tower in the park. It was so excited to see what right to drawer.
+Suddenly, she was coming from juicy a new for a people flying. She thought it was tired! She cried running and said, "Yes, And so yummy! "That's a beautiful right, I love have an away very nice milk." Kiki worked on the soft the log, but it didn't stand it what helping even.
+The moral of the sun and wanted to try and wished what it was much better and making surprise.
+The moral of the game and was so happy that made little girl was so excited to eat the two still the world. The pumpkin played was so happy.
+The girl smiled and made her feel a generous. They were very happy animals and they were he lost feell and wished all of because even more and read.
+--------------------------------------------------
+[SFT] Алхам  9000 | Loss: 0.9125
+--------------------------------------------------
+   >> Дээж (Step 9000):
+Once upon a time there was a little girl named Amelia. She was very still loved to cry. One day, her mommy asked her mom and daddy. The called out a hot dance prud. One day, he walked in his named Timmy. Timmy was very sad. He was easy going to his new friends and went to fly. Timmy felt his accidentally could.
+Timmy, Timmy and daddy said, "Yes, please. This tail flower apples, because she couldn't know what to do."
+Timmy was scared that he could go outside? Suddenly, Lily's mom felt happy. She didn't have a game to the park. She got of himself dress and hurt the branch. She looked out the house and and they would help him and from office. He carefully knew that he water and leaves the for his house. He was amazed for himself and his face. The sun was very learned that even his midd and said goodbye before. From that day on, Lily quickly said goodbye as that they could do nugs.
+--------------------------------------------------
+[SFT] Алхам  9500 | Loss: 0.9339
+--------------------------------------------------
+   >> Дээж (Step 9500):
+Once upon a time-Daddy walking through their day. He loved to spending with his favourite house. One day, when he said, "Oh! now, we let the flower really little birds. The bushes was very pick in the children on the kitchen.
+Jimmy had found a ball house. He couldn't wait to help. He felt so happy that she shouted of himself! He was so happy that he was raing so high. He thanked the pocket, started to roll before him. He was so happy, but he played together to him that he water.
+So, Lily and her mommy said, "But what just a destroy?"
+Johnny smiled, "I love to the leased, "We can please!"
+So they ate the fish found playing together. He had to laugh. He stranged to help their put the snice and down the came to her again. He wanted to catch the buttons of cleaned in a friendly wanted to outside.
+From then on, the girl was a small and Grandma to make a lot of fun. Inside, the girl's mother organized and the boy had pained that day. After a few how to cup until and still was fly!
+Jeff was happy that still, she fellt splas, taur
+--------------------------------------------------
+
+========================================================================
+  PHASE 2: GRPO - Happy бодлого сургах (CWRRT v6 Final Polish)
+  Updates: 5000 | Group: 16
+========================================================================
+
+[GRPO] Upd    0 | AvgReward:   2.71 | KL: 0.0470 | Beta: 0.0400
+--------------------------------------------------
+   >> Шилдэг дээж (Update 0):
+ted to rain. She felt sad.
+Suddenly, she heard and lady, and the apple for all day. She saw a big sky the twinkle. She noticed to follow the button and it was too play. So he said, "Hello, happy and it. Can I play a get too the field the frushest they could on the bone new. It changed down they went to the power too. She felt all the people and for him. He ugly the tree, looking around the bus arrived up. They played with the water the water so much fun. The twinkle were their and they became they leaves them feeling loved his turning. It break careful and proud of the balance, but they both was scared.
+The little boy was so happy and feeling bird again. They knew that they every day together the standboall, feeling the games inside again. It was so always relieve a special picture and the ordeer to the ground. She knew that it would put the prizze, but it was reliable to find a car. She is mom saw the replied. She asked her mom said, "It's so brave when you!"
+So they did not an opened them that day they would go their agan. She looked around her house to
+
+--------------------------------------------------
+[GRPO] Upd   20 | AvgReward:   3.44 | KL: 0.1492 | Beta: 1.5335
+--------------------------------------------------
+   >> Шилдэг дээж (Update 20):
+ lot of balloons. They are happy. They like ball was very happy and saw some for them.
+The girl was so happy to have some if he was glue to her teach. Then he the butterfly girls, and they were happily ever tried to sing and saw a bush. The cat was so proud of the big bowl and was still smile.
+The little girl felt safe and the clouds at the rain to keep all the clean with whole and and laughed.
+--------------------------------------------------
+
+[GRPO] Upd   40 | AvgReward:   2.89 | KL: 0.0528 | Beta: 4.5790
+--------------------------------------------------
+   >> Шилдэг дээж (Update 40):
+ed scratching it, but it wouldn't go away.
+Lily's mommy tasted the rabbit and playing together. She wanted to show it to hurt, but it her mommy said yes. She could go scared. They wanted to go on an adventure and she had one. She said, "I don't like to us!"
+Lily and Suddenly, a belonged eat the blue stayed inside and put in it. She knew it some to be a great for the park. She smiled and put it it in a very ellevator.
+So, the mommy said, "Met's pretty that if your room," she said. "How does give Lucy a will be scared.
+Mia smiled and hugged her and Lily Lily to the park. Lily was scared and said, "I was feeling like you doing Lily." They were back. They did not listen to take a mine. It is my things, Lily was called. It was too dry like him and parents. And found something for the warm and into the store. Mommy was happy have they abbout the family ever got and closed. The end.
+--------------------------------------------------
+
+[GRPO] Upd   60 | AvgReward:   2.65 | KL: 0.0563 | Beta: 3.8158
+--------------------------------------------------
+   >> Шилдэг дээж (Update 60):
+learned. Whenever the journey was difficult, he couldn't wait to leave.
+The bug cat was reminded an old her idea. They were tooth street! They were excited to put the tank line and Tom! Tom was very happy and thanked their reaches to waited for help.
+The bear went down, they got had to have a night all the sky to play. They were happy that he was playing with her red, and they had to climb in the farm new friends.
+The searched the started to sit was time the mule to the top of the many should not it was happy. The secret on and Jack and they loved his legs that everyone of provide in a tree.
+--------------------------------------------------
+
+[GRPO] Upd   80 | AvgReward:   3.81 | KL: 0.0306 | Beta: 3.1799
+--------------------------------------------------
+   >> Шилдэг дээж (Update 80):
+jogging with me, Mom" said Tom.
+"No problem, I love you me a hold to day and becoming to be your friends. It love you water my to the stand?" The boy smiled and said, "No, Pring you feel playing with a picture, but it couldn't help."
+The bubble didn't want to know what, but the bug in sister that noticed that they had hugged him one gave her.
+From that day on, Lily asked her mom took her to the window. They were so happy to see the little boy thanked the medicine to eat it.
+Suddenly, a found his hands started to come from the strinking too nice that she saw the bucket. They all was so happy and watched the dirty petty day. They all laughed and smiled again. They went home and thanked the gave the fish way. They felt have fun to the bug kitchen to a bite hidden in the tree. He would carefully continued to be for a while to adventure.
+--------------------------------------------------
+
+[GRPO] Upd  100 | AvgReward:   2.22 | KL: 0.0575 | Beta: 3.8158
+--------------------------------------------------
+   >> Шилдэг дээж (Update 100):
+e alert. They look at the gate. They see a man was that there happy with her friends and came up in her face. The next day, the had a sadly wanted to play came and not get scared comfortable the smile. He thought was never scared for it, and it was his favorite too come to be happy all ever bitter.
+The boy named Jane with the dog to was careful in the man was so happy to have a wine to scream in the while.
+--------------------------------------------------
+
+
+
+
