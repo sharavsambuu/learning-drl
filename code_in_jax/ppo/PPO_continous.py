@@ -2,11 +2,18 @@
 # PPO (Continuous)
 #
 #   - Squashed Gaussian Policy: a = tanh(u) * max_action
-#   - Stable Log-Prob: Recomputed from 'u' with Jacobian correction
+#   - Stable Log-Prob: From 'u' with Jacobian correction
 #   - Unified Path: Store raw 'u' in buffer, avoids unstable arctanh(a)
-#   - Correct Timeout Handling: Truncated != Terminated for bootstrapping
-#   - Optimized Rollout: Single inference per step, bootstrap post-loop
-#   - Stability: Global Gradient Clipping + Orthogonal Initialization
+#   - Proper Truncation Handling:
+#       * Bootstrapping uses dones_term (terminated only)
+#       * GAE recursion uses masks (cut on terminated OR truncated)
+#   - Correct Next-Value:
+#       * Store next_states per-step, batch infer V(next_state) post-rollout
+#   - PPO Stability:
+#       * Value Clipping (PPO paper)
+#       * LR Annealing
+#       * KL Early Stop
+#       * Global Grad Clip + Orthogonal Init
 #
 #
 
@@ -35,6 +42,8 @@ max_grad_norm       = 0.5
 epochs_per_update   = 10
 mini_batch_size     = 64
 
+target_kl           = 0.01     # KL early stop threshold (0.01 ~ 0.03)
+
 debug_render        = True
 render_update_every = 10
 render_sleep        = 0.0
@@ -48,7 +57,6 @@ class ActorCriticNetwork(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        # Orthogonal Initialization (Standard for PPO stability)
         init_ortho = nn.initializers.orthogonal(np.sqrt(2))
         init_value = nn.initializers.orthogonal(1.0)
         init_means = nn.initializers.orthogonal(0.01)
@@ -60,8 +68,6 @@ class ActorCriticNetwork(nn.Module):
 
         mean    = nn.Dense(features=self.action_dim, kernel_init=init_means)(x)
         log_std = self.param("log_std", nn.initializers.constant(-0.5), (self.action_dim,))
-        
-        # Clip log_std to prevent numerical instability
         log_std = jnp.clip(log_std, log_std_min, log_std_max)
 
         value   = nn.Dense(features=1, kernel_init=init_value)(x)
@@ -82,9 +88,19 @@ rng, init_rng = jax.random.split(rng, 2)
 dummy_input         = jnp.zeros((1, state_dim), dtype=jnp.float32)
 actor_critic_params = actor_critic_module.init(init_rng, dummy_input)["params"]
 
+updates               = int(total_timesteps // steps_per_batch)
+minibatches_per_epoch = steps_per_batch // mini_batch_size
+total_opt_steps       = updates * epochs_per_update * minibatches_per_epoch
+
+lr_schedule = optax.linear_schedule(
+    init_value       = learning_rate,
+    end_value        = 0.0,
+    transition_steps = total_opt_steps
+)
+
 optimizer = optax.chain(
     optax.clip_by_global_norm(max_grad_norm),
-    optax.adam(learning_rate, eps=1e-5)
+    optax.adam(lr_schedule, eps=1e-5)
 )
 opt_state = optimizer.init(actor_critic_params)
 
@@ -103,8 +119,6 @@ def gaussian_log_prob(u, mean, log_std):
 
 @jax.jit
 def squashed_log_prob(u, mean, log_std):
-    # log π(a) where a = tanh(u) * max_action
-    # Uses the stable identity: log(1 - tanh(u)^2) = 2 * (log(2) - u - softplus(-2u))
     logp_u = gaussian_log_prob(u, mean, log_std)
     corr   = 2.0 * (jnp.log(2.0) - u - jax.nn.softplus(-2.0 * u))
     logdet = jnp.sum(corr, axis=-1)
@@ -123,28 +137,29 @@ def sample_action(rng, params, obs, max_action):
     return u[0], a[0], logp[0], value[0, 0]
 
 @jax.jit
-def calculate_gae(rewards, values, last_val, dones):
-    # 'dones' here means "terminated" (died), so we mask value.
-    # If truncated, 'dones' is 0, so we bootstrap (delta = r + gamma*V_next - V)
-    next_values = jnp.concatenate([values[1:], last_val.reshape(1)])
-    deltas      = rewards + gamma * (1.0 - dones) * next_values - values
+def calculate_gae(rewards, values, next_values, dones_term, masks):
+    # dones_term: 1.0 only if TRUE terminal (terminated). Controls bootstrapping.
+    # masks     : 1.0 only if CONTINUING (not terminated and not truncated). Cuts recursion at episode boundary.
+
+    deltas = rewards + gamma * (1.0 - dones_term) * next_values - values
 
     def scan_fn(carry, x):
-        delta, done = x
-        carry = delta + gamma * gae_lambda * (1.0 - done) * carry
+        delta, mask = x
+        carry = delta + gamma * gae_lambda * mask * carry
         return carry, carry
 
     _, adv = jax.lax.scan(
         scan_fn,
         jnp.array(0.0, dtype=deltas.dtype),
-        (deltas, dones),
+        (deltas, masks),
         reverse=True
     )
+
     returns = adv + values
     return adv, returns
 
 @jax.jit
-def ppo_loss(params, states, raw_actions_u, old_log_probs, advantages, returns):
+def ppo_loss(params, states, raw_actions_u, old_log_probs, advantages, returns, old_values):
     mean, log_std, values = ac_inference(params, states)
     values = values.squeeze(-1)
 
@@ -155,8 +170,13 @@ def ppo_loss(params, states, raw_actions_u, old_log_probs, advantages, returns):
     pg_loss2   = -advantages * jnp.clip(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon)
     actor_loss = jnp.maximum(pg_loss1, pg_loss2).mean()
 
-    critic_loss = jnp.square(returns - values).mean()
+    # Value clipping (PPO paper)
+    v_clipped   = old_values + jnp.clip(values - old_values, -clip_epsilon, clip_epsilon)
+    v_loss1     = jnp.square(returns - values)
+    v_loss2     = jnp.square(returns - v_clipped)
+    critic_loss = jnp.maximum(v_loss1, v_loss2).mean()
 
+    # Gaussian entropy (common approximation even with squashing)
     entropy   = jnp.sum(log_std + 0.5 * jnp.log(2.0 * jnp.pi * jnp.e), axis=-1).mean()
     approx_kl = jnp.mean(old_log_probs - new_log_probs)
     clipfrac  = jnp.mean((jnp.abs(ratio - 1.0) > clip_epsilon).astype(jnp.float32))
@@ -165,25 +185,31 @@ def ppo_loss(params, states, raw_actions_u, old_log_probs, advantages, returns):
     return total_loss, (actor_loss, critic_loss, entropy, approx_kl, clipfrac)
 
 @jax.jit
-def train_step(params, opt_state, states, raw_actions_u, old_log_probs, advantages, returns):
-    (loss, aux), grads = jax.value_and_grad(ppo_loss, has_aux=True)(
-        params, states, raw_actions_u, old_log_probs, advantages, returns
+def train_step(params, opt_state, states, raw_actions_u, old_log_probs, advantages, returns, old_values):
+    grad_fn = jax.value_and_grad(ppo_loss, has_aux=True)
+    (loss, aux), grads = grad_fn(
+        params, states, raw_actions_u, old_log_probs, advantages, returns, old_values
     )
     updates, opt_state = optimizer.update(grads, opt_state, params)
     params = optax.apply_updates(params, updates)
     return params, opt_state, loss, aux
 
 
-updates = int(total_timesteps // steps_per_batch)
 global_steps = 0
 
 try:
     for update in range(updates):
         states      = np.zeros((steps_per_batch, state_dim ), dtype=np.float32)
+        next_states = np.zeros((steps_per_batch, state_dim ), dtype=np.float32)
+
         raw_actions = np.zeros((steps_per_batch, action_dim), dtype=np.float32)
         actions     = np.zeros((steps_per_batch, action_dim), dtype=np.float32)
+
         rewards     = np.zeros((steps_per_batch,           ), dtype=np.float32)
-        dones       = np.zeros((steps_per_batch,           ), dtype=np.float32)
+
+        dones_term  = np.zeros((steps_per_batch,           ), dtype=np.float32)  # terminated only
+        masks       = np.zeros((steps_per_batch,           ), dtype=np.float32)  # continue only (cuts on term OR trunc)
+
         values      = np.zeros((steps_per_batch,           ), dtype=np.float32)
         log_probs   = np.zeros((steps_per_batch,           ), dtype=np.float32)
 
@@ -206,30 +232,35 @@ try:
             )
 
             act_np = np.array(act, dtype=np.float32)
-            nobs, rew, terminated, truncated, info = env.step(act_np)
 
-            # Mask only on death (terminated), not time limit (truncated)
+            nobs, rew, terminated, truncated, info = env.step(act_np)
+            nobs = np.array(nobs, dtype=np.float32)
+
             done_term = bool(terminated)
+            mask_f    = 0.0 if (terminated or truncated) else 1.0
 
             states     [t] = obs
+            next_states[t] = nobs
+
             raw_actions[t] = np.array(u, dtype=np.float32)
             actions    [t] = act_np
+
             rewards    [t] = float(rew)
-            dones      [t] = 1.0 if done_term else 0.0
+
+            dones_term [t] = 1.0 if done_term else 0.0
+            masks      [t] = mask_f
+
             values     [t] = float(v)
             log_probs  [t] = float(logp)
 
             ep_return    += float(rew)
             global_steps += 1
 
-            nobs = np.array(nobs, dtype=np.float32)
-
             if do_render:
                 env.render()
                 if render_sleep > 0:
                     time.sleep(render_sleep)
 
-            # Reset on either condition
             if terminated or truncated:
                 ep_returns.append(ep_return)
                 ep_return = 0.0
@@ -238,23 +269,36 @@ try:
             else:
                 obs = nobs
 
-        # Bootstrapping (post-loop)
-        _, _, last_val_j = ac_inference(actor_critic_params, jnp.array([obs], dtype=jnp.float32))
-        last_val_j = last_val_j[0, 0]
+        # Batch infer next_values from stored next_states (prevents reset-state leakage)
+        next_states_j = jnp.asarray(next_states, dtype=jnp.float32)
+        _, _, next_vj = ac_inference(actor_critic_params, next_states_j)
+        next_values_j = next_vj.squeeze(-1)
 
-        states_j      = jnp.asarray(states     , dtype=jnp.float32)
+        # Terminated => no bootstrap, set V_next=0
+        dones_term_j  = jnp.asarray(dones_term, dtype=jnp.float32)
+        masks_j       = jnp.asarray(masks,      dtype=jnp.float32)
+        next_values_j = jnp.where(dones_term_j > 0.0, 0.0, next_values_j)
+
+        states_j      = jnp.asarray(states,      dtype=jnp.float32)
         raw_actions_j = jnp.asarray(raw_actions, dtype=jnp.float32)
-        rewards_j     = jnp.asarray(rewards    , dtype=jnp.float32)
-        dones_j       = jnp.asarray(dones      , dtype=jnp.float32)
-        values_j      = jnp.asarray(values     , dtype=jnp.float32)
-        old_logp_j    = jnp.asarray(log_probs  , dtype=jnp.float32)
+        rewards_j     = jnp.asarray(rewards,     dtype=jnp.float32)
+        values_j      = jnp.asarray(values,      dtype=jnp.float32)
+        old_logp_j    = jnp.asarray(log_probs,   dtype=jnp.float32)
 
-        advantages_j, returns_j = calculate_gae(rewards_j, values_j, last_val_j, dones_j)
-        
-        # Normalize advantages
+        advantages_j, returns_j = calculate_gae(rewards_j, values_j, next_values_j, dones_term_j, masks_j)
+
         advantages_j = (advantages_j - jnp.mean(advantages_j)) / (jnp.std(advantages_j) + 1e-8)
         advantages_j = jnp.clip(advantages_j, -5.0, 5.0)
 
+        last_total_loss  = 0.0
+        last_actor_loss  = 0.0
+        last_critic_loss = 0.0
+        last_entropy     = 0.0
+        last_kl          = 0.0
+        last_clipfrac    = 0.0
+
+        # PPO Update Loop, KL Early Stop
+        stop_early = False
         for ep in range(epochs_per_update):
             rng, perm_rng = jax.random.split(rng)
             indices       = jax.random.permutation(perm_rng, jnp.arange(steps_per_batch))
@@ -271,15 +315,30 @@ try:
                     old_logp_j   [mb_ix],
                     advantages_j [mb_ix],
                     returns_j    [mb_ix],
+                    values_j     [mb_ix],
                 )
 
-        actor_loss, critic_loss, entropy, approx_kl, clipfrac = aux
+                actor_loss, critic_loss, entropy, approx_kl, clipfrac = aux
+
+                last_total_loss  = float(total_loss )
+                last_actor_loss  = float(actor_loss )
+                last_critic_loss = float(critic_loss)
+                last_entropy     = float(entropy    )
+                last_kl          = float(approx_kl  )
+                last_clipfrac    = float(clipfrac   )
+
+                if last_kl > target_kl:
+                    stop_early = True
+                    break
+
+            if stop_early:
+                break
 
         avg_ep = float(np.mean(ep_returns)) if len(ep_returns) > 0 else float(ep_return)
 
         print(f"Update: {update:4d}, Steps: {global_steps:7d}, AvgEpRet: {avg_ep:8.1f}, "
-              f"Loss: {float(total_loss):.4f}, Act: {float(actor_loss):.4f}, Cri: {float(critic_loss):.4f}, "
-              f"Ent: {float(entropy):.4f}, KL: {float(approx_kl):.5f}, ClipFrac: {float(clipfrac):.3f}")
+              f"Loss: {last_total_loss:.4f}, Act: {last_actor_loss:.4f}, Cri: {last_critic_loss:.4f}, "
+              f"Ent: {last_entropy:.4f}, KL: {last_kl:.5f}, ClipFrac: {last_clipfrac:.3f}, EarlyStop: {stop_early}")
 
 finally:
     env.close()
