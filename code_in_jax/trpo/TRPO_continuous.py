@@ -174,6 +174,9 @@ def compute_objective(new_params, old_params, states, raw_u, advantages):
 
 @jax.jit
 def compute_advantages_returns(value_params, states, next_states, rewards, dones_term, masks):
+    # dones_term: 1.0 only if TRUE terminal (terminated). Controls bootstrapping in delta.
+    # masks     : 1.0 only if CONTINUING (not terminated and not truncated). Cuts GAE recursion.
+
     values      = value_inference(value_params, states).squeeze(-1)
     next_values = value_inference(value_params, next_states).squeeze(-1)
 
@@ -184,13 +187,9 @@ def compute_advantages_returns(value_params, states, next_states, rewards, dones
         carry = delta + gamma * lambda_ * mask * carry
         return carry, carry
 
-    # Fixed-batch bootstrap: if the very last transition is continuing (mask=1),
-    # we should start the backward recursion from V(s_{T}) instead of 0.
-    carry0 = next_values[-1] * masks[-1]
-
     _, advantages = jax.lax.scan(
         scan_fn,
-        carry0,
+        jnp.array(0.0, dtype=deltas.dtype),   
         (deltas, masks),
         reverse=True
     )
