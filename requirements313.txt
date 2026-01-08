@@ -1,5 +1,8 @@
 gymnasium
 gymnasium[classic-control]
+gymnasium[mujoco]
+gymnasium-robotics
+mujoco
 jax
 jaxlib
 flax
