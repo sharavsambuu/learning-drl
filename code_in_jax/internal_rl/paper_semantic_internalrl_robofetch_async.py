@@ -120,9 +120,9 @@ DECODER_PG_COEFF     = 0.10
 
 SFT_ENABLE           = True
 SFT_FLAG             = "sft_done_fetch_internal_rl_async.flag"
-SFT_EPISODES         = 5000
-SFT_EPOCHS           = 20
-SFT_BATCH_SIZE       = 512
+SFT_EPISODES         = 3000
+SFT_EPOCHS           = 10
+SFT_BATCH_SIZE       = 256
 
 # PERIODIC PLAY
 PLAY_ENABLE          = True
