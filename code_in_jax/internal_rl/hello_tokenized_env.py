@@ -121,10 +121,10 @@ class SequentialGoalsWrapper(gym.Wrapper):
 
         reached      = dist <= self.goal_threshold
 
-        info                   = dict(info)
-        info["seq_goal_index"] = self._goal_idx
-        info["seq_reached"   ] = reached
-        info["seq_dist"      ] = dist
+        info                       = dict(info)
+        info["seq_goal_index"    ] = self._goal_idx
+        info["seq_reached"       ] = reached
+        info["seq_dist"          ] = dist
         info["distance_threshold"] = self.goal_threshold
 
         if reached:
