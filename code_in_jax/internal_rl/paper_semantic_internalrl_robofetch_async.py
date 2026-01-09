@@ -1,5 +1,5 @@
 #
-# INTERNAL RL - ROBOTIC FETCH, META-CONTROLLER + RESIDUAL INTERVENTION
+# INTERNAL RL - ROBOTIC FETCH, META-CONTROLLER + RESIDUAL INTERVENTION (ASYNC VECTORIZED)
 #
 #
 # ЛАВЛАГАА:
@@ -10,7 +10,7 @@
 # ЗОРИЛГО:
 #   FetchPush орчинг Autoregressive Token Generation хэлбэрт оруулж, Internal RL буюу
 #   дотоод хийсвэрлэл үүсгэх аргыг ашиглан шатлалтай (hierarchical) удирдлага хийх.
-#   Хоёр түвшний сүлжээнээс бүрдэнэ.
+#   Энэ хувилбар нь AsyncVectorEnv ашиглан олон орчинг зэрэг ажиллуулж сургалтыг хурдасгана.
 #
 #
 # АРХИТЕКТУРЫН БҮРЭЛДЭХҮҮН ХЭСГҮҮД:
@@ -39,11 +39,9 @@
 #     - Worker моделийг Heuristic өгөгдөл дээр сургаж, орчны тухай
 #       суурь ойлголт, хөдөлгөөний эвсэл суулгана.
 #
-#   PHASE 2: Internal RL (PPO + GRPO)
+#   PHASE 2: Internal RL (PPO + GRPO) - Parallel
+#     - 16 орчинг зэрэг ажиллуулж (AsyncVectorEnv) өгөгдөл цуглуулна.
 #     - Worker-ийг царцааж, зөвхөн MetaController болон Intervention хэсгийг сургана.
-#     - Meta нь "хэзээ" (switch), "ямар" (u_prop) команд өгөхийг сурна.
-#     - Worker нь Meta-ийн өгсөн командыг биелүүлэх хэрэгсэл болно.
-#
 #
 
 
@@ -55,6 +53,7 @@ import numpy              as np
 
 import gymnasium          as gym
 import gymnasium_robotics
+from   gymnasium.vector   import AsyncVectorEnv
 
 import jax
 import jax.numpy          as jnp
@@ -68,40 +67,32 @@ from flax.training        import train_state
 
 SEED                 = 42
 
-# Env (FetchPush)
 ENV_ID               = "FetchPush-v4"
 MAX_EPISODE_STEPS    = 200
 
-# Үйлдэл токенчилах (Continuous -> Discrete)
 ACTION_DIM           = 4
 ACTION_BINS          = 256
 
-# Даалгаврын хүндрэл (Дараалсан зорилгууд)
 K_SEQUENTIAL_GOALS   = 3
 GOAL_DIST_THRESHOLD  = 0.05
 SPARSE_FINAL_REWARD  = True
 
-# Temporal Abstraction (хугацааны хийсвэрлэл)
 MACRO_STEP           = 10
 
-# PPO + GRPO Сургалтын тохиргоо
 UPDATES              = 200
 GROUP_SIZE           = 16
 PPO_EPOCHS           = 3
-MINI_BATCH_SIZE      = 8
+MINI_BATCH_SIZE      = 16
 CLIP_EPS             = 0.2
 
-# KL Regularization (Meta Reference Policy)
 KL_BETA              = 0.04
 TARGET_KL            = 0.05
 KL_ALPHA             = 1.2
 
-# Оптимизатор
 LR_BASE_SFT          = 3e-4
 LR_META_RL           = 1e-4
 MAX_GRAD_NORM        = 1.0
 
-# Моделийн хэмжээсүүд
 EMBED_DIM            = 256
 NUM_HEADS            = 4
 MEMORY_LEN           = 16
@@ -110,14 +101,11 @@ U_DIM                = 128
 GRU_H_DIM            = 256
 LRANK                = 32
 
-# Switching тохиргоо
 SWITCH_TAU           = 0.50
 
-# Beta integration scaling
 BETA_MIN             = 0.05
 BETA_MAX             = 0.995
 
-# Тогтворжуулалт болон шагнал (Regularization)
 SWITCH_ENTROPY_COEFF = 0.01
 U_ENTROPY_COEFF      = 0.001
 
@@ -128,17 +116,14 @@ BETA_MEAN_TARGET     = 0.85
 BETA_MEAN_COEFF      = 0.2
 BETA_VAR_COEFF       = 0.1
 
-# Decoder gradient bridge (Worker logprob auxiliary)
-DECODER_PG_COEFF     = 0.10   # Хэт том байвал PPO-г эвдэж магадгүй, багаас эхэл
+DECODER_PG_COEFF     = 0.10
 
-# Warm Start тохиргоо
 SFT_ENABLE           = True
-SFT_FLAG             = "sft_done_fetch_internal_rl.flag"
+SFT_FLAG             = "sft_done_fetch_internal_rl_async.flag"
 SFT_EPISODES         = 200
 SFT_EPOCHS           = 3
 SFT_BATCH_SIZE       = 256
 
-# JAX санах ойн тохиргоо
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 
@@ -276,20 +261,38 @@ class SequentialGoalsWrapper(gym.Wrapper):
         return self._update_obs(obs), reward, terminated, truncated, info
 
 
-def create_env(render_mode=None):
+# ASYNC VECTOR ENV SETUP
+
+def make_single_env(rank, render_mode=None):
     """
-    Бүх wrapper-уудыг давхарлаж орчин үүсгэх.
+    AsyncVectorEnv-д ашиглагдах үйлдвэрлэгч функц.
+    Process бүр өөр seed-тэй байхын тулд rank ашиглана.
     """
-    env = gym.make(ENV_ID, render_mode=render_mode, max_episode_steps=MAX_EPISODE_STEPS)
-    env = SequentialGoalsWrapper(
-        env,
-        k                   = K_SEQUENTIAL_GOALS,
-        dist_threshold      = GOAL_DIST_THRESHOLD,
-        sparse_final_reward = SPARSE_FINAL_REWARD
-    )
-    env = TokenActionWrapper(env, bins=ACTION_BINS)
-    env = TransformerObservationWrapper(env)
-    return env
+    def _thunk():
+        env = gym.make(
+            ENV_ID,
+            render_mode       = render_mode,
+            max_episode_steps = MAX_EPISODE_STEPS,
+        )
+        env = SequentialGoalsWrapper(
+            env,
+            k                   = K_SEQUENTIAL_GOALS,
+            dist_threshold      = GOAL_DIST_THRESHOLD,
+            sparse_final_reward = SPARSE_FINAL_REWARD,
+        )
+        env = TokenActionWrapper(env, bins=ACTION_BINS)
+        env = TransformerObservationWrapper(env)
+        env.reset(seed=SEED + rank)
+        return env
+    return _thunk
+
+
+def create_vec_env(n_envs, render_mode=None):
+    """
+    AsyncVectorEnv ашиглан олон орчинг параллель үүсгэх.
+    """
+    fns = [make_single_env(i, render_mode=render_mode) for i in range(n_envs)]
+    return AsyncVectorEnv(fns)
 
 
 # WORKER, BaseARPolicy (Recurrent Transformer)
@@ -407,7 +410,6 @@ class ProposalHead(nn.Module):
 class BetaConfigurator(nn.Module):
     """
     Хугацааны нэгтгэлийн коэффициент (β)-ийг тооцоолох хэсэг.
-    β нь өмнөх санах ойг хэр удаан хадгалахыг шийднэ.
     """
     @nn.compact
     def __call__(self, h):
@@ -430,9 +432,7 @@ class SwitchHead(nn.Module):
 
 class TemporalIntegrationUnit(nn.Module):
     """
-    Шинэ санал болгосон u_prop болон хуучин u_int кодыг нэгтгэх хэсэг.
-        u_int_t = beta_eff * u_int_{t-1} + (1-beta_eff) * u_prop_t
-    Хэрэв switch=1 байвал beta_eff=0 болж, хуучин мэдээллийг мартаж шинэ командыг бүрэн авна гэсэн үг.
+    u_int_t = beta_eff * u_int_{t-1} + (1-beta_eff) * u_prop_t
     """
     @nn.compact
     def __call__(self, u_int_prev, u_prop, beta, switch):
@@ -487,7 +487,7 @@ class ResidualIntervention(nn.Module):
     def __call__(self, u_int, ssum):
         A, B, b = self.decoder(u_int)
 
-        y = jnp.matmul(ssum[:, None, :], A).squeeze(1)
+        y     = jnp.matmul(ssum[:, None, :], A).squeeze(1)
         delta = jnp.matmul(y[:, None, :], B).squeeze(1) + b
         return delta
 
@@ -503,8 +503,8 @@ class MetaController(nn.Module):
     h_dim : int = GRU_H_DIM
 
     def setup(self):
-        self.obs_proj  = nn.Dense(128)
-        self.ssum_proj = nn.Dense(128)
+        self.obs_proj   = nn.Dense(128)
+        self.ssum_proj  = nn.Dense(128)
 
         self.encoder    = ControllerEncoderGRU(h_dim=self.h_dim)
         self.proposal   = ProposalHead(u_dim=self.u_dim)
@@ -520,7 +520,7 @@ class MetaController(nn.Module):
         xs   = nn.tanh(self.ssum_proj(ssum))
         x_in = jnp.concatenate([xo, xs], axis=-1)
 
-        h_t = self.encoder(h_prev, x_in)
+        h_t  = self.encoder(h_prev, x_in)
 
         mean, logstd      = self.proposal(h_t)
         beta, beta_logit  = self.beta_cfg(h_t)
@@ -750,127 +750,219 @@ def sft_train(trainer, obs_all, act_all):
         print(f"[SFT] Epoch {ep} | Loss: {float(jnp.mean(jnp.array(losses))):.6f}")
 
 
-# PHASE 2, INTERNAL RL (ROLLOUTS)
+# PHASE 2, INTERNAL RL (ASYNC ROLLOUTS)
 
-def score_episode(info):
+@jax.jit
+def policy_step_vec(base_params, meta_params, interv_params, obs_j, carry, h, u_int, step_j, rng):
     """
-    Episode-ийг үнэлэх функц.
+    Нэг алхам дээрх бүх моделийн урсгалыг (Meta->Interv->Worker) гүйцэтгэх JIT функц.
+    Vectorized: B env нэг дор.
     """
-    s = float(info.get("seq_goal_index", 0)) * 10.0
-    if float(info.get("is_success", 0.0)) > 0.5:
-        s += 50.0
-    return s
+    base   = BaseARPolicy()
+    meta   = MetaController()
+    interv = ResidualIntervention()
+
+    rng, k_meta, k_act = jax.random.split(rng, 3)
+
+    ssum_j = carry[1]
+
+    h_next, u_prop, sw, u_int_next, aux, _ = meta.apply(
+        {"params": meta_params},
+        h, obs_j, ssum_j, u_int, step_j,
+        force_macro_switch=True, rng=k_meta
+    )
+
+    mean    = aux["mean"   ]
+    logstd  = aux["logstd" ]
+    sw_prob = aux["sw_prob"]
+
+    logp_meta = gaussian_logprob(u_prop, mean, logstd) + bernoulli_logprob(sw, sw_prob)
+
+    delta = interv.apply({"params": interv_params}, u_int_next, ssum_j)
+
+    logits, carry_next, _ = base.apply(
+        {"params": base_params}, obs_j, carry, step_j, delta
+    )
+
+    # Worker Sampling
+    logp_w = jax.nn.log_softmax(logits, axis=-1)  # (B, A, BINS)
+    B      = obs_j.shape[0]
+
+    keys = jax.random.split(k_act, B * ACTION_DIM).reshape(B, ACTION_DIM, 2)
+
+    def sample_tok(k, lp_vec):
+        return jax.random.categorical(k, lp_vec, axis=-1)
+
+    acts = jax.vmap(
+        lambda keys_b, logp_b: jax.vmap(sample_tok)(keys_b, logp_b)
+    )(keys, logp_w).astype(jnp.int32)  # (B, A)
+
+    return h_next, u_int_next, carry_next, acts, u_prop, sw, logp_meta, rng
 
 
-def collect_group_rollouts(env, trainer, group_size=GROUP_SIZE):
+def score_from_info_dict(info_d):
     """
-    RL сургалтанд зориулж өгөгдөл цуглуулах (Rollout).
+    Нэг env-ийн info dict-ээс score гаргана.
     """
-    trajs  = []
-    scores = []
+    if info_d is None:
+        return 0.0
+    seq_idx = float(info_d.get("seq_goal_index", 0.0))
+    succ    = float(info_d.get("is_success", 0.0))
+    return (seq_idx * 10.0) + (50.0 if succ > 0.5 else 0.0)
+
+
+def extract_final_infos(infos, B):
+    """
+    Gymnasium VectorEnv infos-ийн final_info бүтэцтэй ажиллах.
+    - AsyncVectorEnv ихэвчлэн infos["final_info"] дээр дууссан env-ийн info dict-үүдийг өгдөг.
+    """
+    final_info = [None] * B
+
+    if isinstance(infos, dict):
+        if "final_info" in infos:
+            fi = infos["final_info"]
+            try:
+                for i in range(B):
+                    final_info[i] = fi[i]
+            except Exception:
+                pass
+        elif "final_infos" in infos:
+            fi = infos["final_infos"]
+            try:
+                for i in range(B):
+                    final_info[i] = fi[i]
+            except Exception:
+                pass
+        else:
+            # Зарим тохиолдолд шууд dict-of-arrays байж болно (хуучин хэв маяг)
+            # Энэ тохиолдолд бид score-оо шууд авах боломжгүй тул None үлдээнэ.
+            pass
+
+    elif isinstance(infos, (list, tuple)):
+        # Хэрэв infos нь list of dicts бол шууд ашиглана
+        for i in range(min(B, len(infos))):
+            final_info[i] = infos[i]
+
+    return final_info
+
+
+def reset_states_where_done(h, u_int, carry, done_mask):
+    """
+    Дууссан орчнуудын санах ойг (Hidden states) тэглэх.
+    """
+    dm    = jnp.asarray(done_mask)
+    mem, ssum = carry
+
+    h     = jnp.where(dm[:, None], jnp.zeros_like(h), h)
+    u_int = jnp.where(dm[:, None], jnp.zeros_like(u_int), u_int)
+
+    mem   = jnp.where(dm[:, None, None], jnp.zeros_like(mem), mem)
+    ssum  = jnp.where(dm[:, None], jnp.zeros_like(ssum), ssum)
+
+    return h, u_int, (mem, ssum)
+
+
+def collect_group_rollouts_vec(vec_env, trainer):
+    """
+    AsyncVectorEnv ашиглан олон Episode-ийг зэрэг цуглуулах (Vectorized Rollout).
+    """
+    obs, infos = vec_env.reset(seed=SEED)
+    obs        = np.asarray(obs, dtype=np.float32)
+    B          = obs.shape[0]
+
+    carry = trainer.agent.base_model.init_carry(B)
+    h     = jnp.zeros((B, GRU_H_DIM), dtype=jnp.float32)
+    u_int = jnp.zeros((B, U_DIM), dtype=jnp.float32)
+
+    step_in_macro = np.zeros((B,), dtype=np.int32)
+
+    obs_buf   = [[] for _ in range(B)]
+    ssum_buf  = [[] for _ in range(B)]
+    step_buf  = [[] for _ in range(B)]
+    uprop_buf = [[] for _ in range(B)]
+    sw_buf    = [[] for _ in range(B)]
+    act_buf   = [[] for _ in range(B)]
+    oldlp_buf = [[] for _ in range(B)]
+    decm_buf  = [[] for _ in range(B)]
+
+    done_mask    = np.zeros((B,), dtype=bool)
+    final_scores = np.zeros((B,), dtype=np.float32)
 
     base_params   = trainer.base_state.params
     meta_params   = trainer.meta_state.params["meta"  ]
     interv_params = trainer.meta_state.params["interv"]
 
-    for _ in range(group_size):
-        obs, info = env.reset()
-        carry     = trainer.agent.base_model.init_carry(1)
+    steps = 0
 
-        h     = jnp.zeros((1, GRU_H_DIM), dtype=jnp.float32)
-        u_int = jnp.zeros((1, U_DIM    ), dtype=jnp.float32)
+    while (not np.all(done_mask)) and (steps < MAX_EPISODE_STEPS):
+        obs_j  = jnp.asarray(obs, dtype=jnp.float32)
+        step_j = jnp.asarray(step_in_macro, dtype=jnp.int32)
+        ssum_j = carry[1]
 
-        obs_list     = []
-        step_list    = []
-        ssum_list    = []
-        uprop_list   = []
-        sw_list      = []
-        act_list     = []
-        oldlp_list   = []
-        decmask_list = []
+        h, u_int, carry, acts, u_prop, sw, lp_m, trainer.rng = policy_step_vec(
+            base_params, meta_params, interv_params,
+            obs_j, carry, h, u_int, step_j, trainer.rng
+        )
 
-        done = False
-        t = 0
-        step_in_macro = 0
+        acts_np = np.asarray(acts, dtype=np.int32)
 
-        while (not done) and (t < MAX_EPISODE_STEPS):
-            obs_j  = jnp.asarray(obs[None, :], dtype=jnp.float32)
-            ssum_j = carry[1]
-            step_j = jnp.array([step_in_macro], dtype=jnp.int32)
+        for i in range(B):
+            if not done_mask[i]:
+                obs_buf  [i].append(obs[i])
+                ssum_buf [i].append(np.asarray(ssum_j[i], dtype=np.float32))
+                step_buf [i].append(int(step_in_macro[i]))
+                uprop_buf[i].append(np.asarray(u_prop[i], dtype=np.float32))
+                sw_buf   [i].append(int(sw[i]))
+                act_buf  [i].append(acts_np[i])
 
-            # Meta Sample
-            trainer.rng, k_meta = jax.random.split(trainer.rng)
-            h, u_prop, sw, u_int, aux, _ = trainer.agent.meta_model.apply(
-                {"params": meta_params},
-                h, obs_j, ssum_j, u_int, step_j,
-                force_macro_switch=True,
-                rng=k_meta
-            )
+                # PPO ratio нь зөвхөн Meta logprob дээр суурилна
+                oldlp_buf[i].append(float(lp_m[i]))
+                decm_buf [i].append(float(sw[i]))
 
-            mean    = aux["mean"   ]
-            logstd  = aux["logstd" ]
-            sw_prob = aux["sw_prob"]
+        obs, _, term, trunc, infos = vec_env.step(acts_np)
+        obs = np.asarray(obs, dtype=np.float32)
 
-            # Meta Logprob (PPO ratio зөвхөн үүн дээр)
-            logp_meta = gaussian_logprob(u_prop, mean, logstd) + bernoulli_logprob(sw, sw_prob)
-            decmask   = int(sw[0])
+        step_done = np.asarray(term, dtype=bool) | np.asarray(trunc, dtype=bool)
 
-            # Intervention Delta
-            delta = trainer.agent.intervention.apply(
-                {"params": interv_params},
-                u_int, ssum_j
-            )
+        if np.any(step_done):
+            # Gymnasium VectorEnv: дууссан env-ийн info нь ихэвчлэн final_info дээр ирнэ
+            finfos = extract_final_infos(infos, B)
 
-            # Worker Sample
-            logits, carry, _ = trainer.agent.base_model.apply(
-                {"params": base_params},
-                obs_j, carry, step_j, delta
-            )
+            just_finished = step_done & (~done_mask)
+            for i in np.where(just_finished)[0]:
+                final_scores[i] = float(score_from_info_dict(finfos[i]))
 
-            trainer.rng, k_act = jax.random.split(trainer.rng)
-            logp               = jax.nn.log_softmax(logits, axis=-1)
-            keys               = jax.random.split(k_act, ACTION_DIM)
+            # Дууссан env-үүдийн hidden state-ийг тэглэнэ
+            h, u_int, carry = reset_states_where_done(h, u_int, carry, just_finished)
 
-            act = []
-            for a in range(ACTION_DIM):
-                tok = jax.random.categorical(keys[a], logp[0, a], axis=-1)
-                act.append(tok)
-            act = jnp.stack(act, axis=0).astype(jnp.int32)
+            # Дууссан env-үүдийн macro step-ийг цэвэрхэн 0 болгоно
+            step_in_macro[just_finished] = 0
 
-            # PPO-д хадгалах old_logp нь зөвхөн Meta-ийнх
-            oldlp_meta = float(logp_meta[0])
+        done_mask = done_mask | step_done
 
-            obs_list    .append(np.array(obs, dtype=np.float32))
-            ssum_list   .append(np.array(ssum_j[0], dtype=np.float32))
-            step_list   .append(int(step_in_macro))
-            uprop_list  .append(np.array(u_prop[0], dtype=np.float32))
-            sw_list     .append(int(sw[0]))
-            act_list    .append(np.array(act, dtype=np.int32))
-            oldlp_list  .append(float(oldlp_meta))
-            decmask_list.append(float(decmask))
+        steps += 1
+        step_in_macro = (step_in_macro + 1) % MACRO_STEP
 
-            obs, r, term, trunc, info = env.step(np.array(act, dtype=np.int32))
+    # Дуусч амжаагүй env үүд: хамгийн сүүлийн infos-оор score тооцох (fallback)
+    if np.any(~done_mask):
+        finfos = extract_final_infos(infos, B)
+        for i in np.where(~done_mask)[0]:
+            final_scores[i] = float(score_from_info_dict(finfos[i]))
 
-            t            += 1
-            step_in_macro = (step_in_macro + 1) % MACRO_STEP
-
-            if term or trunc:
-                done = True
-                break
-
-        scores.append(score_episode(info))
+    trajs = []
+    for i in range(B):
         trajs.append({
-            "obs"      : np.asarray(obs_list    , dtype=np.float32),
-            "ssum"     : np.asarray(ssum_list   , dtype=np.float32),
-            "step"     : np.asarray(step_list   , dtype=np.int32  ),
-            "u_prop"   : np.asarray(uprop_list  , dtype=np.float32),
-            "sw"       : np.asarray(sw_list     , dtype=np.int32  ),
-            "act"      : np.asarray(act_list    , dtype=np.int32  ),
-            "old_logp" : np.asarray(oldlp_list  , dtype=np.float32),
-            "decmask"  : np.asarray(decmask_list, dtype=np.float32),
+            "obs"      : np.asarray(obs_buf  [i], dtype=np.float32),
+            "ssum"     : np.asarray(ssum_buf [i], dtype=np.float32),
+            "step"     : np.asarray(step_buf [i], dtype=np.int32  ),
+            "u_prop"   : np.asarray(uprop_buf[i], dtype=np.float32),
+            "sw"       : np.asarray(sw_buf   [i], dtype=np.int32  ),
+            "act"      : np.asarray(act_buf  [i], dtype=np.int32  ),
+            "old_logp" : np.asarray(oldlp_buf[i], dtype=np.float32),
+            "decmask"  : np.asarray(decm_buf [i], dtype=np.float32),
         })
 
-    return trajs, np.asarray(scores, dtype=np.float32)
+    return trajs, final_scores
 
 
 def compute_grpo_advantages(scores):
@@ -931,7 +1023,7 @@ def pad_batch(trajs):
     )
 
 
-# SCANS FOR PPO (RECONSTRUCT + WORKER LOGPROB)
+# PPO SCAN (RECONSTRUCT + WORKER LOGPROB)
 
 @jax.jit
 def meta_forward_scan_actions(params_meta, obs_bt, ssum_bt, step_bt, uprop_bt, sw_bt):
@@ -941,8 +1033,8 @@ def meta_forward_scan_actions(params_meta, obs_bt, ssum_bt, step_bt, uprop_bt, s
     meta = MetaController()
     B, T, _ = obs_bt.shape
 
-    h0     = jnp.zeros((B, GRU_H_DIM), dtype=jnp.float32)
-    u_int0 = jnp.zeros((B, U_DIM), dtype=jnp.float32)
+    h0      = jnp.zeros((B, GRU_H_DIM), dtype=jnp.float32)
+    u_int0  = jnp.zeros((B, U_DIM), dtype=jnp.float32)
 
     obs_T   = jnp.swapaxes(obs_bt  , 0, 1)
     ssum_T  = jnp.swapaxes(ssum_bt , 0, 1)
@@ -1051,7 +1143,6 @@ def ppo_update_step(meta_state, ref_params_bundle, base_params, obs, ssum, step,
         newlp_sw   = bernoulli_logprob(sw_i, swprob_bt)
         newlp_meta = newlp_u + newlp_sw
 
-        # PPO ratio зөвхөн Meta дээр
         ratio       = jnp.exp(newlp_meta - oldlp)
 
         adv_bt      = adv_ep[:, None]
@@ -1064,7 +1155,6 @@ def ppo_update_step(meta_state, ref_params_bundle, base_params, obs, ssum, step,
 
         surr_mean   = jnp.sum(surr * m_dec) / (jnp.sum(m_dec) + 1e-8)
 
-        # KL Regularization (Meta)
         logstd_ref  = ref_params_bundle["meta"]["proposal"]["u_logstd"]
         mean_ref_f  = mean_ref_bt.reshape(B*T, U_DIM)
 
@@ -1073,30 +1163,23 @@ def ppo_update_step(meta_state, ref_params_bundle, base_params, obs, ssum, step,
         kl_bt       = kl_u + kl_sw
         kl_mean     = jnp.sum(kl_bt * m_dec) / (jnp.sum(m_dec) + 1e-8)
 
-        # Auxiliary, Switch Rate
         sw_mean     = jnp.sum(swprob_bt * m_all) / (jnp.sum(m_all) + 1e-8)
         sw_rate_pen = (sw_mean - TARGET_SW_RATE) ** 2
 
-        # Auxiliary, Beta stability
         beta_mean   = jnp.sum(beta_bt * m_all) / (jnp.sum(m_all) + 1e-8)
         beta_var    = jnp.sum(((beta_bt - beta_mean) ** 2) * m_all) / (jnp.sum(m_all) + 1e-8)
         beta_pen    = (BETA_MEAN_COEFF * (beta_mean - BETA_MEAN_TARGET)**2) + \
                       (BETA_VAR_COEFF  * (beta_var))
 
-        # Entropy bonuses
         ent_u       = gaussian_entropy(logstd_new)
         ent_sw      = jnp.sum(bernoulli_entropy(swprob_bt) * m_all) / (jnp.sum(m_all) + 1e-8)
         ent_bonus   = (U_ENTROPY_COEFF * ent_u) + (SWITCH_ENTROPY_COEFF * ent_sw)
 
-        # Decoder/Intervention gradient bridge (worker token logprob)
-        #  - PPO ratio-д оруулахгүй
-        #  - Advantage-р жинлээд decoder параметрүүдийг хөдөлгөнө
         logp_worker_bt = worker_logprob_scan(
             base_params, p_interv, obs, step, u_int_bt, act
         )
         dec_pg = jnp.sum((logp_worker_bt * adv_bt) * m_dec) / (jnp.sum(m_dec) + 1e-8)
 
-        # Loss
         loss = -surr_mean + (kl_beta * kl_mean) + (SW_RATE_COEFF * sw_rate_pen) + beta_pen - ent_bonus - (DECODER_PG_COEFF * dec_pg)
 
         aux = (kl_mean, ent_u, ent_sw, sw_mean, beta_mean, beta_var, dec_pg)
@@ -1114,7 +1197,7 @@ def ppo_epoch(trainer, ref_params_bundle, trajs, advs, kl_beta):
     idx = np.arange(len(trajs))
     np.random.shuffle(idx)
 
-    stats = [0.0] * 8 # loss, kl, ent_u, ent_sw, sw_mean, beta_mean, beta_var, dec_pg
+    stats = [0.0] * 8
 
     for i in range(0, len(trajs), MINI_BATCH_SIZE):
         mb_idx   = idx[i:i + MINI_BATCH_SIZE]
@@ -1145,14 +1228,13 @@ def main():
     np.random.seed(SEED)
     random.seed(SEED)
 
-    env     = create_env(render_mode=None)
     trainer = Trainer(seed=SEED)
 
     # PHASE 1, SFT Warm Start
     if SFT_ENABLE and (not os.path.exists(SFT_FLAG)):
         print("[SFT] Heuristic өгөгдөл үүсгэж байна...")
 
-        sft_env          = create_env(render_mode=None)
+        sft_env          = make_single_env(0, render_mode=None)()
         obs_all, act_all = generate_sft_dataset(sft_env, episodes=SFT_EPISODES)
         sft_env.close()
 
@@ -1162,11 +1244,11 @@ def main():
         with open(SFT_FLAG, "w") as f:
             f.write("done")
 
-    # PHASE 2, INTERNAL RL
+    vec_env = create_vec_env(GROUP_SIZE, render_mode=None)
     kl_beta = float(KL_BETA)
 
     print("\n" + "=" * 72)
-    print("  INTERNAL RL - Base Frozen, Meta+Decoder PPO+GRPO")
+    print("  INTERNAL RL - Base Frozen, Meta+Decoder PPO+GRPO (ASYNC VECTOR)")
     print(f"  Updates: {UPDATES} | Group: {GROUP_SIZE} | MacroMax: {MACRO_STEP}")
     print(f"  U_DIM: {U_DIM} | GRU_H: {GRU_H_DIM} | Embed: {EMBED_DIM} | Rank: {LRANK}")
     print("=" * 72 + "\n")
@@ -1174,7 +1256,7 @@ def main():
     for upd in range(1, UPDATES + 1):
         ref_params_bundle = trainer.meta_state.params
 
-        trajs, scores    = collect_group_rollouts(env, trainer, group_size=GROUP_SIZE)
+        trajs, scores    = collect_group_rollouts_vec(vec_env, trainer)
         advs, mean_score = compute_grpo_advantages(scores)
 
         stats = []
@@ -1198,12 +1280,7 @@ def main():
                 f"DecPG: {dec_pg:.3f}"
             )
 
-        if upd % 2 == 0:
-            viz = create_env(render_mode="human")
-            collect_group_rollouts(viz, trainer, group_size=1)
-            viz.close()
-
-    env.close()
+    vec_env.close()
 
 
 if __name__ == "__main__":
