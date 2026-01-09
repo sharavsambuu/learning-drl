@@ -124,6 +124,12 @@ SFT_EPISODES         = 200
 SFT_EPOCHS           = 3
 SFT_BATCH_SIZE       = 256
 
+# PERIODIC PLAY
+PLAY_ENABLE          = True
+PLAY_EVERY           = 3      # хэдэн update тутамд үзүүлэх вэ
+PLAY_EPISODES        = 2      # хэдэн episode үзүүлэх вэ
+PLAY_SLEEP_SEC       = 0.0    
+
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 
@@ -1222,6 +1228,75 @@ def ppo_epoch(trainer, ref_params_bundle, trajs, advs, kl_beta):
     return stats
 
 
+def play_policy_human(trainer, episodes=1):
+    """
+    Сургалтын явцад бодит env дээр сурсан policy-г үзүүлэх (render=human).
+    - Meta   : deterministic (rng=None)
+    - Worker : deterministic argmax
+    """
+    env = make_single_env(999, render_mode="human")()
+
+    base_params   = trainer.base_state.params
+    meta_params   = trainer.meta_state.params["meta"  ]
+    interv_params = trainer.meta_state.params["interv"]
+
+    base   = BaseARPolicy()
+    meta   = MetaController()
+    interv = ResidualIntervention()
+
+    for ep in range(int(episodes)):
+        obs, info = env.reset(seed=SEED + 999 + ep)
+        obs       = np.asarray(obs, dtype=np.float32)
+
+        carry = trainer.agent.base_model.init_carry(1)
+        h     = jnp.zeros((1, GRU_H_DIM), dtype=jnp.float32)
+        u_int = jnp.zeros((1, U_DIM), dtype=jnp.float32)
+
+        step_in_macro = 0
+        done          = False
+        t             = 0
+
+        while (not done) and (t < MAX_EPISODE_STEPS):
+            obs_j  = jnp.asarray(obs[None, :], dtype=jnp.float32)
+            step_j = jnp.asarray([step_in_macro], dtype=jnp.int32)
+            ssum_j = carry[1]
+
+            # Meta (Deterministic)
+            h, u_prop, sw, u_int, aux, _ = meta.apply(
+                {"params": meta_params},
+                h, obs_j, ssum_j, u_int, step_j,
+                force_macro_switch=True,
+                rng=None
+            )
+
+            # Intervention
+            delta = interv.apply({"params": interv_params}, u_int, ssum_j)
+
+            # Worker (Deterministic argmax)
+            logits, carry, _ = base.apply(
+                {"params": base_params},
+                obs_j, carry, step_j, delta
+            )
+
+            # logits, (1, ACTION_DIM, ACTION_BINS)
+            act    = jnp.argmax(logits[0], axis=-1).astype(jnp.int32)  # (ACTION_DIM,)
+            act_np = np.asarray(act, dtype=np.int32)
+
+            obs, r, term, trunc, info = env.step(act_np)
+            obs = np.asarray(obs, dtype=np.float32)
+
+            t += 1
+            step_in_macro = (step_in_macro + 1) % MACRO_STEP
+
+            if PLAY_SLEEP_SEC > 0.0:
+                time.sleep(float(PLAY_SLEEP_SEC))
+
+            if term or trunc:
+                done = True
+
+    env.close()
+
+
 # MAIN EXECUTION
 
 def main():
@@ -1279,6 +1354,9 @@ def main():
                 f"SW%: {sw_m:.2f} | BetaAvg: {beta_m:.2f} | "
                 f"DecPG: {dec_pg:.3f}"
             )
+        
+        if PLAY_ENABLE and (upd % PLAY_EVERY == 0):
+            play_policy_human(trainer, episodes=PLAY_EPISODES)
 
     vec_env.close()
 
