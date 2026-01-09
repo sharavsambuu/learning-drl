@@ -134,9 +134,9 @@ DECODER_PG_COEFF     = 0.10   # Хэт том байвал PPO-г эвдэж м�
 # Warm Start тохиргоо
 SFT_ENABLE           = True
 SFT_FLAG             = "sft_done_fetch_internal_rl.flag"
-SFT_EPISODES         = 200
-SFT_EPOCHS           = 3
-SFT_BATCH_SIZE       = 256
+SFT_EPISODES         = 5000
+SFT_EPOCHS           = 20
+SFT_BATCH_SIZE       = 512
 
 # JAX санах ойн тохиргоо
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
