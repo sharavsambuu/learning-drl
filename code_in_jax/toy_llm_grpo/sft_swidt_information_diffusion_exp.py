@@ -1,9 +1,7 @@
 #
 #  SWIDT TRANSFORMER (SFT)
 #
-#  SWIDT  : Shifted Window Iterative Diffusion Transformer
-#  Author : Sharavsambuu.G
-#  Date   : 2026/01/01
+#  SWIDT : Shifted Window Iterative Diffusion Transformer
 #
 #  ЗОРИЛГО:
 #   - Урт текстийг боловсруулахдаа Iterative (давталтат) аргаар сайжруулах.
@@ -390,11 +388,11 @@ def main():
         optax.clip_by_global_norm(max_grad_norm),
         optax.adamw(
             learning_rate=optax.warmup_cosine_decay_schedule(
-                init_value=1e-7,
-                peak_value=sft_learning_rate,
-                warmup_steps=sft_warmup_steps,
-                decay_steps=args.steps,
-                end_value=1e-7
+                init_value   = 1e-7,
+                peak_value   = sft_learning_rate,
+                warmup_steps = sft_warmup_steps,
+                decay_steps  = args.steps,
+                end_value    = 1e-7
             ),
             weight_decay=weight_decay
         )
@@ -408,8 +406,8 @@ def main():
     for step in range(1, args.steps + 1):
         # Batch бэлдэх
         # Текстийн санамсаргүй хэсгээс таслан авах
-        starts = np.random.randint(0, len(corpus_ids) - sft_seq_len - 1, sft_batch_size)
-        batch_np = np.stack([corpus_ids[s : s + sft_seq_len + 1] for s in starts])
+        starts    = np.random.randint(0, len(corpus_ids) - sft_seq_len - 1, sft_batch_size)
+        batch_np  = np.stack([corpus_ids[s : s + sft_seq_len + 1] for s in starts])
         batch_jax = jnp.asarray(batch_np, dtype=jnp.int32)
 
         # Train Step

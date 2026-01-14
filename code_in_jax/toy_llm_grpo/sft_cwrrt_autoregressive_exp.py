@@ -2,8 +2,6 @@
 #  CWRRT TRANSFORMER (SFT)
 #
 #  CWRRT  : Cross-Window Residual Recurrent Transformer
-#  Author : Sharavsambuu.G
-#  Date   : 2026/01/01
 #
 #  ЗОРИЛГО:
 #   - Урт текстийг хязгаарлагдмал санах ойтой GPU дээр сургах зорилготой recurrent Transformer архитектур.
@@ -562,8 +560,8 @@ def main():
     
     for step in range(1, args.steps + 1):
         # Багц өгөгдөл бэлдэх (Batch)
-        starts = np.random.randint(0, len(corpus_ids) - args.seq_len - 1, args.batch)
-        batch_np = np.stack([corpus_ids[s : s + args.seq_len + 1] for s in starts])
+        starts    = np.random.randint(0, len(corpus_ids) - args.seq_len - 1, args.batch)
+        batch_np  = np.stack([corpus_ids[s : s + args.seq_len + 1] for s in starts])
         batch_jax = jnp.asarray(batch_np, dtype=jnp.int32)
 
         # Сургах алхам

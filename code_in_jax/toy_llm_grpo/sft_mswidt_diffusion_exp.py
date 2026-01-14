@@ -2,8 +2,6 @@
 #  MSWIDT TRANSFORMER (SFT)
 #
 #  MSWIDT : Mosaic Shifted-Window Iterative Diffusion Transformer
-#  Author : Sharavsambuu.G
-#  Date   : 2026/01/11
 #
 #  ЗОРИЛГО:
 #   Generative Masked Diffusion архитектурын туршилт.
