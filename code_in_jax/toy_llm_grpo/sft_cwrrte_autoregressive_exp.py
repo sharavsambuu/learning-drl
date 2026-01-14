@@ -2,7 +2,7 @@
 #  CWRRTE: A Cross-Window Recurrent Transformer with Conditional Engram Memory
 #
 #  АРХИТЕКТУРЫН ТАЙЛБАР:
-#   Энэ модель урт текстийг боловсруулахдаа Recurrent болон Retrieval (Хайлт) 
+#   Энэ модель урт текстийг боловсруулахдаа Recurrent болон Retrieval (Хайлт)
 #   аргуудыг хослуулсан эрлийз архитектур юм. Үндсэн гурван бүрэлдэхүүн хэсэгтэй:
 #
 #   1. Recurrent Memory (mem):
@@ -25,13 +25,14 @@
 #   - RoPE                    : Байршлын векторыг дарааллын эхнээс зөв хуваарилна.
 #   - JAX Scan                : Цонх хоорондын шилжилтийг өндөр хурдаар гүйцэтгэнэ.
 #
+#  TTS eSpeak суулгах (текст сонсох):
+#   - Ubuntu/WSL:  sudo apt install espeak-ng
 #
 #  Лавлагаа:
 #   - DeepSeek, Conditional Memory via Scalable Lookup: A New Axis of Sparsity for Large Language Models
 #     https://www.arxiv.org/pdf/2601.07372
 #
 #
-
 
 import os
 # Санах ойн хуваарилалтыг оновчтой болгох
@@ -43,6 +44,9 @@ import math
 import random
 import argparse
 import time
+import re
+import shutil
+import subprocess
 
 import numpy         as np
 import jax
@@ -84,6 +88,13 @@ sample_gen_len        = 256
 sample_temp           = 0.8
 sample_prompt_text    = "Once upon a time there was a little robot. "
 
+# eSpeak TTS
+tts_enabled           = True   
+tts_voice             = "en"   
+tts_speed             = 165    # 80-450 орчим
+tts_amp               = 120    # 0-200
+tts_max_chars         = 400    # Хэт урт текст хэлэхээс сэргийлнэ
+
 # Моделийн хэмжээ
 num_layers            = 6
 num_heads             = 8
@@ -97,6 +108,38 @@ weight_decay          = 0.01
 # Random seed тохиргоо
 np.random.seed(seed)
 random.seed(seed)
+
+
+# ESPEAK NON-BLOCKING TTS (Давталт саатуулахгүй)
+
+_ESPEAK_BIN = shutil.which("espeak-ng") or shutil.which("espeak")
+
+def _tts_clean(s, max_chars=400):
+    s = s.replace("\n", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    s = "".join(ch for ch in s if ch.isprintable())
+    return s[:max_chars]
+
+def speak_async(text, voice="en", speed=165, amp=120, enabled=True):
+    if (not enabled) or (not _ESPEAK_BIN):
+        return
+
+    t = _tts_clean(text, max_chars=tts_max_chars)
+    if not t:
+        return
+
+    try:
+        p = subprocess.Popen(
+            [_ESPEAK_BIN, "-v", voice, "-s", str(speed), "-a", str(amp), "--stdin"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        p.stdin.write((t + "\n").encode("utf-8", errors="ignore"))
+        p.stdin.close()
+    except Exception:
+        pass
 
 
 # ӨГӨГДӨЛ БЭЛТГЭХ (DATA LOADING)
@@ -599,7 +642,7 @@ def generate(params, prompt, gen_len=100, temp=0.8):
         next_token_logits = next_token_logits.at[bos_id].set(-1e9)
         
         # Sampling хийх
-        probs = np.exp(np.array(next_token_logits) / temp)
+        probs     = np.exp(np.array(next_token_logits) / temp)
         probs_sum = np.sum(probs)
         if probs_sum == 0 or np.isnan(probs_sum): probs = np.ones_like(probs) / len(probs)
         else: probs /= probs_sum
@@ -747,6 +790,7 @@ def main():
             print("\n" + "-"*40)
             sample_text = generate(state.params, sample_prompt_text, gen_len=sample_gen_len, temp=sample_temp)
             print(f"ГАРСАН ҮР ДҮН: {sample_text}")
+            speak_async(sample_text, voice=tts_voice, speed=tts_speed, amp=tts_amp, enabled=tts_enabled)
             print("-"*40 + "\n")
 
     print("Сургалт амжилттай дууслаа!")
