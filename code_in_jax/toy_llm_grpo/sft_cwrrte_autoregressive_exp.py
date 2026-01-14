@@ -612,6 +612,65 @@ def generate(params, prompt, gen_len=100, temp=0.8):
     return decode_ids(token_ids)
 
 
+# ENGRAM DEBUG HELPERS (Gate + Engram RMS шалгах)
+
+def _find_engram_subtree(params):
+    """
+    state.params доторх Engram-ийн параметрийн модыг олно.
+    Буцаах бүтэц:
+        (subtree_dict, path_str) эсвэл (None, None)
+    """
+    def _rec(node, path):
+        # FrozenDict / dict ижил зарчмаар ажиллана
+        if hasattr(node, "items"):
+            keys = list(node.keys())
+
+            # VectorizedEngram.setup() үүсгэсэн нэрүүд
+            if ("engram_table" in keys) and ("engram_gate" in keys):
+                return node, path
+
+            for k, v in node.items():
+                sub, sub_path = _rec(v, f"{path}/{k}" if path else str(k))
+                if sub is not None:
+                    return sub, sub_path
+
+        return None, None
+
+    return _rec(params, "")
+
+def _sigmoid_gate_stats(engram_subtree):
+    """
+    engram_gate (logit) -> sigmoid gate статистик
+    """
+    gate_logit = engram_subtree["engram_gate"]
+    gate       = jax.nn.sigmoid(gate_logit)
+
+    gate_mean = float(jnp.mean(gate))
+    gate_min  = float(jnp.min(gate))
+    gate_max  = float(jnp.max(gate))
+
+    return gate_mean, gate_min, gate_max
+
+def _engram_rms_from_batch(engram_subtree, tokens_w, mem_ids):
+    """
+    Жинхэнэ lookup хийж Engram output-ийн RMS хэмжинэ.
+    tokens_w: (B, W)
+    mem_ids : (B, O)
+    """
+    # Engram-ийн params-ыг тусад нь apply хийх
+    engram_mod = VectorizedEngram(
+        vocab_size   = vocab_size,
+        embed_dim    = embed_dim,
+        memory_size  = engram_vocab_size,
+        ngram_n      = engram_ngram_n,
+        dropout_rate = engram_dropout
+    )
+
+    out = engram_mod.apply({"params": engram_subtree}, tokens_w, mem_ids, deterministic=True)
+    rms = float(jnp.sqrt(jnp.mean(out * out)))
+    return rms
+
+
 # MAIN
 
 def main():
@@ -667,15 +726,31 @@ def main():
 
         if step % args.loss_freq == 0:
             dt = time.time() - start_time
-            print(f"Step {step:5d} | Loss: {loss:.4f} | Time: {dt:.1f}s")
-        
+
+            # Engram gate статистик (ашиглагдаж эхэлж байгаа эсэх)
+            engram_subtree, engram_path = _find_engram_subtree(state.params)
+            if engram_subtree is not None:
+                g_mean, g_min, g_max = _sigmoid_gate_stats(engram_subtree)
+                print(f"Step {step:5d} | Loss: {loss:.4f} | Time: {dt:.1f}s | EngramGate(mean/min/max): {g_mean:.4f}/{g_min:.4f}/{g_max:.4f} | Path: {engram_path}")
+            else:
+                print(f"Step {step:5d} | Loss: {loss:.4f} | Time: {dt:.1f}s | EngramGate: NOT FOUND")
+
         if step % args.sample_freq == 0:
+            # Engram output RMS (lookup хийж хэмжинэ)
+            engram_subtree, _ = _find_engram_subtree(state.params)
+            if engram_subtree is not None:
+                tokens_w = batch_jax[:, :cwr_window_len]                           # (B, W)
+                mem_ids  = jnp.zeros((batch_jax.shape[0], cwr_overlap), jnp.int32) # (B, O) - эхний window шалгалт
+                e_rms    = _engram_rms_from_batch(engram_subtree, tokens_w, mem_ids)
+                print(f"EngramOut RMS (first window, deterministic): {e_rms:.6f}")
+
             print("\n" + "-"*40)
             sample_text = generate(state.params, sample_prompt_text, gen_len=sample_gen_len, temp=sample_temp)
             print(f"ГАРСАН ҮР ДҮН: {sample_text}")
             print("-"*40 + "\n")
 
     print("Сургалт амжилттай дууслаа!")
+
 
 if __name__ == "__main__":
     main()
