@@ -3,9 +3,9 @@
 #  CWRRTES + Episodic Slots : Cross-Window Recurrent Transformer with Hybrid Memory Architecture
 #
 #  АРХИТЕКТУРЫН ДЭЛГЭРЭНГҮЙ ТАЙЛБАР:
-#   Энэхүү код нь Long-Context буюу урт хэмжээний текстийг боловсруулахдаа
-#   зөвхөн хураангуйлах (Summary) биш, өнгөрсөн үйл явдлыг нарийвчлан хадгалах
-#   Slot-Based Episodic Memory-г туршиж буй хувилбар юм.
+#   Энэ код нь Long-Context буюу урт хэмжээний текстийг боловсруулахдаа зөвхөн 
+#   хураангуйлах (Summary) биш, өнгөрсөн үйл явдлыг нарийвчлан хадгалах
+#   Slot-Based Episodic Memory-ийн туршилт юм.
 #
 #   ҮНДСЭН БҮРЭЛДЭХҮҮН ХЭСГҮҮД:
 #
@@ -137,7 +137,7 @@ sample_gen_len        = 256
 sample_temp           = 0.8
 sample_prompt_text    = "Once upon a time there was a little robot. "
 
-# eSpeak TTS (Дуу хоолойгоор унших)
+# eSpeak TTS 
 tts_enabled           = True
 tts_voice             = "en"
 tts_speed             = 165
@@ -154,7 +154,7 @@ max_seq_len           = 8192
 max_grad_norm         = 1.0
 weight_decay          = 0.01
 
-# Random Seed (Туршилтыг давтах боломжтой байлгах)
+# Random Seed 
 np.random.seed(seed)
 random.seed(seed)
 
@@ -294,7 +294,7 @@ class SwiGLU(nn.Module):
 
 
 # ADDRESSABLE MEMORY STACK (EPISODIC SLOTS)
-# Энэ хэсэг нь моделийн тархины урт хугацааны санах ойн хэсэг юм.
+# Моделийн тархины урт хугацааны санах ойн
 
 class MemoryRecallGate(nn.Module):
     """
@@ -380,11 +380,11 @@ class EpisodicSlotWriter(nn.Module):
         # Эцсийн бичих индекс
         slot_idx = jnp.where(do_merge == 1, best_idx, lru_idx)  # (B,)
 
-        # Age Update: Бүх слотын нас нэмэгдэнэ, харин бичсэнийх 0 болно.
+        # Age Update, Бүх слотын нас нэмэгдэнэ, харин бичсэнийх 0 болно.
         epi_age_new = epi_age + 1.0
         epi_age_new = epi_age_new.at[jnp.arange(B), slot_idx].set(0.0)
 
-        # Strength Update: Decay болон шинэ мэдээллийн хүчийг нэмэх
+        # Strength Update, Decay болон шинэ мэдээллийн хүчийг нэмэх
         epi_strength_new = epi_strength * epi_strength_decay
         ws = jnp.clip(write_strength.squeeze(-1), 0.0, 1.0)
         prev_str = epi_strength_new[jnp.arange(B), slot_idx]
@@ -443,8 +443,8 @@ class WindowSalienceWriter(nn.Module):
         max_logits = jax.lax.stop_gradient(jnp.max(safe_logits, axis=1, keepdims=True))
         exps       = jnp.exp(safe_logits - max_logits)
         exps       = jnp.where(mask_expanded, exps, 0.0)
-        sum_exps = jnp.sum(exps, axis=1, keepdims=True) + 1e-6
-        weights  = exps / sum_exps  # (B, T, H)
+        sum_exps   = jnp.sum(exps, axis=1, keepdims=True) + 1e-6
+        weights    = exps / sum_exps  # (B, T, H)
 
         write_vec_heads = jnp.sum(weights[:, :, :, None] * x_heads, axis=1)
 
@@ -510,8 +510,8 @@ class NgramEngramMemory(nn.Module):
 
         hash_sums = jnp.zeros((B, W, self.num_heads), dtype=jnp.uint32)
         for i in range(self.ngram_n):
-            chunk = full_seq[:, start_idx-i : full_seq.shape[1]-i]
-            p_vec = self.primes[:, i]
+            chunk     = full_seq[:, start_idx-i : full_seq.shape[1]-i]
+            p_vec     = self.primes[:, i]
             hash_sums = hash_sums + (chunk[:, :, None] * p_vec[None, None, :])
 
         lookup_indices = (hash_sums % self.memory_size).astype(jnp.int32)
@@ -530,10 +530,10 @@ class NgramEngramMemory(nn.Module):
         return out
 
 
-# TRANSFORMER BLOCKS 
+# TRANSFORMER BLOCKS
 
 class CausalSelfAttention(nn.Module):
-    embed_dim : int 
+    embed_dim : int
     num_heads : int
 
     @nn.compact
@@ -560,22 +560,34 @@ class CausalSelfAttention(nn.Module):
         q, k, v = q.transpose(0, 2, 1, 3), k.transpose(0, 2, 1, 3), v.transpose(0, 2, 1, 3)
         attn_weights = jnp.matmul(q, k.transpose(0, 1, 3, 2)) / math.sqrt(head_dim)
         if mask is not None: attn_weights = jnp.where(mask, attn_weights, -1e9)
-        
+
         attn_probs = jax.nn.softmax(attn_weights, axis=-1)
         attn_probs = nn.Dropout(0.1, deterministic=deterministic)(attn_probs)
         out        = jnp.matmul(attn_probs, v).transpose(0, 2, 1, 3).reshape(B, Tq, self.embed_dim)
         return nn.Dense(self.embed_dim, name="out_proj")(out)
 
 class TransformerBlock(nn.Module):
-    embed_dim : int
-    num_heads : int
-    @nn.compact
-    def __call__(self, x, mask=None, kv=None, freqs_cis=None, deterministic=True):
-        norm_x, norm_kv = RMSNorm(self.embed_dim)(x), kv if kv is not None else RMSNorm(self.embed_dim)(x)
-        x = x + CausalSelfAttention(self.embed_dim, self.num_heads)(norm_x, mask, norm_kv, freqs_cis, deterministic)
-        x = x + SwiGLU(self.embed_dim)(RMSNorm(self.embed_dim)(x), deterministic)
-        return x
+    embed_dim     : int
+    num_heads     : int
+    deterministic : bool = True  
 
+    @nn.compact
+    def __call__(self, x, mask=None, kv=None, freqs_cis=None):
+        norm_x  = RMSNorm(self.embed_dim)(x)
+        norm_kv = kv if kv is not None else RMSNorm(self.embed_dim)(x)
+        
+        x = x + CausalSelfAttention(self.embed_dim, self.num_heads)(
+            norm_x, 
+            mask          = mask, 
+            kv            = norm_kv, 
+            freqs_cis     = freqs_cis, 
+            deterministic = self.deterministic
+        )
+        x = x + SwiGLU(self.embed_dim)(
+            RMSNorm(self.embed_dim)(x), 
+            deterministic=self.deterministic
+        )
+        return x
 
 # CWRRTE RECURRENT CELL (THE CORE ENGINE)
 # Цонх бүр дээр ажиллах логик, энд бүх санах ойн механизмууд нийлнэ.
@@ -590,105 +602,172 @@ class CWRRTEWindowCell(nn.Module):
     engram_vocab_size : int
     engram_ngram_n    : int
     engram_num_heads  : int
+    max_seq_len       : int
     deterministic     : bool = True
 
     @nn.compact
     def __call__(self, carry, tokens_w):
         # State (Carry) задлах
-        mem_emb, mem_ids, ssum_fast, ssum_slow, epi_keys, epi_vals, epi_age, epi_strength, last_slot_idx = carry
+        mem_emb, mem_ids, ssum_fast, ssum_slow, epi_keys, epi_vals, epi_age, epi_strength, last_write_key, pos_base = carry
         B, T = tokens_w.shape; O = self.overlap
+        S    = self.window_len - self.overlap
 
         # Input Embedding & Injection
         x = nn.Embed(self.vocab_size, self.embed_dim)(tokens_w)
-        
+
         # Хуучин хураангуйг (ssum) оруулах (Legacy connection)
         global_ctx     = jnp.concatenate([ssum_fast, ssum_slow], axis=-1)
         ctx_proj       = RMSNorm(self.embed_dim)(nn.Dense(self.embed_dim)(global_ctx))
-        injection_gate = nn.sigmoid(nn.Dense(self.embed_dim)(jnp.concatenate([x, jnp.broadcast_to(ctx_proj[:, None], x.shape)], -1)))
+        ctx_bc         = jnp.broadcast_to(ctx_proj[:, None, :], x.shape)
+        injection_gate = nn.sigmoid(nn.Dense(self.embed_dim)(jnp.concatenate([x, ctx_bc], axis=-1)))
         x              = x + (ctx_proj[:, None, :] * injection_gate)
 
         # Memory Retrievals
         # Engram Lookup
         engram_emb = NgramEngramMemory(
-            self.vocab_size, 
-            self.embed_dim, 
-            self.engram_vocab_size, 
-            self.engram_ngram_n, 
-            self.engram_num_heads, 
+            self.vocab_size,
+            self.embed_dim,
+            self.engram_vocab_size,
+            self.engram_ngram_n,
+            self.engram_num_heads,
             engram_dropout
-        )(tokens_w, mem_ids, self.deterministic)
+        )(tokens_w, mem_ids, deterministic=self.deterministic)
         engram_emb = RMSNorm(self.embed_dim)(engram_emb)
+
         mem_processed = RMSNorm(self.embed_dim)(nn.Dense(self.embed_dim)(mem_emb))
 
         # Episodic Slot Reading (Targeted Read)
         q_win        = jnp.mean(RMSNorm(self.embed_dim)(x), axis=1) # Window query
         writer_proxy = jnp.clip(jnp.linalg.norm(q_win, axis=-1, keepdims=True) / math.sqrt(self.embed_dim), 0.0, 1.0)
         novelty      = 1.0 - cosine_sim(jax.lax.stop_gradient(q_win), jax.lax.stop_gradient(ssum_slow))[:, None]
-        
-        # Gate & Read
-        g_recall                = MemoryRecallGate(self.embed_dim)(q_win, writer_proxy, novelty, self.deterministic)
-        epi_read, _, epi_logits = EpisodicSlotReader(self.embed_dim)(q_win, epi_keys, epi_vals, epi_age, epi_strength, self.deterministic)
-        
-        # Read result-ийг үндсэн урсгалд нэмэх
-        x = x + nn.Dense(self.embed_dim)(epi_read * g_recall)[:, None, :]
 
-        # Transformer Processing
-        kv_seq = jnp.concatenate([mem_processed, engram_emb, x], axis=1) # KV Bank
-        
-        # RoPE Frequency Setup
-        total_len = O + T + T + 32; start_pos_q = O + T
-        freqs_cis = precompute_freqs_cis(self.embed_dim // self.num_heads, total_len)
-        f_kv      = jnp.concatenate([freqs_cis[:, :O], freqs_cis[:, :T], freqs_cis[:, start_pos_q:start_pos_q+T]], 1)
-        f_q       = freqs_cis[:, start_pos_q:start_pos_q+T]
+        # Gate & Read
+        g_recall                = MemoryRecallGate(self.embed_dim)(q_win, writer_proxy, novelty, deterministic=self.deterministic)
+        epi_read, _, epi_logits = EpisodicSlotReader(self.embed_dim)(q_win, epi_keys, epi_vals, epi_age, epi_strength, deterministic=self.deterministic)
+
+        # Recall gate нь санах ойг ашиглах эсэхийг шийддэг тул уншсан үр дүнг
+        # үндсэн урсгалд оруулахдаа gate-ийн тогтвортой утгыг ашиглана.
+        g_recall_stop = jax.lax.stop_gradient(g_recall)
+        x = x + nn.Dense(self.embed_dim)(epi_read * g_recall_stop)[:, None, :]
+
+        # RoPE Frequency Setup (Absolute Position)
+        # pos_base нь цонхны эхлэх байрлал (Absolute offset) бөгөөд overlap нь өмнөхөөс ирсэн хэсэгт таарна.
+        head_dim  = self.embed_dim // self.num_heads
+        freqs_all = precompute_freqs_cis(head_dim, self.max_seq_len + 256)
+
+        mem_pos0  = pos_base - O
+        cur_pos0  = pos_base
+
+        # JAX Scan дотор Python slice (:) ашиглавал traced индекс static биш тул алдаа өгдөг.
+        # Иймээс lax.dynamic_slice ашиглаж, эхлэх байрлал нь dynamic байж болно.
+        def _freq_slice(start_pos, length):
+            max_start = (freqs_all.shape[1] - length)
+            start_pos = jnp.clip(start_pos, 0, max_start)
+            return jax.lax.dynamic_slice(
+                freqs_all,
+                (0, start_pos, 0, 0),
+                (1, length, 1, freqs_all.shape[3])
+            )
+
+        f_mem = _freq_slice(mem_pos0, O)
+        f_eng = _freq_slice(cur_pos0, T)
+        f_cur = _freq_slice(cur_pos0, T)
+
+        f_kv  = jnp.concatenate([f_mem, f_eng, f_cur], axis=1)
+        f_q   = f_cur
 
         # Masking Setup
-        full_mask = jnp.concatenate([jnp.ones((T, O), dtype=bool), jnp.tril(jnp.ones((T, T), dtype=bool)), jnp.tril(jnp.ones((T, T), dtype=bool))], 1)
-        valid_k   = jnp.concatenate([jnp.ones((B, O), dtype=bool), (tokens_w!=pad_id), (tokens_w!=pad_id)], 1)
-        mask      = full_mask[None, None] & valid_k[:, None, None]
+        full_mask = jnp.concatenate(
+            [
+                jnp.ones((T, O), dtype=bool),
+                jnp.tril(jnp.ones((T, T), dtype=bool)),
+                jnp.tril(jnp.ones((T, T), dtype=bool)),
+            ],
+            axis=1
+        )
+        valid_k   = jnp.concatenate([jnp.ones((B, O), dtype=bool), (tokens_w != pad_id), (tokens_w != pad_id)], axis=1)
+        mask      = full_mask[None, None, :, :] & valid_k[:, None, None, :]
 
-        # Layers
+        # Transformer Layers
+        RematTransformerBlock = nn.remat(TransformerBlock)
+
         curr_x = x
         for i in range(self.num_layers):
-            curr_x = nn.remat(TransformerBlock, static_argnums=(5,))(
-                self.embed_dim, self.num_heads, name=f"b{i}"
-            )(curr_x, mask, kv_seq, (f_q, f_kv), self.deterministic)
+            kv_seq = jnp.concatenate([mem_processed, engram_emb, curr_x], axis=1)
+
+            # deterministic нь Dropout-ийн горим бөгөөд remat дотор Python bool байх ёстой.
+            blk = RematTransformerBlock(
+                self.embed_dim,
+                self.num_heads,
+                deterministic = self.deterministic,
+                name          = f"b{i}"
+            )
+
+            curr_x = blk(
+                curr_x,
+                mask      = mask,
+                kv        = kv_seq,
+                freqs_cis = (f_q, f_kv)
+            )
+
         curr_x = RMSNorm(self.embed_dim)(curr_x)
 
         # State Updates (Writing to Memory)
-        new_mem_emb, new_mem_ids = curr_x[:, -O:], tokens_w[:, -O:]
-        
+        new_mem_emb = curr_x[:, -O:, :]
+        new_mem_ids = tokens_w[:, -O:]
+
         # SGRM Writer (Summary vector гаргах)
         write_vec, write_strength, write_strength_heads = WindowSalienceWriter(
-            self.embed_dim, 
-            sgrm_num_heads, 
+            self.embed_dim,
+            sgrm_num_heads,
             sgrm_dropout
-        )(curr_x, (tokens_w != pad_id), self.deterministic)
+        )(curr_x, (tokens_w != pad_id), deterministic=self.deterministic)
 
         # Legacy Summaries update (Fast/Slow)
         gate_fast     = nn.sigmoid(self.param("gate_fast", nn.initializers.constant(0.0), (self.embed_dim,)))
         new_ssum_fast = (ssum_fast * gate_fast) + (write_vec * (1.0 - gate_fast) * write_strength)
-        lambda_eff    = jnp.clip(0.99 - (0.5 * (1.0 - cosine_sim(jax.lax.stop_gradient(write_vec), jax.lax.stop_gradient(ssum_slow))[:, None])), 0.5, 0.999)
+        lambda_eff    = jnp.clip(
+            0.99 - (0.5 * (1.0 - cosine_sim(jax.lax.stop_gradient(write_vec), jax.lax.stop_gradient(ssum_slow))[:, None])),
+            0.5,
+            0.999
+        )
         new_ssum_slow = (ssum_slow * lambda_eff) + (write_vec * (1.0 - lambda_eff) * write_strength)
 
         # Episodic Slot Write (Санах ойн үүрэнд бичих)
-        write_key, write_val = nn.Dense(self.embed_dim)(write_vec), nn.Dense(self.embed_dim)(write_vec)
-        write_key            = write_key / (jnp.linalg.norm(write_key, axis=-1, keepdims=True) + 1e-6)
-        
+        write_key = nn.Dense(self.embed_dim)(write_vec)
+        write_val = nn.Dense(self.embed_dim)(write_vec)
+        write_key = write_key / (jnp.linalg.norm(write_key, axis=-1, keepdims=True) + 1e-6)
+
         epi_keys2, epi_vals2, epi_age2, epi_strength2, slot_idx, best_sim = EpisodicSlotWriter(
-            self.embed_dim, 
+            self.embed_dim,
             epi_num_slots
-        )(write_key, write_val, write_strength, epi_keys, epi_vals, epi_age, epi_strength, self.deterministic)
+        )(write_key, write_val, write_strength, epi_keys, epi_vals, epi_age, epi_strength, deterministic=self.deterministic)
 
         # Contrastive Recall Objective (Credit Assignment)
-        # Өмнөх цонхонд бичсэн зүйлийг (last_slot_idx) одоогийн цонх уншиж (epi_logits) чадсан уу?
-        target_idx = jnp.clip(last_slot_idx, 0, epi_num_slots-1)
+        # Өмнөх цонхонд бичсэн түлхүүр (last_write_key)-ийг одоогийн санах ойгоос
+        # дахин олж чадах эсэхийг logits дээр суурилан тооцоолно.
+        prev_valid = (jnp.linalg.norm(last_write_key, axis=-1) > 0.0).astype(jnp.float32)
+        lk_n       = last_write_key / (jnp.linalg.norm(last_write_key, axis=-1, keepdims=True) + 1e-6)
+        ek_n       = epi_keys / (jnp.linalg.norm(epi_keys, axis=-1, keepdims=True) + 1e-6)
+        sim_prev   = jnp.sum(ek_n * lk_n[:, None, :], axis=-1)  # (B, K)
+        target_idx = jnp.argmax(sim_prev, axis=-1)              # (B,)
+
         logp       = jax.nn.log_softmax(epi_logits, axis=-1)
-        recall_nll = -logp[jnp.arange(B), target_idx] * (last_slot_idx >= 0).astype(jnp.float32)
+        recall_nll = -logp[jnp.arange(B), target_idx] * prev_valid
 
         logits    = nn.Dense(self.vocab_size)(curr_x)
         aux       = (write_strength_heads, g_recall, recall_nll, slot_idx, best_sim)
-        new_carry = (new_mem_emb, new_mem_ids, new_ssum_fast, new_ssum_slow, epi_keys2, epi_vals2, epi_age2, epi_strength2, slot_idx.astype(jnp.int32))
-        
+
+        # pos_base нь цонхны алхалтын хэмжээгээр урагшилна (Stride = W - Overlap)
+        new_pos_base = pos_base + S
+
+        new_carry = (
+            new_mem_emb, new_mem_ids,
+            new_ssum_fast, new_ssum_slow,
+            epi_keys2, epi_vals2, epi_age2, epi_strength2,
+            write_key, new_pos_base
+        )
+
         return new_carry, (logits, aux)
 
 
@@ -704,42 +783,55 @@ class CWRRTETransformer(nn.Module):
     engram_vocab_size : int
     engram_ngram_n    : int
     engram_num_heads  : int
+    max_seq_len       : int
 
     @nn.compact
     def __call__(self, tokens_long, deterministic=True):
         B, N  = tokens_long.shape; W, O, S = self.window_len, self.overlap, self.window_len - self.overlap
         n_win = int(math.ceil((N - W) / S)) + 1 if N > W else 1
-        
+
         # Текстийг цонхнуудад хуваах
         tokens_pad = jnp.pad(tokens_long, ((0, 0), (0, max(0, W + (n_win - 1) * S - N))), constant_values=pad_id)
         starts     = (jnp.arange(n_win) * S).astype(jnp.int32)
         windows    = jax.vmap(lambda s: jax.lax.dynamic_slice(tokens_pad, (0, s), (B, W)))(starts)
 
         # JAX Scan ашиглан recurrent гүйлт хийх
-        ScanCell = nn.scan(CWRRTEWindowCell, variable_broadcast="params", split_rngs={"params": False, "dropout": True})
-        
+        ScanCell = nn.scan(
+            CWRRTEWindowCell,
+            variable_broadcast = "params",
+            split_rngs         = {"params": False, "dropout": True},
+            in_axes            = 0,
+            out_axes           = 0
+        )
+
         # Initial States
+        # pos_base нь RoPE-д ашиглагдах абсолют байрлал бөгөөд overlap хэсэг 0..O-1 дээр сууж,
+        # анхны цонхны эхлэл 0 дээр эхэлнэ.
         init_state = (
-            jnp.zeros((B, O, self.embed_dim)), jnp.zeros((B, O), dtype=jnp.int32), # Overlap
-            jnp.zeros((B, self.embed_dim)), jnp.zeros((B, self.embed_dim)),        # Summaries
-            jnp.zeros((B, epi_num_slots, self.embed_dim)),                         # Epi Keys
-            jnp.zeros((B, epi_num_slots, self.embed_dim)),                         # Epi Vals
-            jnp.ones ((B, epi_num_slots)) * 1e3,                                   # Epi Age
-            jnp.zeros((B, epi_num_slots)),                                         # Epi Strength
-            -jnp.ones((B,), dtype=jnp.int32)                                       # Last Slot Idx
+            jnp.zeros((B, O, self.embed_dim)),                                  # Overlap Emb
+            jnp.zeros((B, O), dtype=jnp.int32),                                 # Overlap IDs
+            jnp.zeros((B, self.embed_dim)),                                     # Fast Summary
+            jnp.zeros((B, self.embed_dim)),                                     # Slow Summary
+            jnp.zeros((B, epi_num_slots, self.embed_dim)),                      # Epi Keys
+            jnp.zeros((B, epi_num_slots, self.embed_dim)),                      # Epi Vals
+            jnp.ones ((B, epi_num_slots)) * 1e3,                                # Epi Age
+            jnp.zeros((B, epi_num_slots)),                                      # Epi Strength
+            jnp.zeros((B, self.embed_dim)),                                     # Last Write Key
+            jnp.array(0, dtype=jnp.int32)                                       # pos_base нь цонхны эхлэх абсолют байрлал буюу Window start position юм.
         )
 
         _, (logits_windows, aux_windows) = ScanCell(
-            self.vocab_size, 
-            self.embed_dim, 
-            self.num_layers, 
-            self.num_heads, 
-            self.window_len, 
-            self.overlap, 
-            self.engram_vocab_size, 
-            self.engram_ngram_n, 
-            self.engram_num_heads, 
-            deterministic
+            vocab_size        = self.vocab_size,
+            embed_dim         = self.embed_dim,
+            num_layers        = self.num_layers,
+            num_heads         = self.num_heads,
+            window_len        = self.window_len,
+            overlap           = self.overlap,
+            engram_vocab_size = self.engram_vocab_size,
+            engram_ngram_n    = self.engram_ngram_n,
+            engram_num_heads  = self.engram_num_heads,
+            max_seq_len       = self.max_seq_len,
+            deterministic     = deterministic
         )(init_state, windows)
 
         # Гаралтыг буцааж нийлүүлэх
@@ -753,15 +845,16 @@ class CWRRTETransformer(nn.Module):
 #  TRAINING LOOP & LOSS FUNCTIONS
 
 model = CWRRTETransformer(
-    vocab_size, 
-    embed_dim, 
-    num_layers, 
-    num_heads, 
-    cwr_window_len, 
-    cwr_overlap, 
-    engram_vocab_size, 
-    engram_ngram_n, 
-    engram_num_heads
+    vocab_size,
+    embed_dim,
+    num_layers,
+    num_heads,
+    cwr_window_len,
+    cwr_overlap,
+    engram_vocab_size,
+    engram_ngram_n,
+    engram_num_heads,
+    max_seq_len
 )
 
 @jax.jit
@@ -778,13 +871,13 @@ def train_step(state, batch, rng):
         logits = logits[:, :labels.shape[1], :]
 
         # Үндсэн Text Generation Loss
-        loss_t = optax.softmax_cross_entropy_with_integer_labels(logits, labels)
-        mask   = (labels != pad_id).astype(jnp.float32)
+        loss_t    = optax.softmax_cross_entropy_with_integer_labels(logits, labels)
+        mask      = (labels != pad_id).astype(jnp.float32)
         text_loss = jnp.sum(loss_t * mask) / (jnp.sum(mask) + 1e-6)
 
         # Auxiliary Losses (Туслах loss)
         write_str_w, g_recall_w, recall_nll_w, _, _ = aux_windows
-        
+
         # Write Budget  : Санах ойд хэт их бичихээс сэргийлэх
         write_budget_loss  = (jnp.mean(write_str_w) - sgrm_target_rate) ** 2
         # Recall Budget : Санах ойг хэт их уншихаас сэргийлэх
@@ -813,13 +906,13 @@ def generate(params, prompt, gen_len=100, temp=0.8):
 
     for _ in range(gen_len):
         if len(token_ids) >= sft_long_seq_len: break
-        inp_np  = np.array(token_ids + [pad_id] * (sft_long_seq_len - len(token_ids)), dtype=np.int32)
+        inp_np = np.array(token_ids + [pad_id] * (sft_long_seq_len - len(token_ids)), dtype=np.int32)
         logits = predict_step_jit(params, jnp.array([inp_np]))[0, len(token_ids) - 1, :]
-        
+
         logits = logits.at[pad_id].set(-1e9).at[bos_id].set(-1e9)
         probs  = np.exp(np.array(logits) / temp)
         probs /= np.sum(probs) if np.sum(probs) > 0 else 1
-        
+
         next_id = np.random.choice(len(probs), p=probs)
         token_ids.append(next_id)
         if next_id == eos_id: break
