@@ -1,33 +1,40 @@
-
 #
-#  CWRRTE : A Cross-Window Recurrent Transformer with Multi-Head Engram Memory
+#  CWRRTE : A Cross-Window Recurrent Transformer with Dual-State Engram Memory
 #
 #  АРХИТЕКТУРЫН ТАЙЛБАР:
-#   Энэ модель нь Recurrent болон Retrieval (Хайлт) аргуудыг хослуулсан
-#   архитектурын туршилт юм. Дараах үндсэн гурван бүрэлдэхүүн хэсэгтэй:
+#   Энэ модель нь Recurrent (Дараалсан) болон Retrieval (Хайлт хийх) аргуудыг
+#   хослуулан, урт контексттэй ажиллах чадвартай архитектурын туршилт юм.
+#   Дараах үндсэн дөрвөн бүрэлдэхүүн хэсгүүдээс тогтоно:
 #
-#   1. Recurrent Memory (mem):
-#      Өмнөх цонхны сүүлийн хэсгийг (overlap) дараагийн цонх руу дамжуулж,
+#   1. Recurrent Memory (Short-Term Context):
+#      Өмнөх цонхны сүүлийн хэсгийг (overlap) дараагийн цонх руу шууд дамжуулж,
 #      дарааллын тасралтгүй байдлыг хангана.
 #
-#   2. Global Summary (ssum):
-#      Текстийн ерөнхий агуулгыг нэг вектор руу шахаж, урт хугацааны контекст
-#      хадгалах үүрэгтэй. Gated Update ашиглана.
+#   2. Dual-State Global Summary (Long-Term Context):
+#      Текстийн ерөнхий агуулгыг хадгалахдаа мартах буюу leaky асуудлыг шийдэхийн
+#      тулд санах ойг хоёр түвшинд хувааж ажиллуулна:
+#      - Fast Summary : Ойрын харилцан яриа, богино үйл явдлыг хадгална.
+#      - Slow Summary : Surprise-Based Update ашиглан зөвхөн гэнэтийн, шинэ
+#        мэдээлэл ирсэн үед л шинэчлэгдэж, агуулгын ерөнхий үйл явдлыг удаан хадгална.
+#      - Token-Conditional Injection : Хураангуйг бүх токенд хүчээр наахгүй,
+#        токен бүр өөрт хэрэгтэй эсэхийг шийдэх Gate-ээр дамжуулж авна.
 #
-#   3. Multi-Head Engram Memory:
-#      DeepSeek аргачлалын олон толгойтой (Multi-Head) хувилбар.
-#      - Нэг толгойтой (Single-Head) үед үүсдэг хэш мөргөлдөөнийг арилгахын тулд
-#        4-8 өөр төрлийн анхны тоо ашиглан зэрэгцүүлэн хайлт хийнэ.
-#      - JAX vmap ашиглан толгой бүрийн хайлтыг GPU дээр зэрэг гүйцэтгэнэ.
+#   3. Multi-Head Engram Memory (Static Knowledge):
+#      DeepSeek аргачлалын дагуу текст дэх тогтмол хэллэг, нэр томьёог (N-grams)
+#      нейрон сүлжээгээр биш, хурдан хайлтаар (Lookup Table) олж авна.
+#      - Хэш мөргөлдөөнийг арилгахын тулд 4-8 өөр төрлийн анхны тоо ашиглан
+#        зэрэгцүүлэн хайлт хийнэ (Vectorized Rolling Hash).
+#
+#   4. KV-Bank Integration:
+#      [Recurrent Overlap | Engram Memory | Current Tokens] гэсэн дарааллаар
+#      Attention механизмд орж, өнгөрсөн болон одоог зэрэг харах боломжийг олгоно.
 #
 #
-#  Сайжруулалтууд болон бүрэлдэхүүн хэсгүүд:
-#   - RMSNorm                 : LayerNorm-оос хөнгөн бөгөөд Deep NN training тогтворжуулна.
-#   - SwiGLU                  : Google PaLM, Llama-3 загваруудын ашигладаг Gated MLP хувилбар. Логик сэтгэлгээг сайжруулна гэлцдэг.
-#   - Vectorized Rolling Hash : N-gram хэшийг Python давталтгүйгээр, GPU дээр зэрэг бодно.
-#   - KV-Bank Integration     : [Memory | Engram | Current] дарааллаар Attention-д орно.
-#   - RoPE                    : Байршлын векторыг дарааллын эхнээс зөв хуваарилна.
-#   - JAX Scan                : Цонх хоорондын рекуррент шилжилтийг өндөр хурдаар гүйцэтгэнэ.
+#  Ашиглагдсан шийдлүүд:
+#   - RMSNorm  : LayerNorm-оос хөнгөн бөгөөд сургалтыг тогтворжуулна.
+#   - SwiGLU   : Llama-3, DeepSeek зэрэг орчин үеийн загваруудын стандарт MLP.
+#   - JAX Scan : Цонх хоорондын рекуррент шилжилтийг өндөр хурдаар гүйцэтгэнэ.
+#   - RoPE     : Байршлын векторыг дарааллын эхнээс зөв хуваарилна.
 #
 #
 #  TTS eSpeak суулгах (текст сонсох):
@@ -37,14 +44,11 @@
 #  Лавлагаа:
 #   - DeepSeek, Conditional Memory via Scalable Lookup: A New Axis of Sparsity for LLMs
 #     https://www.arxiv.org/pdf/2601.07372
-#   - GLU Variants Improve Transformer (SwiGLU paper)
-#     https://arxiv.org/abs/2002.05202
+#   - Enhancing Recurrent Transformers with Dual-State Memory logic (LSTM inspired)
 #
-#
-
 
 import os
-# Санах ойн хуваарилалтыг оновчтой болгох
+# Санах ойн хуваарилалтыг оновчтой болгох (Fragmentation багасгах)
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"  ] = "platform"
 
@@ -75,13 +79,11 @@ seed                  = 42
 # CWRRTE Архитектур
 cwr_window_len        = 128    # Нэг удаад боловсруулах цонхны урт
 cwr_overlap           = 32     # Дараагийн цонх руу дамжуулах overlap урт
-cwr_lambda_init       = 0.5    # Summary шинэчлэх gate-ийн анхны утга
-cwr_alpha_init        = 0.1    # Summary ашиглах gate-ийн анхны утга
 
 # Engram Санах ой (Multi-Head)
-engram_vocab_size     = 100000 # Энграм хүснэгтийн нийт мөр (Slot count)
+engram_vocab_size     = 100000 # Engram хүснэгтийн нийт мөр (Slot count)
 engram_ngram_n        = 4      # Хэдэн тэмдэгт харж хэш хийх вэ (N-gram)
-engram_num_heads      = 4      # Санах ойг хэдэн "толгой"-гоор зэрэг хайх вэ
+engram_num_heads      = 4      # Санах ойг хэдэн толгойгоор зэрэг хайх вэ
 engram_dropout        = 0.05   # Санах ойгоос хэт хамаарахаас сэргийлэх dropout
 
 # Supervised Fine Tuning (SFT)
@@ -204,8 +206,8 @@ def _logit(p):
 def apply_rope(x, freq_cis):
     """
     Rotary Positional Embeddings (RoPE) ашиглан байршлын мэдээлэл оруулах.
-    x: (B, T, H, D)
-    freq_cis: (1, T, 1, D/2)
+    x        : (B, T, H, D)
+    freq_cis : (1, T, 1, D/2)
     """
     B, T, H, D = x.shape
     x_complex = jax.lax.complex(x[..., 0::2], x[..., 1::2])
@@ -223,13 +225,12 @@ def precompute_freqs_cis(dim, max_len, theta=10000.0):
     return freqs_cis[None, :, None, :]
 
 
-# RMSNorm, SwiGLU
+# RMSNorm, SwiGLU (Үндсэн блокууд)
 
 class RMSNorm(nn.Module):
     """
     Root Mean Square Normalization.
-    LayerNorm-ийг бодвол mean (дундаж) тооцохгүй тул хурдан, 
-    мөн Deep NN-д gradient урсгалыг тогтвортой байлгана.
+    LayerNorm-ийг бодвол mean (дундаж) тооцохгүй тул хурдан, мөн Deep NN-д gradient урсгалыг тогтвортой байлгана.
     """
     dim: int
     eps: float = 1e-6
@@ -244,7 +245,7 @@ class RMSNorm(nn.Module):
 class SwiGLU(nn.Module):
     """
     Swish-Gated Linear Unit.
-    GELU-г орлоно. Gate болон Value салаатай тул логик сэтгэлгээг сайжруулдаг. 
+    GELU-г орлоно. Gate болон Value салаатай тул логик сэтгэлгээг сайжруулдаг гэлцдэг. 
     Llama-3, DeepSeek зэрэг орчин үеийн загваруудын стандарт.
     """
     embed_dim     : int
@@ -265,7 +266,7 @@ class SwiGLU(nn.Module):
         return nn.Dropout(0.1, deterministic=deterministic)(out)
 
 
-# MULTI-HEAD ENGRAM MEMORY
+# MULTI-HEAD ENGRAM MEMORY (DeepSeek)
 
 class MultiHeadEngram(nn.Module):
     """
@@ -349,8 +350,6 @@ class MultiHeadEngram(nn.Module):
         lookup_indices = hash_sums % self.memory_size                          # (B, W, H)
 
         # Head-wise gather (Толгой бүр өөрийн баганаас татах)
-        # table_h : (H, M, Dh)
-        # idx_h   : (H, B, W)
         table_h = jnp.transpose(self.memory_table, (1, 0, 2))
         idx_h   = jnp.transpose(lookup_indices, (2, 0, 1))
 
@@ -455,28 +454,50 @@ class CWRRTEWindowCell(nn.Module):
     num_heads         : int
     window_len        : int
     overlap           : int
-    lambda_init       : float
-    alpha_init        : float
     engram_vocab_size : int
     engram_ngram_n    : int
-    engram_num_heads  : int          # Heads param
+    engram_num_heads  : int
     deterministic     : bool = True
 
     @nn.compact
     def __call__(self, carry, tokens_w):
-        # Carry задлах
-        # mem_emb : Recurrent memory (Context)
-        # mem_ids : Engram хэшлэлд зориулсан ID
-        # ssum    : Global Summary вектор
-        mem_emb, mem_ids, ssum = carry
+        # Carry задлах:
+        # mem_emb   : Recurrent memory (Өмнөх цонхны төгсгөл хэсэг)
+        # mem_ids   : Engram хэшлэлд зориулсан ID
+        # ssum_fast : Хурдан шинэчлэгдэх санах ой (Working Memory / Dialogue)
+        # ssum_slow : Удаан шинэчлэгдэх санах ой  (Long-term Context / Plot)
+        mem_emb, mem_ids, ssum_fast, ssum_slow = carry
 
         B, T = tokens_w.shape
         O    = self.overlap
 
-        # Одоогийн оролтын Embedding
+        # Оролтын Embedding
         x = nn.Embed(self.vocab_size, self.embed_dim)(tokens_w)
 
-        # Engram Retrieval (Multi-Head)
+        # Asymmetric Read & Token-Conditional Injection :
+        # Хуучин загварт Summary-г шууд бүх токен руу broadcast хийж байсан.
+        # Энэ нь өгүүлбэрийн жижиг хэсгүүдийг (syntax) эвдэх эрсдэлтэй.
+        # Шийдэл нь гэвэл токен бүр өөртөө контекст хэрэгтэй эсэхийг шийднэ.
+        
+        # Fast болон Slow контекстийг нэгтгэж нэг том Global Context үүсгэнэ
+        global_ctx = jnp.concatenate([ssum_fast, ssum_slow], axis=-1)         # (B, 2*D)
+        
+        # Контекстийг Embedding хэмжээс рүү буулгах (Projection)
+        ctx_proj = nn.Dense(self.embed_dim, name="ctx_read_proj")(global_ctx) # (B, D)
+
+        # Token-Conditional Gate тооцоолох
+        # x: (B, T, D), ctx_proj: (B, D) -> broadcast хийж залгана
+        ctx_broadcast  = jnp.broadcast_to(ctx_proj[:, None, :], x.shape)
+        concat_input   = jnp.concatenate([x, ctx_broadcast], axis=-1)         # (B, T, 2*D)
+        
+        # Gate нь токен бүрийн хувьд [0, 1] утга авна. (Surgical Injection)
+        injection_gate = nn.sigmoid(nn.Dense(self.embed_dim, name="inject_gate")(concat_input))
+        
+        # Контекстийг зөвхөн хэрэгтэй хэсэгт нь шингээнэ
+        x = x + (ctx_proj[:, None, :] * injection_gate)
+
+
+        # Engram Retrieval & Processing
         # Engram нь KV-Bank-д нэмэгдэх тул түүнийг тусад нь боловсруулна
         engram_emb = MultiHeadEngram(
             vocab_size   = self.vocab_size,
@@ -489,33 +510,24 @@ class CWRRTEWindowCell(nn.Module):
 
         # Retrieval вектор болон Model embedding хоёрын далайц (scale) 
         # зөрөхөөс сэргийлж Engram-ийг RMSNorm-оор тэнцвэржүүлнэ.
-        engram_emb = RMSNorm(self.embed_dim)(engram_emb)
-
-        # Memory боловсруулах
+        engram_emb    = RMSNorm(self.embed_dim)(engram_emb)
         mem_processed = nn.Dense(self.embed_dim, name="mem_adapter")(mem_emb)
         mem_processed = RMSNorm(self.embed_dim)(mem_processed)
-
-        # Summary Injection (Хураангуйг шингээх)
-        alpha     = jax.nn.sigmoid(self.param("alpha_gate", nn.initializers.constant(_logit(self.alpha_init)), (self.embed_dim,)))
-        ssum_proj = nn.Dense(self.embed_dim, use_bias=False)(ssum)
-        x = x + (ssum_proj[:, None, :] * alpha[None, None, :])
 
         # KV-Bank байгуулах
         # Дараалал : [Memory (O) | Engram (T) | Current (T)]
         kv_seq = jnp.concatenate([mem_processed, engram_emb, x], axis=1)
 
-        # Mask бэлдэх
-        # Causal Mask (Гурвалжин)
+        # Mask бэлдэх (Causal Mask + Padding Logic)
         causal_mask = jnp.tril(jnp.ones((T, T), dtype=bool))
         mem_mask    = jnp.ones((T, O), dtype=bool)
         engram_mask = causal_mask
         full_mask   = jnp.concatenate([mem_mask, engram_mask, causal_mask], axis=1)
 
-        # Padding Mask
-        valid_curr = (tokens_w != pad_id)
-        valid_mem  = jnp.ones((B, O), dtype=bool)
-        valid_eng  = valid_curr
-        valid_k    = jnp.concatenate([valid_mem, valid_eng, valid_curr], axis=1)
+        valid_curr  = (tokens_w != pad_id)
+        valid_mem   = jnp.ones((B, O), dtype=bool)
+        valid_eng   = valid_curr
+        valid_k     = jnp.concatenate([valid_mem, valid_eng, valid_curr], axis=1)
 
         mask = full_mask[None, None, :, :] & valid_k[:, None, None, :]
 
@@ -523,7 +535,7 @@ class CWRRTEWindowCell(nn.Module):
         total_kv_len = O + T + T
         freqs_cis    = precompute_freqs_cis(self.embed_dim // self.num_heads, total_kv_len + 32)
 
-        # Transformer Layers
+        # Transformer давхаргууд
         curr_x = x
         for i in range(self.num_layers):
             curr_x = TransformerBlock(self.embed_dim, self.num_heads, name=f"b{i}")(
@@ -532,19 +544,54 @@ class CWRRTEWindowCell(nn.Module):
 
         curr_x = RMSNorm(self.embed_dim)(curr_x)
 
-        # Дараагийн төлөвийг хадгалах (Update State)
+        # Surprise-Weighted Update
+        
+        # Дараагийн шатанд дамжуулах Memory/Ids
         new_mem_emb = curr_x[:, -O:, :]
         new_mem_ids = tokens_w[:, -O:]
 
-        # Summary шинэчлэх логик
+        # Одоогийн цонхны хураангуйг тооцох (Average Pooling)
         out_mask = (tokens_w != pad_id).astype(jnp.float32)[:, :, None]
         win_sum  = jnp.sum(curr_x * out_mask, axis=1) / (jnp.sum(out_mask, axis=1) + 1e-6)
 
-        lam      = jax.nn.sigmoid(self.param("lambda_gate", nn.initializers.constant(_logit(self.lambda_init)), (self.embed_dim,)))
-        new_ssum = (ssum * lam[None, :]) + (win_sum * (1.0 - lam[None, :]))
+        # FAST Summary Update (Standard EMA)
+        # Ойрын үйл явдлыг хурдан шинэчилнэ (Initial bias 0 -> Sigmoid ~0.5)
+        # Энэ нь Working Memory байдлаар ажиллана.
+        gate_fast     = nn.sigmoid(self.param("gate_fast", nn.initializers.constant(0.0), (self.embed_dim,)))
+        new_ssum_fast = (ssum_fast * gate_fast) + (win_sum * (1.0 - gate_fast))
+
+        # SLOW Summary Update (Novelty Gated)
+        # Урт хугацааны санах ойг зөвхөн Гэнэтийн/Шинэ мэдээлэл ирсэн үед шинэчилнэ.
+        # Үгүй бол хуучин мэдээллээ угаагдахаас сэргийлж хадгална.
+        
+        def cosine_sim(a, b):
+            # 0-д хуваахаас сэргийлж epsilon нэмэв
+            a_n = a / (jnp.linalg.norm(a, axis=-1, keepdims=True) + 1e-6)
+            b_n = b / (jnp.linalg.norm(b, axis=-1, keepdims=True) + 1e-6)
+            return jnp.sum(a_n * b_n, axis=-1, keepdims=True) # (B, 1)
+
+        # Гэнэтийн биш байдлыг хэмжих (Similarity)
+        # stop_gradient ашиглаж модель gradient hacking явдлаас сэргийлнэ.
+        sim = cosine_sim(jax.lax.stop_gradient(win_sum), jax.lax.stop_gradient(ssum_slow))
+        
+        # Novelty, 0.0 = Хуучин мэдээлэл, 1.0 = Шинэ мэдээлэл
+        novelty = 1.0 - sim  
+
+        # Шинэчлэх хурдны тохиргоо
+        lambda_base = 0.99  # Ерөнхийдөө маш удаан шинэчлэгдэнэ (High Retention)
+        beta        = 0.5   # Novelty-д хэр мэдрэг байх вэ
+
+        # Хэрэв Novelty өндөр бол lambda багасч (retention drops), шинэ мэдээллийг оруулна.
+        # Clip ашиглаж хэт савлагаанаас сэргийлнэ [0.5, 0.999]
+        lambda_eff = jnp.clip(lambda_base - (beta * novelty), 0.5, 0.999)
+
+        # Slow Update Apply
+        new_ssum_slow = (ssum_slow * lambda_eff) + (win_sum * (1.0 - lambda_eff))
 
         logits = nn.Dense(self.vocab_size)(curr_x)
-        return (new_mem_emb, new_mem_ids, new_ssum), logits
+        
+        # Шинэ Carry-г буцаах (4 элементтэй)
+        return (new_mem_emb, new_mem_ids, new_ssum_fast, new_ssum_slow), logits
 
 
 # ҮНДСЭН МОДЕЛЬ
@@ -556,8 +603,6 @@ class CWRRTETransformer(nn.Module):
     num_heads         : int
     window_len        : int
     overlap           : int
-    lambda_init       : float
-    alpha_init        : float
     engram_vocab_size : int
     engram_ngram_n    : int
     engram_num_heads  : int
@@ -592,9 +637,11 @@ class CWRRTETransformer(nn.Module):
         )
 
         # Анхны төлөвүүдийг (Carry) 0-ээр дүүргэх
-        init_mem_emb = jnp.zeros((B, O, self.embed_dim))
-        init_mem_ids = jnp.zeros((B, O), dtype=jnp.int32)
-        init_ssum    = jnp.zeros((B, self.embed_dim))
+        # 4 төрлийн төлөв хадгална (Mem, IDs, FastSum, SlowSum)
+        init_mem_emb   = jnp.zeros((B, O, self.embed_dim))
+        init_mem_ids   = jnp.zeros((B, O), dtype=jnp.int32)
+        init_ssum_fast = jnp.zeros((B, self.embed_dim))
+        init_ssum_slow = jnp.zeros((B, self.embed_dim))
 
         # Scan ажиллуулах (цонхнуудаар давтах)
         _, logits_windows = ScanCell(
@@ -604,13 +651,11 @@ class CWRRTETransformer(nn.Module):
             num_heads         = self.num_heads,
             window_len        = self.window_len,
             overlap           = self.overlap,
-            lambda_init       = self.lambda_init,
-            alpha_init        = self.alpha_init,
             engram_vocab_size = self.engram_vocab_size,
             engram_ngram_n    = self.engram_ngram_n,
             engram_num_heads  = self.engram_num_heads,
             deterministic     = deterministic
-        )((init_mem_emb, init_mem_ids, init_ssum), windows)
+        )((init_mem_emb, init_mem_ids, init_ssum_fast, init_ssum_slow), windows)
 
         # Цонхнуудын гаралтыг буцааж нэг урт дараалал болгох
         out = logits_windows[0]
@@ -630,8 +675,6 @@ model = CWRRTETransformer(
     num_heads         = num_heads,
     window_len        = cwr_window_len,
     overlap           = cwr_overlap,
-    lambda_init       = cwr_lambda_init,
-    alpha_init        = cwr_alpha_init,
     engram_vocab_size = engram_vocab_size,
     engram_ngram_n    = engram_ngram_n,
     engram_num_heads  = engram_num_heads
@@ -745,6 +788,7 @@ def main():
 
     print("\n" + "="*60)
     print("  CWRRTE : Cross-Window Recurrent Transformer + Multi-Head Engram")
+    print("  Feature: Slow-Fast Memory & Surprise-Based Updates")
     print(f"  Steps: {args.steps} | Batch: {args.batch} | SeqLen: {args.seq_len}")
     print(f"  Engram Size: {engram_vocab_size} | N-gram: {engram_ngram_n} | Heads: {engram_num_heads}")
     print("="*60 + "\n")
@@ -764,9 +808,12 @@ def main():
     optimizer = optax.chain(
         optax.clip_by_global_norm(max_grad_norm),
         optax.adamw(
-            learning_rate=optax.warmup_cosine_decay_schedule(
-                init_value=1e-6, peak_value=sft_learning_rate,
-                warmup_steps=sft_warmup_steps, decay_steps=args.steps, end_value=1e-6
+            learning_rate = optax.warmup_cosine_decay_schedule(
+                init_value   = 1e-6, 
+                peak_value   = sft_learning_rate,
+                warmup_steps = sft_warmup_steps, 
+                decay_steps  = args.steps, 
+                end_value    = 1e-6
             ),
             weight_decay=weight_decay
         )
@@ -789,11 +836,13 @@ def main():
 
             # Engram gate статистик
             engram_subtree, engram_path = _find_engram_subtree(state.params)
+            
+            gate_info = ""
             if engram_subtree is not None:
-                g_mean, g_min, g_max = _sigmoid_gate_stats(engram_subtree)
-                print(f"Step {step:5d} | Loss: {loss:.4f} | Time: {dt:.1f}s | EngramGate(mean/min/max): {g_mean:.4f}/{g_min:.4f}/{g_max:.4f} | Path: {engram_path}")
-            else:
-                print(f"Step {step:5d} | Loss: {loss:.4f} | Time: {dt:.1f}s | EngramGate: NOT FOUND")
+                g_mean, _, _ = _sigmoid_gate_stats(engram_subtree)
+                gate_info = f"| EG_Mean: {g_mean:.3f}"
+                
+            print(f"Step {step:5d} | Loss: {loss:.4f} | Time: {dt:.1f}s {gate_info}")
 
         if step % args.sample_freq == 0:
             # Engram output RMS шалгалт
