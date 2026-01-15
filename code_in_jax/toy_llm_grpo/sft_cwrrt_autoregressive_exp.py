@@ -13,6 +13,11 @@
 #   - RoPE (Rotary Positional Embeddings) : Урт дараалал дээр илүү сайн ажиллахын тулд абсолют байршил биш, эргэлтийн вектор ашигласан.
 #   - Gated Recurrence                    : Өмнөх мэдээллийг хэр зэрэг авахыг модель өөрөө сурна (learnable gates).
 #   - Scan                                : JAX-ийн nn.scan ашиглан window хоорондын шилжилтийг хурдан тооцоолно.
+#   - Continuous Position                 : Цонх хооронд RoPE байршлыг (pos_base) дамжуулж, байршлын мэдээллийг таслахгүй үргэлжлүүлнэ.
+#
+#
+#  TTS eSpeak суулгах 
+#   Ubuntu/WS : sudo apt install espeak-ng
 #
 #  АЖИЛЛУУЛАХ:
 #   python sft_cwrrt_autoregressive_exp.py --steps 5000 --seq-len 1024 --batch 8 --loss-freq 10 --sample-freq 100
@@ -29,6 +34,8 @@ import math
 import random
 import argparse
 import time
+import shutil
+import subprocess
 
 import numpy         as np
 import jax
@@ -71,13 +78,52 @@ num_heads             = 8
 embed_dim             = 512    # Head dim = 512/8 = 64
 max_seq_len           = 8192
 
-# Оптимизаци (Сургалтын тогтворжилт)
+# Машин сургалтын тогтворжилуулах тохиргоо
 max_grad_norm         = 1.0
 weight_decay          = 0.01
+
+# eSpeak TTS
+tts_enabled           = True
+tts_voice             = "en"
+tts_speed             = 165    # 80-450 орчим
+tts_amp               = 120    # 0-200
+tts_max_chars         = 400    # Хэт урт текст хэлэхээс сэргийлнэ
 
 # Random seed тохируулах
 np.random.seed(seed)
 random.seed(seed)
+
+
+# ESPEAK NON-BLOCKING TTS (Давталт саатуулахгүй)
+
+_ESPEAK_BIN = shutil.which("espeak-ng") or shutil.which("espeak")
+
+def _tts_clean(s, max_chars=400):
+    s = s.replace("\n", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    s = "".join(ch for ch in s if ch.isprintable())
+    return s[:max_chars]
+
+def speak_async(text, voice="en", speed=165, amp=120, enabled=True):
+    if (not enabled) or (not _ESPEAK_BIN):
+        return
+
+    t = _tts_clean(text, max_chars=tts_max_chars)
+    if not t:
+        return
+
+    try:
+        p = subprocess.Popen(
+            [_ESPEAK_BIN, "-v", voice, "-s", str(speed), "-a", str(amp), "--stdin"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        p.stdin.write((t + "\n").encode("utf-8", errors="ignore"))
+        p.stdin.close()
+    except Exception:
+        pass
 
 
 # DATA LOADING & TOKENIZATION (Өгөгдөл бэлдэх)
@@ -133,17 +179,10 @@ def _logit(p):
 def apply_rope(x, freq_cis):
     # x       : (B, T, Head, Dim)
     # freq_cis: (1, T, 1, Dim/2) - complex тоонууд
-    
-    # x-ийг complex тоо болгож хувиргах
     B, T, H, D = x.shape
-    x_complex = jax.lax.complex(x[..., 0::2], x[..., 1::2])
-    
-    # Эргүүлэх (Rotation)
-    x_rotated = x_complex * freq_cis
-    
-    # Буцаагаад бодит тоо болгох
-    x_out = jnp.stack([x_rotated.real, x_rotated.imag], axis=-1).reshape(B, T, H, D)
-    return x_out
+    x_complex  = jax.lax.complex(x[..., 0::2], x[..., 1::2])
+    x_rot      = x_complex * freq_cis
+    return jnp.stack([x_rot.real, x_rot.imag], axis=-1).reshape(B, T, H, D)
 
 # RoPE давтамж урьдчилан тооцоолох
 def precompute_freqs_cis(dim, max_len, theta=10000.0):
@@ -154,185 +193,192 @@ def precompute_freqs_cis(dim, max_len, theta=10000.0):
     return freqs_cis[None, :, None, :]  # (1, T, 1, Dim/2)
 
 class CausalSelfAttention(nn.Module):
-    embed_dim: int
-    num_heads: int
+    embed_dim     : int
+    num_heads     : int
+    deterministic : bool = True # Drop out ашиглахад хэрэгтэй flag 
 
     @nn.compact
-    def __call__(self, x, mask=None, kv=None, freqs_cis=None, deterministic=True):
+    def __call__(self, x, mask=None, kv=None, freqs_cis=None):
         # KV нь None байвал x-ийг ашиглана (Self-Attention)
         if kv is None:
             kv = x
 
-        B, Tq, C = x.shape
+        B, Tq, _ = x.shape
         _, Tk, _ = kv.shape
-        head_dim = self.embed_dim // self.num_heads
+        H        = self.num_heads
+        D        = self.embed_dim // H
 
         # Q, K, V projections
-        q = nn.Dense(self.embed_dim, name="q_proj")(x)
-        k = nn.Dense(self.embed_dim, name="k_proj")(kv)
-        v = nn.Dense(self.embed_dim, name="v_proj")(kv)
+        q = nn.Dense(self.embed_dim)(x).reshape(B, Tq, H, D)
+        k = nn.Dense(self.embed_dim)(kv).reshape(B, Tk, H, D)
+        v = nn.Dense(self.embed_dim)(kv).reshape(B, Tk, H, D)
 
-        # Multi-head хэлбэр рүү оруулах: (B, T, Heads, HeadDim)
-        q = q.reshape(B, Tq, self.num_heads, head_dim)
-        k = k.reshape(B, Tk, self.num_heads, head_dim)
-        v = v.reshape(B, Tk, self.num_heads, head_dim)
-
-        # RoPE (Rotation) ашиглах
+        # RoPE (Rotation)
         if freqs_cis is not None:
-            # Давтамжийн векторыг одоогийн уртад тааруулж таслах
-            f_q = freqs_cis[:, -Tq:, :, :]
-            f_k = freqs_cis[:, -Tk:, :, :]
-
-            q = apply_rope(q, f_q)
-            k = apply_rope(k, f_k)
+            if isinstance(freqs_cis, tuple):
+                f_q, f_k = freqs_cis
+                q = apply_rope(q, f_q)
+                k = apply_rope(k, f_k)
+            else:
+                q = apply_rope(q, freqs_cis)
+                k = apply_rope(k, freqs_cis)
 
         # Attention Scores бодох: (B, Heads, Tq, Tk)
         q = q.transpose(0, 2, 1, 3)
         k = k.transpose(0, 2, 1, 3)
         v = v.transpose(0, 2, 1, 3)
 
-        attn_weights = jnp.matmul(q, k.transpose(0, 1, 3, 2)) / math.sqrt(head_dim)
+        attn_weights = jnp.matmul(q, k.transpose(0, 1, 3, 2)) / math.sqrt(D)
 
         if mask is not None:
-            # Mask хийх (ирээдүйг харахгүй байх)
+            # Mask хийх, ирээдүйг харахгүй байх
             attn_weights = jnp.where(mask, attn_weights, -1e9)
 
         attn_probs = jax.nn.softmax(attn_weights, axis=-1)
-        attn_probs = nn.Dropout(0.1, deterministic=deterministic)(attn_probs)
+        attn_probs = nn.Dropout(0.1, deterministic=self.deterministic)(attn_probs)
 
         # Output
-        out = jnp.matmul(attn_probs, v) # (B, H, Tq, D)
-        out = out.transpose(0, 2, 1, 3).reshape(B, Tq, self.embed_dim)
-
-        return nn.Dense(self.embed_dim, name="out_proj")(out)
+        out = jnp.matmul(attn_probs, v).transpose(0, 2, 1, 3).reshape(B, Tq, self.embed_dim)
+        return nn.Dense(self.embed_dim)(out)
 
 class MLP(nn.Module):
-    embed_dim: int
-    expand_factor: int = 4
+    embed_dim     : int
+    expand_factor : int  = 4
+    deterministic : bool = True
 
     @nn.compact
-    def __call__(self, x, deterministic=True):
+    def __call__(self, x):
         h = nn.Dense(self.embed_dim * self.expand_factor)(x)
         h = nn.gelu(h)
         h = nn.Dense(self.embed_dim)(h)
-        return nn.Dropout(0.1, deterministic=deterministic)(h)
+        return nn.Dropout(0.1, deterministic=self.deterministic)(h)
 
 class Block(nn.Module):
-    embed_dim: int
-    num_heads: int
+    embed_dim     : int
+    num_heads     : int
+    deterministic : bool = True
 
     @nn.compact
-    def __call__(self, x, mask=None, kv=None, freqs_cis=None, deterministic=True):
+    def __call__(self, x, mask=None, kv=None, freqs_cis=None):
         # Pre-LN architecture (LayerNorm-ийг урд нь хийх)
         norm_x  = nn.LayerNorm()(x)
         norm_kv = nn.LayerNorm()(kv) if kv is not None else norm_x
 
-        attn_out = CausalSelfAttention(self.embed_dim, self.num_heads)(
-            norm_x, mask=mask, kv=norm_kv, freqs_cis=freqs_cis, deterministic=deterministic
+        attn_out = CausalSelfAttention(self.embed_dim, self.num_heads, self.deterministic)(
+            norm_x, mask=mask, kv=norm_kv, freqs_cis=freqs_cis
         )
         x = x + attn_out
-        x = x + MLP(self.embed_dim)(nn.LayerNorm()(x), deterministic=deterministic)
+        x = x + MLP(self.embed_dim, deterministic=self.deterministic)(nn.LayerNorm()(x))
         return x
 
 
 # CORE CWRRT RECURRENT CELL
 
 class CWRRTWindowCell(nn.Module):
-    vocab_size   : int
-    embed_dim    : int
-    num_layers   : int
-    num_heads    : int
-    window_len   : int
-    overlap      : int
-    lambda_init  : float
-    alpha_init   : float
-    deterministic: bool = True
+    vocab_size    : int
+    embed_dim     : int
+    num_layers    : int
+    num_heads     : int
+    window_len    : int
+    overlap       : int
+    lambda_init   : float
+    alpha_init    : float
+    freqs_all     : jnp.ndarray # Бүх дарааллын RoPE давтамж
+    deterministic : bool = True
 
     @nn.compact
     def __call__(self, carry, tokens_w):
-        # carry    : (mem, ssum) -> өмнөх цонхноос ирсэн мэдээлэл
-        # tokens_w : (B, W)      -> одоогийн цонхны токенууд
-        mem, ssum = carry
+        # carry      : (mem, ssum, pos_base)
+        # pos_base   : Одоогийн цонх эхлэх абсолют байршил
+        mem, ssum, pos_base = carry
 
         B, T = tokens_w.shape
         O    = self.overlap
+        S    = self.window_len - O # Stride урт
 
         # Embedding
         x = nn.Embed(self.vocab_size, self.embed_dim)(tokens_w)
 
         # Memory Integration (Санах ой нэгтгэл)
-        # Memory-г адаптераар дамжуулж хэмжээсийг тогтворжуулна
-        mem_processed = nn.Dense(self.embed_dim, name="mem_adapter")(mem)
-        mem_processed = nn.LayerNorm(name="mem_norm")(mem_processed)
+        mem_processed = nn.LayerNorm()(nn.Dense(self.embed_dim)(mem))
 
         # Summary Injection (Хураангуйг шингээх)
-        # Summary state-ийг сурч болох alpha параметрээр жигнэн оролт дээр нэмнэ
         alpha = jax.nn.sigmoid(self.param(
             "alpha_gate",
             nn.initializers.constant(_logit(self.alpha_init)),
             (self.embed_dim,)
         ))
-
-        # Ssum projection: (B, D) -> (B, 1, D)
-        ssum_proj = nn.Dense(self.embed_dim, use_bias=False, name="ssum_proj")(ssum)
-        # Оролтын бүх токенд summary-г бага зэрэг нэмж өгнө (context priming)
+        
+        # Summary projection
+        ssum_proj = nn.Dense(self.embed_dim, use_bias=False)(ssum)
         x = x + (ssum_proj[:, None, :] * alpha[None, None, :])
 
-        # Mask бэлдэх 
-        # Causal mask : Одоогийн токен зөвхөн өмнөхөө болон Memory-ийг харна
+        # RoPE давтамжийг зөв зүсэж авах (Slicing)
+        # JAX дотор dynamic slicing хийж байж shape алдаанаас сэргийлнэ
+        def slice_freq(start, length):
+            max_start = self.freqs_all.shape[1] - length
+            start     = jnp.clip(start, 0, max_start)
+            return jax.lax.dynamic_slice(
+                self.freqs_all, 
+                (0, start, 0, 0), 
+                (1, length, 1, self.freqs_all.shape[-1])
+            )
+
+        # RoPE slicing
+        # f_mem : Memory (overlap) хэсгийн байршил -> (pos_base - O)
+        # f_cur : Одоогийн цонхны байршил          -> (pos_base)
+        f_mem = slice_freq(pos_base - O, O)
+        f_cur = slice_freq(pos_base, T)
+        f_kv  = jnp.concatenate([f_mem, f_cur], axis=1)
+
+        # Masking Logic
+        causal_mask = jnp.tril(jnp.ones((T, T), dtype=bool))
+        mem_mask    = jnp.ones((T, O), dtype=bool)
+        full_mask   = jnp.concatenate([mem_mask, causal_mask], axis=1)
         
-        causal_mask = jnp.tril(jnp.ones((T, T), dtype=bool))            # (T, T)
-        mem_mask    = jnp.ones((T, O), dtype=bool)                      # (T, O) - Memory байнга харагдана 
-        full_mask   = jnp.concatenate([mem_mask, causal_mask], axis=1)  # (T, O+T)
-
         # Padding mask (tokens_w == pad_id үед анхаарахгүй)
-        valid_curr = (tokens_w != pad_id) # (B, T)
+        valid_curr = (tokens_w != pad_id)
         valid_mem  = jnp.ones((B, O), dtype=bool)
-        valid_k    = jnp.concatenate([valid_mem, valid_curr], axis=1) # (B, O+T)
-
-        # Combine causal & padding: (B, 1, T, O+T)
+        valid_k    = jnp.concatenate([valid_mem, valid_curr], axis=1)
+        
+        # Combine: (B, 1, T, O+T)
         mask = full_mask[None, None, :, :] & valid_k[:, None, None, :]
 
-        # RoPE оор байршлын вектор бэлдэх
-        head_dim  = self.embed_dim // self.num_heads
-        freqs_cis = precompute_freqs_cis(head_dim, T + O + 10) # Хангалттай урт buffer
-
-        # Transformer давхаргууд
+        # Transformer Layers
         curr_x = x
-
         for i in range(self.num_layers):
-            # KV (Key/Value) нь Memory болон Одоогийн оролтыг залгаж үүснэ
+            # KV : Memory + Current
             kv_seq = jnp.concatenate([mem_processed, curr_x], axis=1)
-
-            curr_x = Block(self.embed_dim, self.num_heads, name=f"layer_{i}")(
-                curr_x, mask=mask, kv=kv_seq, freqs_cis=freqs_cis, deterministic=self.deterministic
-            )
+            
+            curr_x = Block(
+                self.embed_dim, self.num_heads, self.deterministic, name=f"layer_{i}"
+            )(curr_x, mask=mask, kv=kv_seq, freqs_cis=(f_cur, f_kv))
 
         curr_x = nn.LayerNorm()(curr_x)
 
         # Дараагийн Memory бэлдэх
-        # Сүүлийн overlap тооны гаралтыг дараагийн memory болгож хадгална
         new_mem = curr_x[:, -O:, :]
 
-        # Гаралтын Logit-ууд
-        out_mask = (tokens_w != pad_id).astype(jnp.float32)[:, :, None]
-        logits   = nn.Dense(self.vocab_size)(curr_x * out_mask)
-
         # Summary төлөвийг шинэчлэх
-        # Window-ийн дундаж vector-ийг олно (pad tokens хасна)
-        win_sum = jnp.sum(curr_x * out_mask, axis=1) / (jnp.sum(out_mask, axis=1) + 1e-6)
+        # Pad токенуудыг тооцохгүй дундажлах
+        out_mask = (tokens_w != pad_id).astype(jnp.float32)[:, :, None]
+        win_sum  = jnp.sum(curr_x * out_mask, axis=1) / (jnp.sum(out_mask, axis=1) + 1e-6)
 
-        # Lambda gate: Хуучин summary болон шинэ window summary-ийн харьцаа
         lam = jax.nn.sigmoid(self.param(
             "lambda_gate",
             nn.initializers.constant(_logit(self.lambda_init)),
             (self.embed_dim,)
         ))
-
-        # Шинэчлэх дүрэм: ssum_new = lam * ssum_old + (1-lam) * current_window_summary
+        
+        # Шинэчлэх дүрэм: 
+        # ssum_new = lam * ssum_old + (1-lam) * current_window_summary
         new_ssum = (ssum * lam[None, :]) + (win_sum * (1.0 - lam[None, :]))
 
-        return (new_mem, new_ssum), logits
+        logits = nn.Dense(self.vocab_size)(curr_x)
+
+        # Дараагийн алхамд pos_base нь S (stride) хэмжээгээр нэмэгдэнэ
+        return (new_mem, new_ssum, pos_base + S), logits
+
 
 class CWRRTTransformer(nn.Module):
     vocab_size  : int
@@ -343,10 +389,10 @@ class CWRRTTransformer(nn.Module):
     overlap     : int
     lambda_init : float
     alpha_init  : float
+    max_seq_len : int
 
     @nn.compact
     def __call__(self, tokens_long, deterministic=True):
-        # tokens_long: (B, Total_Seq_Len)
         B, N    = tokens_long.shape
         W, O, S = self.window_len, self.overlap, self.window_len - self.overlap
 
@@ -355,29 +401,29 @@ class CWRRTTransformer(nn.Module):
         if N > W:
             n_win = int(math.ceil((N - W) / S)) + 1
 
-        total_len_needed = W + (n_win - 1) * S
-        pad_amount       = max(0, total_len_needed - N)
+        pad_len    = max(0, W + (n_win - 1) * S - N)
+        tokens_pad = jnp.pad(tokens_long, ((0, 0), (0, pad_len)), constant_values=pad_id)
 
-        tokens_pad = jnp.pad(tokens_long, ((0, 0), (0, pad_amount)), constant_values=pad_id)
-
-        # Window эхлэх цэгүүд
         starts  = (jnp.arange(n_win) * S).astype(jnp.int32)
-
-        # vmap ашиглан window-уудыг зүсэж авах
         windows = jax.vmap(lambda s: jax.lax.dynamic_slice(tokens_pad, (0, s), (B, W)))(starts)
 
-        # Recurrent Scan тохиргоо (Давталт)
+        # RoPE давтамжийг урьдчилан тооцоолох (Scan дотор дамжуулна)
+        head_dim  = self.embed_dim // self.num_heads
+        freqs_all = precompute_freqs_cis(head_dim, self.max_seq_len + self.window_len)
+
+        # Recurrent Scan тохиргоо
         ScanCell = nn.scan(
             CWRRTWindowCell,
-            variable_broadcast="params",
-            split_rngs={"params": False, "dropout": True},
-            in_axes=0, # Оролтын эхний тэнхлэгээр (windows) гүйнэ
-            out_axes=0
+            variable_broadcast = "params",
+            split_rngs         = {"params": False, "dropout": True},
+            in_axes            = 0,
+            out_axes           = 0
         )
 
         # Анхны төлөвүүд (State)
-        init_mem  = jnp.zeros((B, O, self.embed_dim))
-        init_ssum = jnp.zeros((B, self.embed_dim))
+        init_mem      = jnp.zeros((B, O, self.embed_dim))
+        init_ssum     = jnp.zeros((B, self.embed_dim))
+        init_pos_base = jnp.array(0, dtype=jnp.int32)
 
         # Recurrence ажиллуулах
         _, logits_windows = ScanCell(
@@ -389,15 +435,15 @@ class CWRRTTransformer(nn.Module):
             overlap       = self.overlap,
             lambda_init   = self.lambda_init,
             alpha_init    = self.alpha_init,
+            freqs_all     = freqs_all,
             deterministic = deterministic
-        )((init_mem, init_ssum), windows)
+        )((init_mem, init_ssum, init_pos_base), windows)
 
         # Гаралтыг буцааж эвлүүлэх
-        out = logits_windows[0] # (B, W, V)
+        out = logits_windows[0]
 
         if n_win > 1:
-            # Бусад цонхнуудын зөвхөн шинэ хэсгийг (stride) авч залгана
-            rest = logits_windows[1:, :, O:, :]
+            rest = logits_windows[1:, :, O:, :] # Зөвхөн шинэ (non-overlap) хэсгийг авна
             rest = rest.transpose(1, 0, 2, 3).reshape(B, -1, self.vocab_size)
             out  = jnp.concatenate([out, rest], axis=1)
 
@@ -416,7 +462,8 @@ model = CWRRTTransformer(
     window_len     = cwr_window_len,
     overlap        = cwr_overlap,
     lambda_init    = cwr_lambda_init,
-    alpha_init     = cwr_alpha_init
+    alpha_init     = cwr_alpha_init,
+    max_seq_len    = max_seq_len
 )
 
 @jax.jit
@@ -450,7 +497,7 @@ def train_step(state, batch, rng):
     state = state.apply_gradients(grads=grads)
     return state, loss, new_rng
 
-# Хурдан текст үүсгэхэд зориулсан JIT функц
+# Текст хурдан үүсгэхэд зориулсан JIT функц
 @jax.jit
 def predict_step_jit(params, fixed_input):
     return model.apply({"params": params}, fixed_input, deterministic=True)
@@ -567,7 +614,7 @@ def main():
         # Сургах алхам
         state, loss, rng = train_step(state, batch_jax, rng)
 
-        # Лог хэвлэх
+        # Log хэвлэх
         if step % args.loss_freq == 0:
             dt = time.time() - start_time
             print(f"Step {step:5d} | Loss: {loss:.4f} | Time: {dt:.1f}s")
@@ -582,6 +629,7 @@ def main():
                 temp=sample_temp
             )
             print(f"ГАРСАН ҮР ДҮН: {sample_text}")
+            speak_async(sample_text, voice=tts_voice, speed=tts_speed, amp=tts_amp, enabled=tts_enabled)
             print("-"*40 + "\n")
 
     print("Сургалт дууслаа!")

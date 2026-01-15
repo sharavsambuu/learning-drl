@@ -59,6 +59,10 @@
 #  зэрэгцэн ажиллаж байгаа. Episodic нь Primary буюу үндсэн санах ой болсон гэсэн үг.
 #
 #
+#  TTS eSpeak суулгах 
+#   Ubuntu/WS : sudo apt install espeak-ng
+#
+#
 
 
 import os
