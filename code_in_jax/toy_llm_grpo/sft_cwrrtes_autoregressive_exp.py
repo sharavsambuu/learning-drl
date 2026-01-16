@@ -785,10 +785,11 @@ def predict_step_jit(params, fixed_input):
     """Текст үүсгэхэд ашиглах хурдасгасан функц"""
     return model.apply({"params": params}, fixed_input, deterministic=True)[0]
 
-def generate(params, prompt, gen_len=100, temp=0.8, ctx_len=768):
+
+def generate(params, prompt, gen_len=100, temp=0.8, ctx_len=1024): # ctx_len-ийг fix болгох
     """
     Өгөгдсөн эхлэлээс үргэлжлүүлэн текст зохиох
-    Sliding Window ашиглана (хэт урт контекстийг тасдах)
+    JAX Recompilation-аас сэргийлж тогтмол хэмжээгээр (Padding) ажиллуулна.
     """
     token_ids = list(encode_text(prompt))
     if token_ids[-1] == eos_id:
@@ -796,22 +797,37 @@ def generate(params, prompt, gen_len=100, temp=0.8, ctx_len=768):
 
     print(f"Текст үүсгэж байна: '{prompt}'")
 
+    # Тогтмол оролтын хэмжээ (Model-ийн seq_len-тэй ижил байвал сайн)
+    MAX_INFERENCE_LEN = sft_long_seq_len 
+
     for _ in range(gen_len):
         curr_len = len(token_ids)
-        # Хэрэв дээд хязгаарт тулбал зогсох
-        if curr_len >= sft_long_seq_len:
+        if curr_len >= MAX_INFERENCE_LEN:
             break
+        
+        # Оролтыг бэлдэх (Padding хийх)
+        # үргэлж MAX_INFERENCE_LEN урттай array явуулна.
+        input_ids = np.full((MAX_INFERENCE_LEN,), pad_id, dtype=np.int32)
+        
+        # Бодит токенуудыг хуулах
+        # Хэрэв контекст хэт урт байвал сүүлийн хэсгийг авна (Sliding window)
+        real_ctx = token_ids
+        if len(token_ids) > MAX_INFERENCE_LEN:
+            real_ctx = token_ids[-MAX_INFERENCE_LEN:]
+            
+        len_ctx = len(real_ctx)
+        input_ids[:len_ctx] = real_ctx
 
-        # Sliding context logic
-        start = max(0, curr_len - ctx_len)
-        ctx   = token_ids[start:curr_len]
+        inp_jax = jnp.array([input_ids]) # Shape: (1, 1024) - байнга тогтмол
 
-        inp_np  = np.array(ctx, dtype=np.int32)
-        inp_jax = jnp.array([inp_np])
+        # Forward pass (JIT cache ашиглана)
+        logits = predict_step_jit(params, inp_jax)  # (1, 1024, V)
 
-        logits = predict_step_jit(params, inp_jax)                  # (1, len(ctx), V)
-        next_token_logits = logits[0, len(ctx) - 1, :]
+        # Сүүлийн бодит токены logit-ийг авна
+        # Padding-ийн эхлэл биш, яг сүүлийн бичигдсэн токены индексээр хандана.
+        next_token_logits = logits[0, len_ctx - 1, :]
 
+        # Sampling
         next_token_logits = next_token_logits.at[pad_id].set(-1e9)
         next_token_logits = next_token_logits.at[bos_id].set(-1e9)
 
