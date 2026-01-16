@@ -36,6 +36,7 @@ import argparse
 import time
 import shutil
 import subprocess
+import re
 
 import numpy         as np
 import jax

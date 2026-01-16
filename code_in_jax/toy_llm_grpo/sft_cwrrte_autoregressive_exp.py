@@ -419,28 +419,29 @@ class CausalSelfAttention(nn.Module):
 
         return nn.Dense(self.embed_dim, name="out_proj")(out)
 
+
 class TransformerBlock(nn.Module):
-    """
-    Pre-RMSNorm бүтэцтэй. MLP нь SwiGLU-тэй.
-    """
-    embed_dim : int
-    num_heads : int
+    embed_dim     : int
+    num_heads     : int
+    deterministic : bool = True
 
     @nn.compact
-    def __call__(self, x, mask=None, kv=None, freqs_cis=None, deterministic=True):
-        # Attention хэсэг (Pre-RMSNorm)
+    def __call__(self, x, mask=None, kv=None, freqs_cis=None):
         norm_x  = RMSNorm(self.embed_dim)(x)
         norm_kv = kv if kv is not None else norm_x
 
-        attn_out = CausalSelfAttention(self.embed_dim, self.num_heads)(
-            norm_x, mask=mask, kv=norm_kv, freqs_cis=freqs_cis, deterministic=deterministic
+        x = x + CausalSelfAttention(self.embed_dim, self.num_heads)(
+            norm_x,
+            mask          = mask,
+            kv            = norm_kv,
+            freqs_cis     = freqs_cis,
+            deterministic = self.deterministic
         )
-        x = x + attn_out
 
-        # MLP хэсэг (Pre-RMSNorm + SwiGLU)
-        norm_x2 = RMSNorm(self.embed_dim)(x)
-        mlp_out = SwiGLU(self.embed_dim)(norm_x2, deterministic=deterministic)
-        x = x + mlp_out
+        x = x + SwiGLU(self.embed_dim)(
+            RMSNorm(self.embed_dim)(x),
+            deterministic=self.deterministic
+        )
 
         return x
 
@@ -538,8 +539,16 @@ class CWRRTEWindowCell(nn.Module):
         # Transformer давхаргууд
         curr_x = x
         for i in range(self.num_layers):
-            curr_x = TransformerBlock(self.embed_dim, self.num_heads, name=f"b{i}")(
-                curr_x, mask=mask, kv=kv_seq, freqs_cis=freqs_cis, deterministic=self.deterministic
+            curr_x = TransformerBlock(
+                self.embed_dim,
+                self.num_heads,
+                deterministic = self.deterministic,
+                name          = f"b{i}"
+            )(
+                curr_x,
+                mask      = mask,
+                kv        = kv_seq,
+                freqs_cis = freqs_cis
             )
 
         curr_x = RMSNorm(self.embed_dim)(curr_x)
