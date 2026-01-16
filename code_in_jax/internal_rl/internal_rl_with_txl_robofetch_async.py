@@ -27,13 +27,16 @@
 #      хөдөлгөөнийг (action) гаргана.
 #
 # МАШИН СУРГАЛТЫН ПРОЦЕСС:
-# - Phase 1 (SFT): 
+# - Phase 1 (SFT):
 #   Worker-ийг эхлээд энгийн алгоритмаар цуглуулсан өгөгдөл дээр
 #   Supervised Fine-Tuning (SFT) хийж роботыг хөдөлгөх анхан шатны чадвартай болгоно.
-# - Phase 2 (RL): 
+# - Phase 2 (RL):
 #   Worker-ийн жинг царцааж (frozen), зөвхөн Meta-Controller болон Decoder-ийг
 #   PPO (Proximal Policy Optimization) болон GRPO (Group Relative Policy Optimization) аргаар сургана.
 #
+# CORE FIX (ЧУХАЛ):
+#  - Meta->Worker тасралтгүй сувгийг тогтвортой болгохын тулд u_prop/mean/delta-г хязгаарлана.
+#  - Meta нь өөрийн өмнөх intention(u_int_prev)-оосоо хамааралтай байх ёстой тул GRU оролтонд нэмнэ.
 #
 
 
@@ -47,7 +50,8 @@ import numpy as np
 
 import gymnasium as gym
 import gymnasium_robotics
-from gymnasium.vector import AsyncVectorEnv
+#from gymnasium.vector import AsyncVectorEnv
+from gymnasium.vector import SyncVectorEnv
 
 import jax
 import jax.numpy as jnp
@@ -55,7 +59,8 @@ import flax.linen as nn
 import optax
 from flax.training import train_state
 
-# Hyperparams 
+
+# Hyperparams
 SEED                 = 42
 
 ENV_ID               = "FetchPush-v4"
@@ -135,14 +140,24 @@ DECODER_PG_COEFF     = 0.10
 # Эхний шатны сургалтын (SFT) тохиргоо
 SFT_ENABLE           = True
 SFT_FLAG             = "sft_done_fetch_integrated_fixed.flag"
-SFT_EPISODES         = 100 #3000
+SFT_EPISODES         = 100
 SFT_EPOCHS           = 10
 SFT_BATCH_SIZE       = 256
 
+# PERIODIC PLAY
+PLAY_ENABLE          = True
+PLAY_EVERY           = 5      # Хэдэн update тутамд үзүүлэх вэ
+PLAY_EPISODES        = 2      # Хэдэн episode үзүүлэх вэ
+PLAY_SLEEP_SEC       = 0.0    # Render хэт хурдан байвал удаашруулах (0.0 = max speed)
+
+# CORE STABILITY (Meta->Worker сувгийн тогтвортой хязгаар)
+U_MEAN_SCALE         = 2.0    # mean-г tanh-аар хязгаарлаад энэ хэмжээгээр scale хийнэ
+U_PROP_SCALE         = 2.0    # u_prop-г tanh-аар хязгаарлаад энэ хэмжээгээр scale хийнэ
+U_INT_CLIP           = 3.0    # u_int-г хэт том болохоос хамгаалж clip хийнэ
+DELTA_CLIP           = 2.0    # Worker руу орох delta-г clip хийнэ
+
 
 # Environment-ээс ирж буй мэдээллийг (observation) нэг урт вектор болгон хувиргана.
-# Ингэснээр Transformer бүтэцрүү оруулахад амар болно.
-
 class TransformerObservationWrapper(gym.ObservationWrapper):
     def __init__(self, env):
         super().__init__(env)
@@ -150,12 +165,16 @@ class TransformerObservationWrapper(gym.ObservationWrapper):
         self.tokenizer         = getattr(env, "tokenizer", None)
 
     def observation(self, obs_dict):
-        return np.concatenate([obs_dict["observation"], obs_dict["desired_goal"]], dtype=np.float32)
+        #return np.concatenate([obs_dict["observation"], obs_dict["desired_goal"]], dtype=np.float32)
+        x = np.concatenate([obs_dict["observation"], obs_dict["desired_goal"]], dtype=np.float32)
+        # Орчноос NaN/Inf ирвэл шууд 0 болгож, хэт том утгыг таслана (worker дэлбэрэхээс сэргийлнэ)
+        x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        x = np.clip(x, -10.0, 10.0).astype(np.float32)
+
+        return x
 
 
 # Тасралтгүй (continuous) үйлдлийг дискрет токен (token) болгож хувиргана.
-# Ингэснээр classification хэлбэрээр үйлдлийг таамаглах боломжтой.
-
 class ActionTokenizer:
     def __init__(self, bins=256):
         self.bins = int(bins)
@@ -172,7 +191,6 @@ class ActionTokenizer:
 
 
 # ActionTokenizer-ийг Gym орчинд хэрэгжүүлэх Wrapper
-
 class TokenActionWrapper(gym.ActionWrapper):
     def __init__(self, env, bins=256):
         super().__init__(env)
@@ -185,8 +203,6 @@ class TokenActionWrapper(gym.ActionWrapper):
 
 
 # Роботод хэд хэдэн зорилгыг дараалан өгөх Wrapper.
-# Зөвхөн хамгийн сүүлийн зорилгод хүрсэн үед л reward=1 өгнө.
-
 class SequentialGoalsWrapper(gym.Wrapper):
     def __init__(self, env, k=3, dist_threshold=0.05, sparse_final_reward=True):
         super().__init__(env)
@@ -252,6 +268,7 @@ class SequentialGoalsWrapper(gym.Wrapper):
         reward             = 0.0 if self.sparse_final_reward else float(base_reward)
         return self._update_obs(obs), reward, terminated, truncated, info
 
+
 def make_single_env(rank, render_mode=None):
     def _thunk():
         env = gym.make(ENV_ID, render_mode=render_mode, max_episode_steps=MAX_EPISODE_STEPS)
@@ -267,9 +284,11 @@ def make_single_env(rank, render_mode=None):
         return env
     return _thunk
 
+
 def create_vec_env(n_envs, render_mode=None):
     fns = [make_single_env(i, render_mode=render_mode) for i in range(n_envs)]
-    return AsyncVectorEnv(fns)
+    #return AsyncVectorEnv(fns)
+    return SyncVectorEnv(fns)
 
 
 # PPO-д ашиглагдах магадлалын (logprob) болон Entropy тооцоолох JAX функцүүд
@@ -310,8 +329,6 @@ def bernoulli_kl(p_new, p_ref):
 
 
 # Episode явцад чухал мэдээллүүдийг хадгалах санах ойн блок.
-# Уншихдаа similarity (төстэй байдал) ашиглах ба бичихдээ чухал биш хуучин мэдээллийг дарж бичнэ.
-
 class EpisodicSlotMemoryBlock(nn.Module):
     num_slots      : int   = NUM_SLOTS
     embed_dim      : int   = GRU_H_DIM
@@ -327,23 +344,18 @@ class EpisodicSlotMemoryBlock(nn.Module):
         keys, vals, age, strength = mem_state
         B, K, D                   = keys.shape
 
-        # Унших үйлдэл: Асуулга (query) болон түлхүүрүүдийн (keys) төстэй байдлыг тооцоолох
         qn  = query_vec / (jnp.linalg.norm(query_vec, axis=-1, keepdims=True) + 1e-6)
         kn  = keys      / (jnp.linalg.norm(keys,      axis=-1, keepdims=True) + 1e-6)
 
         sim_r  = jnp.sum(kn * qn[:, None, :], axis=-1)
-        # Age ихтэй бол оноо хасагдаж, strength сайн мэдээлэл бол оноо нэмэгдэнэ
         logits = sim_r + (self.strength_boost * jnp.log(jnp.clip(strength, 1e-3, 1.0))) - (self.age_penalty * age)
 
         w_read   = jax.nn.softmax(logits, axis=-1)
         read_out = jnp.sum(w_read[:, :, None] * vals, axis=1)
 
-        # Бичих үйлдэл: Хамгийн тохиромжтой үүрийг (slot) сонгох
         wk_n  = write_vec / (jnp.linalg.norm(write_vec, axis=-1, keepdims=True) + 1e-6)
-
         sim_w = jnp.sum(kn * wk_n[:, None, :], axis=-1)
 
-        # Eviction буюу дарж бичих логик: Age ихтэй, Strength багатай үүрийг сонгохыг илүүд үзнэ
         evict_score = (EVICT_AGE_BOOST * jnp.log1p(age)) - (EVICT_STR_PENALTY * strength)
 
         write_logits = (sim_w * self.write_temp) + evict_score
@@ -357,10 +369,8 @@ class EpisodicSlotMemoryBlock(nn.Module):
             write_hard = jnp.sum(jax.nn.one_hot(top_idx, K, dtype=jnp.float32), axis=1)
             write_hard = write_hard / (jnp.sum(write_hard, axis=-1, keepdims=True) + 1e-6)
 
-        # Straight-Through Estimator (STE) ашиглан градиент дамжуулах
         write_w = jax.lax.stop_gradient(write_hard - write_soft) + write_soft
 
-        # Санах ойг шинэчлэх
         ws       = jnp.clip(write_strength, 0.0, 1.0)
         eff_rate = (write_w * ws) * self.write_alpha
         rate_exp = eff_rate[:, :, None]
@@ -368,11 +378,9 @@ class EpisodicSlotMemoryBlock(nn.Module):
         keys_new = (1.0 - rate_exp) * keys + rate_exp * wk_n[:, None, :]
         vals_new = (1.0 - rate_exp) * vals + rate_exp * write_vec[:, None, :]
 
-        # age-ийг бүх үүрэнд нэмэх ба бичилт хийгдсэн үүрний age-ийг 0 болгоно
         age_new = age + 1.0
         age_new = age_new * (1.0 - write_w)
 
-        # strength-ийг багасгах ба бичилт хийгдсэн үүрэнд strength утгыг нэмнэ
         str_new = strength * self.strength_decay
         str_new = str_new + (write_w * ws) * (1.0 - str_new)
         str_new = jnp.clip(str_new, 0.0, 1.0)
@@ -380,9 +388,7 @@ class EpisodicSlotMemoryBlock(nn.Module):
         return read_out, (keys_new, vals_new, age_new, str_new)
 
 
-# Дээд түвшний удирдлага. 
-# Богино хугацааны санах ой (GRU) болон урт хугацааны санах ойг (Episodic) хослуулна.
-
+# Дээд түвшний удирдлага.
 class EpisodicMetaController(nn.Module):
     u_dim     : int = U_DIM
     h_dim     : int = GRU_H_DIM
@@ -391,6 +397,9 @@ class EpisodicMetaController(nn.Module):
     def setup(self):
         self.obs_proj    = nn.Dense(128)
         self.ssum_proj   = nn.Dense(128)
+
+        # CORE FIX: Meta нь өөрийн өмнөх intention(u_int_prev)-оос хамаарах ёстой
+        self.uint_proj   = nn.Dense(128)
 
         self.encoder     = nn.GRUCell(features=self.h_dim)
 
@@ -425,15 +434,15 @@ class EpisodicMetaController(nn.Module):
         force_macro_switch=True,
         rng=None
     ):
-        # Env state болон Worker-ийн товч мэдээллийг (ssum) нэгтгэнэ
         xo   = nn.tanh(self.obs_proj(obs))
         xs   = nn.tanh(self.ssum_proj(ssum))
-        x_in = jnp.concatenate([xo, xs], axis=-1)
+        xu   = nn.tanh(self.uint_proj(u_int_prev))
 
-        # GRU ашиглан богино хугацааны state шинэчилнэ
+        # CORE FIX: GRU оролтонд u_int_prev нэмнэ (жинхэнэ hierarchical state үүсгэнэ)
+        x_in = jnp.concatenate([xo, xs, xu], axis=-1)
+
         h_t, _ = self.encoder(h_prev, x_in)
 
-        # Episodic санах ойтой харилцах
         w_str = nn.sigmoid(self.write_gate(h_t))
 
         mem_read, mem_next = self.epi_memory(
@@ -443,44 +452,49 @@ class EpisodicMetaController(nn.Module):
             mem_state      = mem_prev
         )
 
-        # Цаашдын шийдвэр гаргах толгойнууд (Heads)
-        ctx    = jnp.concatenate([h_t, mem_read], axis=-1)
-        mean   = self.to_mean(ctx)
+        ctx = jnp.concatenate([h_t, mem_read], axis=-1)
+
+        # CORE FIX: mean-г tanh-аар хязгаарлаж, control сувгийг тогтвортой болгоно
+        mean   = jnp.tanh(self.to_mean(ctx)) * U_MEAN_SCALE
         logstd = self.u_logstd
 
-        # Өмнөх зорилгыг хэр зэрэг хадгалах вэ гэдгийг тодорхойлох (Beta)
         beta_l = self.beta_head(ctx).squeeze(-1)
         beta01 = nn.sigmoid(beta_l)
         beta   = BETA_MIN + (BETA_MAX - BETA_MIN) * beta01
 
-        # Шинэ зорилго руу шилжих эсэхийг шийдэх (Switch)
-        sw_l   = self.switch_head(ctx).squeeze(-1)
-        sw_prob= nn.sigmoid(sw_l)
+        sw_l    = self.switch_head(ctx).squeeze(-1)
+        sw_prob = nn.sigmoid(sw_l)
 
-        # Машин сургалтын явцад teacher forcing хийх эсвэл шинээр action сонгох
         if forced_action is not None:
             u_prop, sw = forced_action
-            switch     = sw.astype(jnp.int32)
+            # Teacher forcing дээр ч мөн u_prop-г тогтвортой хүрээнд барина
+            u_prop = jnp.tanh(u_prop) * U_PROP_SCALE
+            switch = sw.astype(jnp.int32)
         else:
             if rng is None:
-                u_prop  = mean
-                switch  = (sw_prob > SWITCH_TAU).astype(jnp.int32)
+                u_prop = mean
+                switch = (sw_prob > SWITCH_TAU).astype(jnp.int32)
             else:
                 rng, k1, k2 = jax.random.split(rng, 3)
                 eps         = jax.random.normal(k1, shape=mean.shape)
-                u_prop      = mean + jnp.exp(logstd)[None, :] * eps
-                switch      = jax.random.bernoulli(k2, sw_prob).astype(jnp.int32)
+                u_prop_raw  = mean + jnp.exp(logstd)[None, :] * eps
 
-        # Макро алхмын эхлэл дээр заавал шинэ зорилго өгөхийг албадлах
+                # CORE FIX: sampled u_prop-г tanh-аар хязгаарлаж тогтвортой болгоно
+                u_prop = jnp.tanh(u_prop_raw) * U_PROP_SCALE
+
+                switch = jax.random.bernoulli(k2, sw_prob).astype(jnp.int32)
+
         if force_macro_switch:
             is_boundary = (step_in_macro == 0).astype(jnp.int32)
             switch      = jnp.maximum(switch, is_boundary)
 
-        # Өмнөх болон шинэ зорилгыг нэгтгэх
         sw_f     = switch[:, None].astype(jnp.float32)
         beta_eff = beta[:, None] * (1.0 - sw_f)
 
         u_int = (beta_eff * u_int_prev) + ((1.0 - beta_eff) * u_prop)
+
+        # CORE FIX: u_int-г хэт том болохоос хамгаална (Worker руу орох control сувгийг тогтвортой барина)
+        u_int = jnp.clip(u_int, -U_INT_CLIP, U_INT_CLIP)
 
         aux = {
             "mean"      : mean,
@@ -494,7 +508,6 @@ class EpisodicMetaController(nn.Module):
 
 
 # Meta-ийн гаргасан зорилгыг (u_int) Worker-ийн ойлгох вектор (delta) болгож хувиргана.
-
 class ResidualIntervention(nn.Module):
     embed_dim: int = EMBED_DIM
     rank     : int = LRANK
@@ -520,11 +533,14 @@ class ResidualIntervention(nn.Module):
 
         y     = jnp.matmul(ssum[:, None, :], A).squeeze(1)
         delta = jnp.matmul(y[:, None, :], B).squeeze(1) + b
+
+        # CORE FIX: Worker руу орох delta-г clip хийж activation/logits дэлбэрэхээс сэргийлнэ
+        delta = jnp.clip(delta, -DELTA_CLIP, DELTA_CLIP)
+
         return delta
 
 
-# Transformer-ийн нэг блок. Өмнөх алхмуудын мэдээллийг (mem) ашиглан одоогийн төлөвийг баяжуулна.
-
+# Transformer-ийн нэг блок.
 class TXLWorkerBlock(nn.Module):
     embed_dim: int
     num_heads: int
@@ -552,8 +568,6 @@ class TXLWorkerBlock(nn.Module):
 
 
 # Доод түвшний гүйцэтгэгч буюу Worker.
-# Env мэдээлэл болон Decoder-ээс ирсэн delta-г ашиглан шууд үйлдэл (action) гаргана.
-
 class TXLWorkerPolicy(nn.Module):
     action_dim : int = ACTION_DIM
     action_bins: int = ACTION_BINS
@@ -576,19 +590,33 @@ class TXLWorkerPolicy(nn.Module):
     def __call__(self, obs, carry, step_in_macro, delta, deterministic=True):
         mem, ssum = carry
 
+        # Worker дотор NaN/Inf нэг удаа орвол EMA-аар ssum үүрд эвдэрнэ → эхнээс нь хамгаална
+        obs   = jnp.nan_to_num(obs  , nan=0.0, posinf=0.0, neginf=0.0)
+        ssum  = jnp.nan_to_num(ssum , nan=0.0, posinf=0.0, neginf=0.0)
+        mem   = jnp.nan_to_num(mem  , nan=0.0, posinf=0.0, neginf=0.0)
+        delta = jnp.nan_to_num(delta, nan=0.0, posinf=0.0, neginf=0.0)
+        delta = jnp.clip(delta, -DELTA_CLIP, DELTA_CLIP)
+
         x     = self.input_proj(obs)
         t_emb = self.time_embed(jnp.clip(step_in_macro, 0, MACRO_STEP))
-        # Decoder-ээс ирсэн delta-г энд нэмж өгнө
         x     = x + t_emb + delta
+
+        # Хэт том activation attention/MLP дээр дэлбэрэхээс сэргийлнэ
+        x = jnp.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        x = jnp.clip(x, -10.0, 10.0)
+
 
         for blk in self.blocks:
             x = blk(x, mem, deterministic=deterministic)
 
-        # Worker-ийн богино хугацааны санах ойг (FIFO) шинэчлэх
         mem_new = jnp.concatenate([mem[:, 1:, :], x[:, None, :]], axis=1)
 
-        # Товч мэдээллийг (ssum) EMA (Exponential Moving Average) ашиглан шинэчлэх
         lam      = 0.90
+
+        # Блокуудаас NaN гарвал ssum-ийг хордуулна → энд тасалж авна
+        x = jnp.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        x = jnp.clip(x, -10.0, 10.0)
+
         ssum_new = (ssum * lam) + (x * (1.0 - lam))
 
         logits = self.action_head(x).reshape(obs.shape[0], self.action_dim, self.action_bins)
@@ -604,7 +632,6 @@ class HierarchicalAgent:
 
 
 # Машин сургах класс, агентын бүх жинг эхлүүлж, optimizer-тэй холбоно.
-
 class Trainer:
     def __init__(self, seed=SEED):
         self.rng   = jax.random.PRNGKey(seed)
@@ -659,7 +686,6 @@ class Trainer:
 
 
 # Worker-ийг эхний ээлжинд сургах (SFT) зорилгоор энгийн логик ашиглан өгөгдөл цуглуулах.
-
 def generate_sft_dataset(env, episodes=SFT_EPISODES, print_every_steps=20000, print_every_eps=50):
     obs_list = []
     act_list = []
@@ -720,7 +746,6 @@ def generate_sft_dataset(env, episodes=SFT_EPISODES, print_every_steps=20000, pr
 
 
 # Цуглуулсан өгөгдөл дээр Worker-ийг SFT-ээр сургана. Meta болон Decoder оролцохгүй.
-
 def sft_train(trainer, obs_all, act_all):
     N   = int(len(obs_all))
     idx = np.arange(N)
@@ -765,12 +790,14 @@ def sft_train(trainer, obs_all, act_all):
 
         print(f"[SFT] Epoch {ep:2d} | Loss: {float(jnp.mean(jnp.array(losses))):.6f}")
 
+
 def score_from_info_dict(info_d):
     if info_d is None:
         return 0.0
     seq_idx = float(info_d.get("seq_goal_index", 0.0))
     succ    = float(info_d.get("is_success", 0.0))
     return (seq_idx * 10.0) + (50.0 if succ > 0.5 else 0.0)
+
 
 def extract_final_infos(infos, B):
     final_info = [None] * B
@@ -799,7 +826,6 @@ def extract_final_infos(infos, B):
 
 
 # Агентын нэг алхмын шийдвэр гаргах үйл явц (Rollout үед дуудагдана)
-
 @jax.jit
 def policy_step_vec(worker_params, meta_params, interv_params, obs_j, carry, h, mem, u_int, step_j, rng):
     worker = TXLWorkerPolicy()
@@ -844,7 +870,6 @@ def policy_step_vec(worker_params, meta_params, interv_params, obs_j, carry, h, 
 
 
 # Олон орчноос зэрэг өгөгдөл цуглуулах (Rollout)
-
 def collect_rollouts(vec_env, trainer):
     obs, infos = vec_env.reset(seed=SEED)
     obs        = np.asarray(obs, dtype=np.float32)
@@ -866,7 +891,7 @@ def collect_rollouts(vec_env, trainer):
     act_buf   = [[] for _ in range(B)]
     oldlp_buf = [[] for _ in range(B)]
 
-    done_mask = np.zeros((B,), dtype=bool)
+    done_mask    = np.zeros((B,), dtype=bool)
     final_scores = np.zeros((B,), dtype=np.float32)
 
     worker_params = trainer.worker_state.params
@@ -885,11 +910,17 @@ def collect_rollouts(vec_env, trainer):
             obs_j, carry, h, mem, u_int, step_j, trainer.rng
         )
 
+
+        if not np.isfinite(np.asarray(carry[1])).all():
+            print("[FATAL] carry.ssum became NaN right after policy_step_vec")
+            raise SystemExit(1)
+
+
+
         acts_np = np.asarray(acts, dtype=np.int32  )
         sw_np   = np.asarray(sw  , dtype=np.int32  )
         lp_np   = np.asarray(lp_m, dtype=np.float32)
 
-        # decision mask, зөвхөн макро алхмын эхлэл дээр эсвэл шинэ зорилго өгсөн үед л суралцах mask
         decm_np = np.logical_or((step_m == 0), (sw_np > 0.5)).astype(np.float32)
 
         for i in range(B):
@@ -905,6 +936,18 @@ def collect_rollouts(vec_env, trainer):
 
         obs, _, term, trunc, infos = vec_env.step(acts_np)
         obs = np.asarray(obs, dtype=np.float32)
+
+
+        if not np.isfinite(obs).all():
+            bad = np.where(~np.isfinite(obs))
+            print("[FATAL] obs has NaN/Inf at reset/step. idx=", bad[0][:5], "feat=", bad[1][:5])
+            print("sample=", obs[bad[0][0], :])
+            raise SystemExit(1)
+
+        if not np.isfinite(ssum_j).all():
+            print("[FATAL] ssum has NaN/Inf")
+            raise SystemExit(1)
+
 
         step_done = np.asarray(term, dtype=bool) | np.asarray(trunc, dtype=bool)
 
@@ -966,6 +1009,7 @@ def compute_grpo_advantages(scores):
     adv  = np.clip(adv, -5.0, 5.0)
     return adv, mean
 
+
 def pad_batch(trajs):
     B = len(trajs)
     max_t = 0
@@ -1017,9 +1061,8 @@ def pad_batch(trajs):
 
 
 # Teacher forcing ашиглан Meta-Controller-ийн өмнөх санах ой, төлөвүүдийг дахин сэргээх (Scan)
-
 @jax.jit
-def meta_replay_scan(params_meta, obs_bt, ssum_bt, step_bt, uprop_bt, sw_bt):
+def meta_replay_scan(params_meta, obs_bt, ssum_bt, step_bt, uprop_bt, sw_bt, mask_bt):
     meta = EpisodicMetaController()
 
     B, T, _ = obs_bt.shape
@@ -1033,14 +1076,15 @@ def meta_replay_scan(params_meta, obs_bt, ssum_bt, step_bt, uprop_bt, sw_bt):
     step_T  = jnp.swapaxes(step_bt,  0, 1)
     uprop_T = jnp.swapaxes(uprop_bt, 0, 1)
     sw_T    = jnp.swapaxes(sw_bt,    0, 1)
+    mask_T  = jnp.swapaxes(mask_bt,  0, 1)
 
     def scan_fn(carry, x):
         h_prev, mem_prev, u_prev = carry
-        obs_t, ssum_t, step_t, uprop_t, sw_t = x
+        obs_t, ssum_t, step_t, uprop_t, sw_t, m_t = x
 
         forced = (uprop_t, sw_t)
 
-        h_t, mem_t, _, _, u_int_t, aux, _ = meta.apply(
+        h_next, mem_next, _, _, u_int_next, aux, _ = meta.apply(
             {"params": params_meta},
             h_prev,
             mem_prev,
@@ -1053,11 +1097,42 @@ def meta_replay_scan(params_meta, obs_bt, ssum_bt, step_bt, uprop_bt, sw_bt):
             rng                = None
         )
 
-        out = (aux["mean"], aux["sw_prob"], aux["beta"], u_int_t)
-        return (h_t, mem_t, u_int_t), out
+        # Хэрэв mask=0 (padding) байвал өмнөх төлөвийг хэвээр үлдээ (broadcast-ыг яг тааруулна)
+        m_b  = (m_t > 0.0)            # (B,)
+        m_h  = m_b[:, None]           # (B,1)
+        m_kv = m_b[:, None, None]     # (B,1,1)
 
-    (_, _, _), outs = jax.lax.scan(scan_fn, (h0, mem0, u_int0), (obs_T, ssum_T, step_T, uprop_T, sw_T))
+        h_final     = jnp.where(m_h, h_next, h_prev)
+        u_int_final = jnp.where(m_h, u_int_next, u_prev)
+
+        k_new, v_new, a_new, s_new = mem_next
+        k_old, v_old, a_old, s_old = mem_prev
+
+        mem_final = (
+            jnp.where(m_kv, k_new, k_old),
+            jnp.where(m_kv, v_new, v_old),
+            jnp.where(m_h,  a_new, a_old),
+            jnp.where(m_h,  s_new, s_old),
+        )
+
+        out = (aux["mean"], aux["sw_prob"], aux["beta"], u_int_final)
+        return (h_final, mem_final, u_int_final), out
+
+    (_, _, _), outs = jax.lax.scan(
+        scan_fn,
+        (h0, mem0, u_int0),
+        (obs_T, ssum_T, step_T, uprop_T, sw_T, mask_T)
+    )
     mean_T, swprob_T, beta_T, uint_T = outs
+
+    # NaN/Inf-аас хамгаалж аюулгүй утгаар дарна
+    mean_T   = jnp.nan_to_num(mean_T,   nan=0.0, posinf=0.0, neginf=0.0)
+    swprob_T = jnp.nan_to_num(swprob_T, nan=0.0, posinf=0.0, neginf=0.0)
+    beta_T   = jnp.nan_to_num(beta_T,   nan=BETA_MIN, posinf=BETA_MAX, neginf=BETA_MIN)
+    uint_T   = jnp.nan_to_num(uint_T,   nan=0.0, posinf=0.0, neginf=0.0)
+
+    swprob_T = jnp.clip(swprob_T, 1e-6, 1.0 - 1e-6)
+    beta_T   = jnp.clip(beta_T,   BETA_MIN, BETA_MAX)
 
     return (
         jnp.swapaxes(mean_T,   0, 1),
@@ -1068,7 +1143,6 @@ def meta_replay_scan(params_meta, obs_bt, ssum_bt, step_bt, uprop_bt, sw_bt):
 
 
 # Worker-ийн гаргасан үйлдлүүдийн магадлалыг (logprob) градиенттэйгаар дахин тооцоолох
-
 @jax.jit
 def worker_logprob_rescan(worker_params, interv_params, obs_bt, step_bt, u_int_bt, act_bt, mask_bt):
     worker = TXLWorkerPolicy()
@@ -1088,6 +1162,9 @@ def worker_logprob_rescan(worker_params, interv_params, obs_bt, step_bt, u_int_b
         mem_old, ssum_old = carry
 
         m_t = m_t.astype(bool)
+
+        # u_t дээр NaN/Inf орж ирвэл decoder талд дэлбэрч болзошгүй тул хамгаална
+        u_t = jnp.nan_to_num(u_t, nan=0.0, posinf=0.0, neginf=0.0)
 
         delta = interv.apply({"params": interv_params}, u_t, ssum_old)
         logits, (mem_new, ssum_new), _ = worker.apply(
@@ -1113,7 +1190,6 @@ def worker_logprob_rescan(worker_params, interv_params, obs_bt, step_bt, u_int_b
 
 
 # PPO аргаар Meta болон Decoder-ийн жингүүдийг шинэчлэх алхам
-
 @jax.jit
 def ppo_update_step(meta_state, ref_params_bundle, worker_params, batch, adv_ep, kl_beta):
     obs, ssum, step, uprop, sw, decm, act, oldlp, mask = batch
@@ -1122,13 +1198,14 @@ def ppo_update_step(meta_state, ref_params_bundle, worker_params, batch, adv_ep,
         p_meta   = p_bundle["meta"  ]
         p_interv = p_bundle["interv"]
 
-        # доогийн параметрүүдээр Meta-г дахин ажиллуулж (Scan) гаралтуудыг авах
-        mean_bt, swprob_bt, beta_bt, u_int_bt = meta_replay_scan(p_meta, obs, ssum, step, uprop, sw)
+        mean_bt, swprob_bt, beta_bt, u_int_bt = meta_replay_scan(
+            p_meta, obs, ssum, step, uprop, sw, mask
+        )
 
-        # Reference (хуучин) параметрүүдээр бас ажиллуулж, KL тооцоход ашиглана
-        mean_ref_bt, swprob_ref_bt, _, _ = meta_replay_scan(ref_params_bundle["meta"], obs, ssum, step, uprop, sw)
+        mean_ref_bt, swprob_ref_bt, _, _ = meta_replay_scan(
+            ref_params_bundle["meta"], obs, ssum, step, uprop, sw, mask
+        )
 
-        # Mask бэлтгэх, m_dec нь зөвхөн шийдвэр гаргасан алхмууд (Decision)
         m_all = mask
         m_dec = mask * decm
 
@@ -1136,47 +1213,63 @@ def ppo_update_step(meta_state, ref_params_bundle, worker_params, batch, adv_ep,
         logstd_new = p_meta["u_logstd"]
         logstd_ref = ref_params_bundle["meta"]["u_logstd"]
 
+        # logstd-ийг хэт ихсэхээс сэргийлж clip хийх
+        logstd_new = jnp.clip(logstd_new, -5.0, 2.0)
+        logstd_ref = jnp.clip(logstd_ref, -5.0, 2.0)
+
         lp_u_new  = gaussian_logprob_bt(uprop, mean_bt, logstd_new)
         lp_sw_new = bernoulli_logprob(sw, swprob_bt)
         lp_new    = lp_u_new + lp_sw_new
 
-        ratio     = jnp.exp(lp_new - oldlp)
+        # Ratio тооцооллыг exp overflow-оос хамгаалах
+        log_ratio = lp_new - oldlp
+        log_ratio = jnp.clip(log_ratio, -20.0, 20.0)
+        ratio     = jnp.exp(log_ratio)
 
-        # PPO Surrogate Loss (NaN үүсэхээс сэргийлж jnp.where ашиглах хэрэгтэй)
         adv_bt    = adv_ep[:, None]
         unclipped = ratio * adv_bt
         clipped   = jnp.clip(ratio, 1.0 - CLIP_EPS, 1.0 + CLIP_EPS) * adv_bt
         surr      = jnp.minimum(unclipped, clipped)
 
-        # Хоосон (padding) алхмууд дээр NaN гарч болзошгүй тул
-        # шууд үржүүлэхийн оронд jnp.where ашиглан шүүж авна.
+        # NaN mask хийх (jnp.where ашиглана)
         surr_mean = jnp.sum(jnp.where(m_dec > 0, surr, 0.0)) / (jnp.sum(m_dec) + 1e-8)
 
         # KL Divergence тооцоолол
         kl_u    = gaussian_kl_bt(mean_bt, logstd_new, mean_ref_bt, logstd_ref)
         kl_sw   = bernoulli_kl(swprob_bt, swprob_ref_bt)
         kl_bt   = kl_u + kl_sw
-        # KL дээр мөн адил jnp.where ашиглана
         kl_mean = jnp.sum(jnp.where(m_dec > 0, kl_bt, 0.0)) / (jnp.sum(m_dec) + 1e-8)
 
-        # Switch Rate Penalty (Зорилго солих давтамжийг тохируулах)
+        # Switch Rate Penalty
         sw_mean = jnp.sum(jnp.where(m_all > 0, swprob_bt, 0.0)) / (jnp.sum(m_all) + 1e-8)
         sw_pen  = (sw_mean - TARGET_SW_RATE) ** 2
 
-        # Beta Penalty (Beta тархалтыг хэт туйлшрахаас сэргийлэх)
+        # Beta Penalty
         beta_mean = jnp.sum(jnp.where(m_all > 0, beta_bt, 0.0)) / (jnp.sum(m_all) + 1e-8)
         beta_var  = jnp.sum(jnp.where(m_all > 0, (beta_bt - beta_mean) ** 2, 0.0)) / (jnp.sum(m_all) + 1e-8)
         beta_pen  = (BETA_MEAN_COEFF * (beta_mean - BETA_MEAN_TARGET) ** 2) + (BETA_VAR_COEFF * beta_var)
 
-        # Entropy Bonus (explore хийхийг дэмжих)
+        # Entropy Bonus
         ent_u     = gaussian_entropy(logstd_new)
         ent_sw    = jnp.sum(jnp.where(m_all > 0, bernoulli_entropy(swprob_bt), 0.0)) / (jnp.sum(m_all) + 1e-8)
         ent_bonus = (U_ENTROPY_COEFF * ent_u) + (SWITCH_ENTROPY_COEFF * ent_sw)
 
-        # Decoder-ийн сургалт (Worker-ийн үйлдлээс градиент авах)
+        # Decoder-ийн сургалт
         lpw_bt = worker_logprob_rescan(worker_params, p_interv, obs, step, u_int_bt, act, mask)
-        # Decoder PG дээр мөн адил шүүлт хийнэ
         dec_pg = jnp.sum(jnp.where(m_dec > 0, lpw_bt * adv_bt, 0.0)) / (jnp.sum(m_dec) + 1e-8)
+
+
+        jax.debug.print("[DBG] nonfinite lp_new={x}", x=jnp.any(~jnp.isfinite(lp_new)))
+        jax.debug.print("[DBG] nonfinite kl_bt ={x}", x=jnp.any(~jnp.isfinite(kl_bt )))
+        jax.debug.print("[DBG] nonfinite lpw_bt={x}", x=jnp.any(~jnp.isfinite(lpw_bt)))
+
+        # --- NaN/Inf шалгалт (аль хэсэг дээр дэлбэрч байгааг шууд олно) ---
+        jax.debug.print("[DBG] nonfinite oldlp    ={x}", x=jnp.any(~jnp.isfinite(oldlp    )))
+        jax.debug.print("[DBG] nonfinite uprop    ={x}", x=jnp.any(~jnp.isfinite(uprop    )))
+        jax.debug.print("[DBG] nonfinite mean_bt  ={x}", x=jnp.any(~jnp.isfinite(mean_bt  )))
+        jax.debug.print("[DBG] nonfinite swprob_bt={x}", x=jnp.any(~jnp.isfinite(swprob_bt)))
+        jax.debug.print("[DBG] nonfinite u_int_bt ={x}", x=jnp.any(~jnp.isfinite(u_int_bt )))
+
 
         # Нийт Loss функц
         loss = (-surr_mean) + (kl_beta * kl_mean) + (SW_RATE_COEFF * sw_pen) + beta_pen - ent_bonus - (DECODER_PG_COEFF * dec_pg)
@@ -1216,6 +1309,102 @@ def ppo_epoch(trainer, ref_params_bundle, trajs, advs, kl_beta):
     return last_stats
 
 
+# Render хийх үед хурдан ажиллуулах зорилготой JIT функц
+@jax.jit
+def inference_step_jit(worker_params, meta_params, interv_params, obs, carry, h, mem, u_int, step_in_macro):
+    worker = TXLWorkerPolicy()
+    meta   = EpisodicMetaController()
+    interv = ResidualIntervention()
+
+    obs_j  = obs[None, :]
+    step_j = jnp.asarray([step_in_macro], dtype=jnp.int32)
+    ssum_j = carry[1]
+
+    # Meta Controller (Deterministic: rng=None)
+    h2, mem2, u_prop, sw, u_int2, aux, _ = meta.apply(
+        {"params": meta_params},
+        h, mem, obs_j, ssum_j, u_int, step_j,
+        forced_action=None, force_macro_switch=True, rng=None
+    )
+
+    # Residual Intervention
+    u_int2 = jnp.nan_to_num(u_int2, nan=0.0, posinf=0.0, neginf=0.0)
+    delta = interv.apply({"params": interv_params}, u_int2, ssum_j)
+
+    # Worker (Base Policy)
+    logits, carry2, _ = worker.apply(
+        {"params": worker_params},
+        obs_j, carry, step_j, delta, True
+    )
+
+    # Greedy Action Selection (Argmax)
+    act_tokens = jnp.argmax(logits[0], axis=-1).astype(jnp.int32)
+
+    # Macro logic: switch==1 бол дараагийн алхам 0
+    sw_val = sw[0].astype(jnp.int32)
+    next_step = jnp.where(sw_val > 0, 0, (step_in_macro + 1) % MACRO_STEP).astype(jnp.int32)
+
+    return act_tokens, carry2, h2, mem2, u_int2, next_step
+
+
+def play_policy_human(trainer, episodes=2):
+    """
+    Сургалтын явцад бодит env дээр сурсан policy-г шууд үзүүлэх.
+    render_mode="human" нь цонх нээж харуулна.
+    """
+    try:
+        env = make_single_env(999, render_mode="human")()
+    except Exception as e:
+        print(f"[PLAY] Skipping due to env error: {e}")
+        return
+
+    worker_params = trainer.worker_state.params
+    meta_params   = trainer.meta_state.params["meta"]
+    interv_params = trainer.meta_state.params["interv"]
+
+    print(f"\n[PLAY] Starting Human Play for {episodes} episodes...")
+
+    for ep in range(int(episodes)):
+        obs, info = env.reset(seed=SEED + 1000 + ep)
+        obs = np.asarray(obs, dtype=np.float32)
+
+        # Batch=1 үед state-үүд цэнэглэх (Episodic Memory-г бүрэн хадгална)
+        carry = trainer.agent.worker.init_carry(1)
+        h     = trainer.agent.meta.init_hidden(1)
+        mem   = trainer.agent.meta.init_memory(1)
+        u_int = jnp.zeros((1, U_DIM), dtype=jnp.float32)
+
+        step_val = jnp.array(0, dtype=jnp.int32)
+
+        done = False
+        t    = 0
+        score = 0.0
+
+        while not done:
+            act_tokens, carry, h, mem, u_int, step_val = inference_step_jit(
+                worker_params, meta_params, interv_params,
+                jnp.asarray(obs, dtype=jnp.float32),
+                carry, h, mem, u_int, step_val
+            )
+
+            action = np.array(act_tokens, dtype=np.int32)
+            obs, reward, term, trunc, info = env.step(action)
+            obs = np.asarray(obs, dtype=np.float32)
+
+            t += 1
+
+            if PLAY_SLEEP_SEC > 0.0:
+                time.sleep(PLAY_SLEEP_SEC)
+
+            if term or trunc:
+                done = True
+                score = score_from_info_dict(info)
+                print(f"[PLAY] Ep {ep+1} finished. Steps: {t} | Score: {score:.1f}")
+
+    env.close()
+    print("[PLAY] Finished.\n")
+
+
 def main():
     np.random.seed(SEED)
     random.seed(SEED)
@@ -1231,8 +1420,8 @@ def main():
         print(f"[SFT] N={len(obs_all)} | Batch={SFT_BATCH_SIZE}")
         sft_train(trainer, obs_all, act_all)
 
-        #with open(SFT_FLAG, "w") as f:
-        #    f.write("done")
+        with open(SFT_FLAG, "w") as f:
+            f.write("done")
 
     vec_env = create_vec_env(GROUP_SIZE, render_mode=None)
     kl_beta = float(KL_BETA)
@@ -1270,8 +1459,18 @@ def main():
                 f"SW: {sw_m:.2f} | Beta: {beta_m:.2f} | DecPG: {dec_pg:.3f}"
             )
 
+        # Periodic Play
+        if PLAY_ENABLE and (upd % PLAY_EVERY == 0):
+            try:
+                play_policy_human(trainer, episodes=PLAY_EPISODES)
+            except KeyboardInterrupt:
+                print("\n[PLAY] Rendering interrupted by user. Continuing training...")
+            except Exception as e:
+                print(f"\n[PLAY] Error during rendering: {e}")
+
     vec_env.close()
     print("DONE")
+
 
 if __name__ == "__main__":
     main()
