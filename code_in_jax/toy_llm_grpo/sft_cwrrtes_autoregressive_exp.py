@@ -16,7 +16,7 @@
 #      - Fast Summary : Ойрын харилцан яриа, богино үйл явдлыг хадгална.
 #      - Slow Summary : Surprise-Based Update ашиглан зөвхөн гэнэтийн, шинэ
 #        мэдээлэл ирсэн үед л шинэчлэгдэж, агуулгын ерөнхий үйл явдлыг удаан хадгална.
-
+#
 #      - Token-Conditional Injection : Хураангуйг бүх токенд хүчээр наахгүй,
 #        токен бүр өөрт хэрэгтэй эсэхийг шийдэх Gate-ээр дамжуулж авна.
 #
@@ -50,12 +50,6 @@
 #  TTS eSpeak суулгах (текст сонсох):
 #   - Ubuntu/WSL:  sudo apt install espeak-ng
 #
-#
-#  Лавлагаа:
-#   - DeepSeek, Conditional Memory via Scalable Lookup: A New Axis of Sparsity for LLMs
-#     https://www.arxiv.org/pdf/2601.07372
-#   - Enhancing Recurrent Transformers with Dual-State Memory logic (LSTM inspired)
-#
 
 import os
 # Санах ойн хуваарилалтыг оновчтой болгох (Fragmentation багасгах)
@@ -86,7 +80,7 @@ dataset_path          = "tinystories-small.txt"
 end_of_text_token     = "<|endoftext|>"
 seed                  = 42
 
-# CWRRTE Архитектур
+# CWRRTES Архитектур
 cwr_window_len        = 128    # Нэг удаад боловсруулах цонхны урт
 cwr_overlap           = 32     # Дараагийн цонх руу дамжуулах overlap урт
 
@@ -127,7 +121,7 @@ tts_max_chars         = 400    # Хэт урт текст хэлэхээс сэ�
 num_layers            = 6
 num_heads             = 8
 embed_dim             = 512
-max_seq_len           = 8192
+max_seq_len           = 8192   # (одоогоор ашиглаж буй дээд хязгаар)
 
 # Оновчлол
 max_grad_norm         = 1.0
@@ -227,7 +221,6 @@ def apply_rope(x, freq_cis):
     """
     B, T, H, D = x.shape
     x_complex = jax.lax.complex(x[..., 0::2], x[..., 1::2])
-    # Эргүүлэх үйлдэл (Rotation)
     x_rotated = x_complex * freq_cis
     x_out = jnp.stack([x_rotated.real, x_rotated.imag], axis=-1).reshape(B, T, H, D)
     return x_out
@@ -239,6 +232,16 @@ def precompute_freqs_cis(dim, max_len, theta=10000.0):
     freqs     = jnp.outer(t, freqs)     # (T, Dim/2)
     freqs_cis = jnp.exp(1j * freqs)     # e^(ix)
     return freqs_cis[None, :, None, :]
+
+def slice_freqs_cis(freqs_cis_global, pos_idx):
+    """
+    Absolute position-оор RoPE slice хийх (Global Cache-ээс).
+    freqs_cis_global: (1, MaxLen, 1, Dh/2)
+    pos_idx         : (T,) int32 (Absolute index)
+    return          : (1, T, 1, Dh/2)
+    """
+    pos_idx = pos_idx.astype(jnp.int32)
+    return jnp.take(freqs_cis_global, pos_idx, axis=1)
 
 
 # RMSNorm, SwiGLU (Үндсэн блокууд)
@@ -254,7 +257,6 @@ class RMSNorm(nn.Module):
     @nn.compact
     def __call__(self, x):
         scale = self.param("scale", nn.initializers.ones, (self.dim,))
-        # Mean хасахгүй, зөвхөн RMS-ээр хуваана
         rms   = jnp.sqrt(jnp.mean(jnp.square(x), axis=-1, keepdims=True) + self.eps)
         return (x / rms) * scale
 
@@ -271,18 +273,16 @@ class SwiGLU(nn.Module):
     def __call__(self, x, deterministic=True):
         hidden_dim = int(self.embed_dim * self.expand_factor)
 
-        # Gate болон Value-г нэг дор үүсгээд split хийх нь JAX-д хурдан
         gate_val = nn.Dense(hidden_dim * 2, use_bias=False)(x)
         gate, val = jnp.split(gate_val, 2, axis=-1)
 
-        # Swish Activation: x * sigmoid(x)
         act = nn.silu(gate) * val
         out = nn.Dense(self.embed_dim, use_bias=False)(act)
 
         return nn.Dropout(0.1, deterministic=deterministic)(out)
 
 
-# SGRM, SALIENCE-GATED RECURRENT MEMORY 
+# SGRM, SALIENCE-GATED RECURRENT MEMORY
 
 class SalienceWriteHead(nn.Module):
     """
@@ -293,67 +293,47 @@ class SalienceWriteHead(nn.Module):
     - Per-Head Gating       : Толгой бүр бичих эсэхээ тусдаа шийднэ.
     """
     embed_dim    : int
-    num_heads    : int = 4  # Transformer head-ээс тусдаа SGRM толгой
+    num_heads    : int = 4
     dropout_rate : float = 0.0
 
     @nn.compact
     def __call__(self, x, mask_bool, deterministic=True):
-        # x         : (B, T, D)
-        # mask_bool : (B, T)
-        B, T, D = x.shape
+        B, T, D  = x.shape
         head_dim = D // self.num_heads
 
-        # Multi-Head хэлбэрт оруулах
-        # (B, T, D) -> (B, T, H, Dh)
         x_heads = x.reshape(B, T, self.num_heads, head_dim)
 
-        # Суралцах боломжтой Temperature (softplus-аар эерэг байлгана)
         temp_param  = self.param("temp", nn.initializers.ones, (self.num_heads,))
         temperature = nn.softplus(temp_param) + 0.3
 
-        # Salience Logits (Толгой бүр өөрийн чухал зүйлээ олно)
         salience_proj = nn.Dense(self.num_heads, name="salience_logits")(x) # (B, T, H)
         logits        = salience_proj / temperature[None, None, :]
 
-        # NaN-Safe Masking & Softmax
-        # Хэрэв бүх цонх padding байвал softmax(-inf) = NaN болдог.
-        # Үүнээс сэргийлж тусгай logic ашиглана.
-        mask_expanded = mask_bool[:, :, None] # (B, T, 1)
+        mask_expanded = mask_bool[:, :, None]
         safe_logits   = jnp.where(mask_expanded, logits, -1e9)
 
-        # Stability: Max-ийг хасч тооцоолох (Overflow protection)
         max_logits = jax.lax.stop_gradient(jnp.max(safe_logits, axis=1, keepdims=True))
         exps       = jnp.exp(safe_logits - max_logits)
 
-        # Padding хэсгийг тэг болгох
         exps     = jnp.where(mask_expanded, exps, 0.0)
-        sum_exps = jnp.sum(exps, axis=1, keepdims=True) + 1e-6 # Div-by-zero protection
-        weights  = exps / sum_exps # (B, T, H)
+        sum_exps = jnp.sum(exps, axis=1, keepdims=True) + 1e-6
+        weights  = exps / sum_exps
 
-        # Weighted Pooling (Жинлэсэн дундаж)
-        # (B, T, H, 1) * (B, T, H, Dh) -> T тэнхлэгээр нийлбэр
         write_vec_heads = jnp.sum(weights[:, :, :, None] * x_heads, axis=1) # (B, H, Dh)
 
-        # Per-Head Write Strength Gate (Толгой бүрийн бичих хүч)
-        # Энэ нь Loss дээрх Regularization-д ашиглагдана.
         gate_logits = nn.Dense(1, name="gate_proj")(write_vec_heads) # (B, H, 1)
 
-        # Gate-ийг мөн адил NaN-аас хамгаална (Хоосон цонх = Gate хаалттай)
-        window_valid  = jnp.any(mask_bool, axis=1)[:, None, None] # (B, 1, 1)
+        window_valid  = jnp.any(mask_bool, axis=1)[:, None, None]
         write_u_heads = nn.sigmoid(gate_logits) * window_valid.astype(jnp.float32)
 
-        # Буцаах утгууд
-        # write_vec: (B, D) - Нэгтгэсэн вектор
         write_vec = write_vec_heads.reshape(B, D)
         write_vec = RMSNorm(self.embed_dim)(write_vec)
 
         if self.dropout_rate > 0.0:
             write_vec = nn.Dropout(self.dropout_rate, deterministic=deterministic)(write_vec)
 
-        # write_u_expanded: (B, D) - Вектортой үржихэд бэлэн gate
         write_u_expanded = jnp.tile(write_u_heads, (1, 1, head_dim)).reshape(B, D)
 
-        # write_u_raw: (B, H) - Loss тооцоход хэрэгтэй raw gate
         return write_vec, write_u_expanded, write_u_heads.squeeze(-1)
 
 
@@ -362,7 +342,6 @@ class SalienceWriteHead(nn.Module):
 class MultiHeadEngram(nn.Module):
     """
     Олон толгойтой Engram санах ой.
-    Хуучин single-head hashing нь мөргөлдөөн (collision) ихтэй байх боломжтой.
     Сайжруулалт:
       1. Head бүр өөр анхны тоонууд ашиглаж зэрэгцээ хайлт хийнэ.
       2. JAX vmap ашиглан толгойнуудыг vectorization хийнэ.
@@ -370,30 +349,27 @@ class MultiHeadEngram(nn.Module):
     """
     vocab_size   : int
     embed_dim    : int
-    memory_size  : int   = 100000   # Санах ойн хүснэгтийн хэмжээ
-    ngram_n      : int   = 4        # N-gram урт
-    num_heads    : int   = 4        # Толгойн тоо
+    memory_size  : int   = 100000
+    ngram_n      : int   = 4
+    num_heads    : int   = 4
     dropout_rate : float = 0.05
 
     def setup(self):
         assert self.embed_dim % self.num_heads == 0, "Embed dim must be divisible by heads"
         self.head_dim = self.embed_dim // self.num_heads
 
-        # Санах ойн хүснэгт, (Memory_Size, Num_Heads, Head_Dim)
         self.memory_table = self.param(
             "engram_table",
             nn.initializers.normal(stddev=0.02),
             (self.memory_size, self.num_heads, self.head_dim)
         )
 
-        # Gating механизм, толгой тус бүрт gate байна
         self.gate_logit = self.param(
             "engram_gate",
             nn.initializers.constant(-2.0),
             (self.num_heads, self.head_dim)
         )
 
-        # Толгой бүрт ялгаатай анхны тоонууд үүсгэх (Deterministic)
         ps   = []
         base = 131
         for h in range(self.num_heads):
@@ -407,26 +383,16 @@ class MultiHeadEngram(nn.Module):
 
     @nn.compact
     def __call__(self, current_ids, prev_ids_overlap, deterministic=True):
-        """
-        current_ids      : (B, W)
-        prev_ids_overlap : (B, O)
-        """
         B, W = current_ids.shape
         O    = prev_ids_overlap.shape[1]
-
-        # Overlap нь N-gram тооцоход хүрэлцэхүйц байх ёстой
         assert O >= (self.ngram_n - 1)
 
-        # PAD токенууд хэшлэлтийг эвдэхээс сэргийлэх (Collision багасгана)
         current_ids      = jnp.where(current_ids      == pad_id, 0, current_ids)
         prev_ids_overlap = jnp.where(prev_ids_overlap == pad_id, 0, prev_ids_overlap)
 
-        # Бүрэн контекст үүсгэх
         full_seq  = jnp.concatenate([prev_ids_overlap, current_ids], axis=1).astype(jnp.uint32)
         start_idx = O
 
-        # Multi-Head Vectorized Rolling Hash
-        # Гаралт: (B, W, H)
         hash_sums = jnp.zeros((B, W, self.num_heads), dtype=jnp.uint32)
 
         for i in range(self.ngram_n):
@@ -434,29 +400,23 @@ class MultiHeadEngram(nn.Module):
             s_end    = full_seq.shape[1] - i
             chunk    = full_seq[:, s_start:s_end]                              # (B, W)
             p_vec    = self.primes[:, i]                                       # (H,)
-
-            # Broadcasting: (B, W, 1) * (1, 1, H) -> (B, W, H)
             hash_sums = hash_sums + (chunk[:, :, None] * p_vec[None, None, :])
 
-        # Uint32 to Int32 casting, safe indexing
         lookup_indices = (hash_sums % self.memory_size).astype(jnp.int32)      # (B, W, H)
 
-        # Head-wise gather (Толгой бүр өөрийн баганаас татах)
         table_h = jnp.transpose(self.memory_table, (1, 0, 2))
         idx_h   = jnp.transpose(lookup_indices, (2, 0, 1))
 
-        # vmap ашиглан Head dimension дээр зэрэгцүүлж хайна
         def _gather(tbl, idx):
             return tbl[idx]                                                    # (B, W, Dh)
 
         got_h = jax.vmap(_gather, in_axes=(0, 0), out_axes=0)(table_h, idx_h)  # (H, B, W, Dh)
         retrieved = jnp.transpose(got_h, (1, 2, 0, 3))                         # (B, W, H, Dh)
 
-        # Gating болон нэгтгэл
         gate = jax.nn.sigmoid(self.gate_logit)                                 # (H, Dh)
-        out  = retrieved * gate[None, None, :, :]                              # (B, W, H, Dh)
+        out  = retrieved * gate[None, None, :, :]
 
-        out  = out.reshape(B, W, self.embed_dim)                               # (B, W, D)
+        out  = out.reshape(B, W, self.embed_dim)
         out  = nn.Dropout(self.dropout_rate, deterministic=deterministic)(out)
         return out
 
@@ -469,24 +429,21 @@ class CausalSelfAttention(nn.Module):
 
     @nn.compact
     def __call__(self, x, mask=None, kv=None, freqs_cis=None, deterministic=True):
-        # Хэрэв kv өгөгдөөгүй бол өөрөө өөртөө attend хийнэ
-        if kv is None: kv = x
+        if kv is None:
+            kv = x
 
         B, Tq, _ = x.shape
-        _, Tk, _ = kv.shape     # KV нь (Mem + Engram + Current) учир урт байна
+        _, Tk, _ = kv.shape
         head_dim = self.embed_dim // self.num_heads
 
-        # Q, K, V
         q = nn.Dense(self.embed_dim, name="q_proj")(x)
         k = nn.Dense(self.embed_dim, name="k_proj")(kv)
         v = nn.Dense(self.embed_dim, name="v_proj")(kv)
 
-        # Multi-head хэлбэрт оруулах
         q = q.reshape(B, Tq, self.num_heads, head_dim)
         k = k.reshape(B, Tk, self.num_heads, head_dim)
         v = v.reshape(B, Tk, self.num_heads, head_dim)
 
-        # RoPE, Байршлын мэдээлэл нэмэх 
         if freqs_cis is not None:
             if isinstance(freqs_cis, tuple):
                 f_q, f_k = freqs_cis
@@ -496,7 +453,6 @@ class CausalSelfAttention(nn.Module):
                 q = apply_rope(q, freqs_cis[:, :Tq])
                 k = apply_rope(k, freqs_cis[:, :Tk])
 
-        # Attention Scores тооцоолох
         q = q.transpose(0, 2, 1, 3) # (B, H, Tq, D)
         k = k.transpose(0, 2, 1, 3) # (B, H, Tk, D)
         v = v.transpose(0, 2, 1, 3) # (B, H, Tk, D)
@@ -508,7 +464,6 @@ class CausalSelfAttention(nn.Module):
         attn_probs = jax.nn.softmax(attn_weights, axis=-1)
         attn_probs = nn.Dropout(0.1, deterministic=deterministic)(attn_probs)
 
-        # Гаралт
         out = jnp.matmul(attn_probs, v)
         out = out.transpose(0, 2, 1, 3).reshape(B, Tq, self.embed_dim)
 
@@ -516,33 +471,40 @@ class CausalSelfAttention(nn.Module):
 
 class TransformerBlock(nn.Module):
     """
-    Pre-RMSNorm бүтэцтэй. MLP нь SwiGLU-тэй.
+    Pre-RMSNorm бүтэцтэй, MLP нь SwiGLU-тэй.
+    Scan / remat ашиглахад зориулагдсан.
     """
-    embed_dim : int
-    num_heads : int
+    embed_dim     : int
+    num_heads     : int
+    deterministic : bool = True
 
     @nn.compact
-    def __call__(self, x, mask=None, kv=None, freqs_cis=None, deterministic=True):
-        # Attention хэсэг (Pre-RMSNorm)
+    def __call__(self, x, mask=None, kv=None, freqs_cis=None):
         norm_x  = RMSNorm(self.embed_dim)(x)
         norm_kv = kv if kv is not None else norm_x
 
         attn_out = CausalSelfAttention(self.embed_dim, self.num_heads)(
-            norm_x, mask=mask, kv=norm_kv, freqs_cis=freqs_cis, deterministic=deterministic
+            norm_x,
+            mask          = mask,
+            kv            = norm_kv,
+            freqs_cis     = freqs_cis,
+            deterministic = self.deterministic
         )
         x = x + attn_out
 
-        # MLP хэсэг (Pre-RMSNorm + SwiGLU)
         norm_x2 = RMSNorm(self.embed_dim)(x)
-        mlp_out = SwiGLU(self.embed_dim)(norm_x2, deterministic=deterministic)
+        mlp_out = SwiGLU(self.embed_dim)(
+            norm_x2,
+            deterministic=self.deterministic
+        )
         x = x + mlp_out
 
         return x
 
 
-# CWRRTE RECURRENT CELL (RoPE, SGRM)
+# CWRRTES RECURRENT CELL (RoPE, SGRM)
 
-class CWRRTEWindowCell(nn.Module):
+class CWRRTESWindowCell(nn.Module):
     vocab_size        : int
     embed_dim         : int
     num_layers        : int
@@ -555,12 +517,8 @@ class CWRRTEWindowCell(nn.Module):
     deterministic     : bool = True
 
     @nn.compact
-    def __call__(self, carry, tokens_w):
-        # Carry задлах:
-        # mem_emb   : Recurrent memory
-        # mem_ids   : Engram IDs
-        # ssum_fast : Working Memory (Fast)
-        # ssum_slow : Long-term Context (Slow)
+    def __call__(self, carry, tokens_w, win_start, freqs_cis_global):
+
         mem_emb, mem_ids, ssum_fast, ssum_slow = carry
 
         B, T = tokens_w.shape
@@ -572,16 +530,14 @@ class CWRRTEWindowCell(nn.Module):
         # Injection: Контекстийг оруулахын өмнө тогтворжуулна (Stable Injection)
         global_ctx     = jnp.concatenate([ssum_fast, ssum_slow], axis=-1)         # (B, 2*D)
         ctx_proj       = nn.Dense(self.embed_dim, name="ctx_read_proj")(global_ctx)
-        ctx_proj       = RMSNorm(self.embed_dim)(ctx_proj)                        # stability
+        ctx_proj       = RMSNorm(self.embed_dim)(ctx_proj)
 
         # Token-Conditional Gate
         ctx_broadcast  = jnp.broadcast_to(ctx_proj[:, None, :], x.shape)
         concat_input   = jnp.concatenate([x, ctx_broadcast], axis=-1)
         injection_gate = nn.sigmoid(nn.Dense(self.embed_dim, name="inject_gate")(concat_input))
 
-        # Контекстийг зөвхөн хэрэгтэй хэсэгт нь шингээнэ
         x = x + (ctx_proj[:, None, :] * injection_gate)
-
 
         # Engram Retrieval & Processing
         engram_emb = MultiHeadEngram(
@@ -597,41 +553,52 @@ class CWRRTEWindowCell(nn.Module):
         mem_processed = nn.Dense(self.embed_dim, name="mem_adapter")(mem_emb)
         mem_processed = RMSNorm(self.embed_dim)(mem_processed)
 
-        # KV-Bank байгуулах
-        kv_seq = jnp.concatenate([mem_processed, engram_emb, x], axis=1)
+        # ROPE ALIGNMENT (ABSOLUTE POSITIONS)
+        #  Энд Global Cache-ээс тухайн цонхонд харгалзах давтамжийг тасдаж авна.
+        #  base_pos = O (mem-ийг negative index-ээс хамгаалах шилжлэг)
+        #  - Curr pos: base_pos + win_start + [0..T-1]
+        #  - Mem  pos: base_pos + win_start - O + [0..O-1]
+        # ----------------------------------------------------------------------
 
-        # RoPE alignment 
-        # Logical positions:
-        # Memory        : [0, O)
-        # Engram        : [0, T) (Contextual Features)
-        # Current Key   : [O+T, O+T+T)
-        # Current Query : [O+T, O+T+T)
-        start_pos_q = O + T
-        total_len   = O + T + T + 32
-        freqs_cis   = precompute_freqs_cis(self.embed_dim // self.num_heads, total_len)
+        base_pos  = O
+        win_start = win_start.astype(jnp.int32)
 
-        f_mem    = freqs_cis[:, :O, :, :]
-        f_eng    = freqs_cis[:, :T, :, :]
-        f_curr_k = freqs_cis[:, start_pos_q : start_pos_q+T, :, :]
-        f_curr_q = freqs_cis[:, start_pos_q : start_pos_q+T, :, :]
+        pos_curr = base_pos + win_start + jnp.arange(T, dtype=jnp.int32)                 # (T,)
+        pos_mem  = base_pos + win_start - O + jnp.arange(O, dtype=jnp.int32)             # (O,)
 
-        f_kv     = jnp.concatenate([f_mem, f_eng, f_curr_k], axis=1) # Keys Combined
+        f_mem  = slice_freqs_cis(freqs_cis_global, pos_mem)                              # (1, O, 1, Dh/2)
+        f_curr = slice_freqs_cis(freqs_cis_global, pos_curr)                             # (1, T, 1, Dh/2)
+
+        # KV: [mem(O) | engram(T) | curr(T)]
+        f_kv     = jnp.concatenate([f_mem, f_curr, f_curr], axis=1)                      # (1, O+2T, 1, Dh/2)
+        f_curr_q = f_curr
 
         # Mask бэлдэх
         causal_mask = jnp.tril(jnp.ones((T, T), dtype=bool))
         full_mask   = jnp.concatenate([jnp.ones((T, O), dtype=bool), causal_mask, causal_mask], axis=1)
+
         valid_curr  = (tokens_w != pad_id)
         valid_mem   = jnp.ones((B, O), dtype=bool)
-        valid_k     = jnp.concatenate([valid_mem, valid_curr, valid_curr], axis=1) # Engram uses curr validity
+        valid_k     = jnp.concatenate([valid_mem, valid_curr, valid_curr], axis=1)
         mask        = full_mask[None, None, :, :] & valid_k[:, None, None, :]
 
         # Transformer давхаргууд
         curr_x = x
         for i in range(self.num_layers):
-            curr_x = nn.remat(TransformerBlock, static_argnums=(5,))(
-                self.embed_dim, self.num_heads, name=f"b{i}"
-            )(
-                curr_x, mask, kv_seq, (f_curr_q, f_kv), self.deterministic # Pass explicit Freqs tuple
+            kv_seq = jnp.concatenate([mem_processed, engram_emb, curr_x], axis=1)
+
+            blk = nn.remat(TransformerBlock)(
+                self.embed_dim,
+                self.num_heads,
+                deterministic = self.deterministic,
+                name          = f"b{i}"
+            )
+
+            curr_x = blk(
+                curr_x,
+                mask      = mask,
+                kv        = kv_seq,
+                freqs_cis = (f_curr_q, f_kv)
             )
 
         curr_x = RMSNorm(self.embed_dim)(curr_x)
@@ -641,14 +608,12 @@ class CWRRTEWindowCell(nn.Module):
         new_mem_ids = tokens_w[:, -O:]
         valid_mask  = (tokens_w != pad_id)
 
-        # SGRM дуудах (Multi-Head + Safety + Gates)
         write_vec, write_u_expanded, write_u_raw = SalienceWriteHead(
             self.embed_dim, num_heads=sgrm_num_heads, dropout_rate=sgrm_dropout
         )(curr_x, valid_mask, deterministic=self.deterministic)
 
         # FAST Summary Update (SGRM + EMA)
         gate_fast     = nn.sigmoid(self.param("gate_fast", nn.initializers.constant(0.0), (self.embed_dim,)))
-        # write_u_expanded нь Multi-Head gating-ийг аль хэдийн агуулсан
         new_ssum_fast = (ssum_fast * gate_fast) + (write_vec * (1.0 - gate_fast) * write_u_expanded)
 
         # SLOW Summary Update (Novelty Gated + SGRM)
@@ -665,13 +630,12 @@ class CWRRTEWindowCell(nn.Module):
 
         logits = nn.Dense(self.vocab_size)(curr_x)
 
-        # Regularization хийхэд зориулж write_u_raw (aux) буцаана
         return (new_mem_emb, new_mem_ids, new_ssum_fast, new_ssum_slow), (logits, write_u_raw)
 
 
 # ҮНДСЭН МОДЕЛЬ
 
-class CWRRTETransformer(nn.Module):
+class CWRRTESTransformer(nn.Module):
     vocab_size        : int
     embed_dim         : int
     num_layers        : int
@@ -688,7 +652,6 @@ class CWRRTETransformer(nn.Module):
         B, N    = tokens_long.shape
         W, O, S = self.window_len, self.overlap, self.window_len - self.overlap
 
-        # Текстийг жижиг цонхнуудад (Windows) хуваах
         n_win = 1
         if N > W:
             n_win = int(math.ceil((N - W) / S)) + 1
@@ -699,51 +662,87 @@ class CWRRTETransformer(nn.Module):
         tokens_pad = jnp.pad(tokens_long, ((0, 0), (0, pad_amount)), constant_values=pad_id)
         starts     = (jnp.arange(n_win) * S).astype(jnp.int32)
 
-        # vmap ашиглан цонхнуудыг зэрэгцүүлэн үүсгэх
-        windows    = jax.vmap(lambda s: jax.lax.dynamic_slice(tokens_pad, (0, s), (B, W)))(starts)
+        # windows: (n_win, B, W)
+        windows = jax.vmap(lambda s: jax.lax.dynamic_slice(tokens_pad, (0, s), (B, W)))(starts)
 
-        # JAX Scan ашиглан рекуррент гүйдлийг үүсгэх
+        # ROPE GLOBAL CACHE (ONE-TIME PRECOMPUTE)
+
+        head_dim = self.embed_dim // self.num_heads
+        base_pos = O
+        extra    = 64
+        rope_len = int(base_pos + total_len_needed + extra)
+
+        freqs_cis_global = precompute_freqs_cis(head_dim, rope_len)
+
+        # JAX SCAN WRAPPER (CLOSURE)
+
+        # Бид Wrapper дотор cell-ээ үүсгэх тул config-уудаа хадгалж авна.
+        cfg_vocab_size        = self.vocab_size
+        cfg_embed_dim         = self.embed_dim
+        cfg_num_layers        = self.num_layers
+        cfg_num_heads         = self.num_heads
+        cfg_window_len        = self.window_len
+        cfg_overlap           = self.overlap
+        cfg_engram_vocab_size = self.engram_vocab_size
+        cfg_engram_ngram_n    = self.engram_ngram_n
+        cfg_engram_num_heads  = self.engram_num_heads
+        cfg_deterministic     = deterministic
+
+        class ScanLoopWrapper(nn.Module):
+            @nn.compact
+            def __call__(self, carry, inputs):
+                # inputs tuple-ийг задална
+                tokens_w, win_start = inputs
+
+                # Жинхэнэ cell-ээ дуудна
+                cell = CWRRTESWindowCell(
+                    vocab_size        = cfg_vocab_size,
+                    embed_dim         = cfg_embed_dim,
+                    num_layers        = cfg_num_layers,
+                    num_heads         = cfg_num_heads,
+                    window_len        = cfg_window_len,
+                    overlap           = cfg_overlap,
+                    engram_vocab_size = cfg_engram_vocab_size,
+                    engram_ngram_n    = cfg_engram_ngram_n,
+                    engram_num_heads  = cfg_engram_num_heads,
+                    deterministic     = cfg_deterministic
+                )
+
+                # freqs_cis_global нь гаднах scope-оос харагдана (Closure)
+                return cell(carry, tokens_w, win_start, freqs_cis_global)
+
+        # JAX Scan ашиглах
+        # in_axes=0 гэдэг нь (windows, starts) tuple-ийн бүх элементийг 0-р тэнхлэгээр scan хийнэ гэсэн үг.
         ScanCell = nn.scan(
-            CWRRTEWindowCell,
+            ScanLoopWrapper,
             variable_broadcast = "params",
             split_rngs         = {"params": False, "dropout": True},
             in_axes            = 0,
             out_axes           = 0
         )
 
-        # Анхны төлөвүүдийг (Carry) 0-ээр дүүргэх
         init_mem_emb   = jnp.zeros((B, O, self.embed_dim))
         init_mem_ids   = jnp.zeros((B, O), dtype=jnp.int32)
         init_ssum_fast = jnp.zeros((B, self.embed_dim))
         init_ssum_slow = jnp.zeros((B, self.embed_dim))
 
-        # Scan ажиллуулах (Auxiliary Output хүлээн авах)
-        _, (logits_windows, aux_windows) = ScanCell(
-            vocab_size        = self.vocab_size,
-            embed_dim         = self.embed_dim,
-            num_layers        = self.num_layers,
-            num_heads         = self.num_heads,
-            window_len        = self.window_len,
-            overlap           = self.overlap,
-            engram_vocab_size = self.engram_vocab_size,
-            engram_ngram_n    = self.engram_ngram_n,
-            engram_num_heads  = self.engram_num_heads,
-            deterministic     = deterministic
-        )((init_mem_emb, init_mem_ids, init_ssum_fast, init_ssum_slow), windows)
+        # freqs_cis_global-ийг аргументэд бичих шаардлагагүй.
+        _, (logits_windows, aux_windows) = ScanCell(name="scan_main")(
+            (init_mem_emb, init_mem_ids, init_ssum_fast, init_ssum_slow),
+            (windows, starts)
+        )
 
-        # Цонхнуудын гаралтыг буцааж нэг урт дараалал болгох
         out = logits_windows[0]
         if n_win > 1:
             rest = logits_windows[1:, :, O:, :].transpose(1, 0, 2, 3).reshape(B, -1, self.vocab_size)
             out  = jnp.concatenate([out, rest], axis=1)
 
-        # Сургалтын үед Aux (Write Gates) хэрэгтэй, харин Generate үед зөвхөн Logits.
         return out[:, :N, :], aux_windows
 
 
 # МАШИН СУРГАЛТ БОЛОН GENERATE ХИЙХ ФУНКЦУУД
 
-model = CWRRTETransformer(
+model = CWRRTESTransformer(
     vocab_size        = vocab_size,
     embed_dim         = embed_dim,
     num_layers        = num_layers,
@@ -761,24 +760,19 @@ def train_step(state, batch, rng):
     dropout_rng, new_rng = jax.random.split(rng)
 
     def loss_fn(p):
-        # Моделиос Logits болон Write Gates (Aux) авна
         logits, write_gates = model.apply(
             {"params": p}, batch[:, :-1], deterministic=False, rngs={"dropout": dropout_rng}
         )
         labels = batch[:, 1:]
         logits = logits[:, :labels.shape[1], :]
 
-        # Main Text Loss (Cross Entropy)
         loss_t = optax.softmax_cross_entropy_with_integer_labels(logits, labels)
         mask   = (labels != pad_id).astype(jnp.float32)
         text_loss = jnp.sum(loss_t * mask) / (jnp.sum(mask) + 1e-6)
 
-        # SGRM Write Budget Regularization
-        # Gate нь үргэлж нээлттэй эсвэл хаалттай байхаас сэргийлнэ.
         mean_gate   = jnp.mean(write_gates)
         budget_loss = (mean_gate - sgrm_target_rate) ** 2
 
-        # Нийт алдаа
         total_loss  = text_loss + (sgrm_budget_weight * budget_loss)
         return total_loss
 
@@ -789,41 +783,50 @@ def train_step(state, batch, rng):
 @jax.jit
 def predict_step_jit(params, fixed_input):
     """Текст үүсгэхэд ашиглах хурдасгасан функц"""
-    # Aux output хэрэггүй тул [0] индексийг авна
     return model.apply({"params": params}, fixed_input, deterministic=True)[0]
 
-def generate(params, prompt, gen_len=100, temp=0.8):
-    """Өгөгдсөн эхлэлээс үргэлжлүүлэн текст зохиох"""
+def generate(params, prompt, gen_len=100, temp=0.8, ctx_len=768):
+    """
+    Өгөгдсөн эхлэлээс үргэлжлүүлэн текст зохиох
+    Sliding Window ашиглана (хэт урт контекстийг тасдах)
+    """
     token_ids = list(encode_text(prompt))
-    if token_ids[-1] == eos_id: token_ids.pop()
+    if token_ids[-1] == eos_id:
+        token_ids.pop()
 
-    max_len = sft_long_seq_len
     print(f"Текст үүсгэж байна: '{prompt}'")
 
     for _ in range(gen_len):
         curr_len = len(token_ids)
-        if curr_len >= max_len: break
+        # Хэрэв дээд хязгаарт тулбал зогсох
+        if curr_len >= sft_long_seq_len:
+            break
 
-        pad_len = max_len - curr_len
-        inp_np  = np.array(token_ids + [pad_id] * pad_len, dtype=np.int32)
+        # Sliding context logic
+        start = max(0, curr_len - ctx_len)
+        ctx   = token_ids[start:curr_len]
+
+        inp_np  = np.array(ctx, dtype=np.int32)
         inp_jax = jnp.array([inp_np])
 
-        logits = predict_step_jit(params, inp_jax)
-        next_token_logits = logits[0, curr_len - 1, :]
+        logits = predict_step_jit(params, inp_jax)                  # (1, len(ctx), V)
+        next_token_logits = logits[0, len(ctx) - 1, :]
 
-        # Тусгай токенуудыг сонгохгүй байхаар тохируулах
         next_token_logits = next_token_logits.at[pad_id].set(-1e9)
         next_token_logits = next_token_logits.at[bos_id].set(-1e9)
 
         probs     = np.exp(np.array(next_token_logits) / temp)
         probs_sum = np.sum(probs)
-        if probs_sum == 0 or np.isnan(probs_sum): probs = np.ones_like(probs) / len(probs)
-        else: probs /= probs_sum
+        if probs_sum == 0 or np.isnan(probs_sum):
+            probs = np.ones_like(probs) / len(probs)
+        else:
+            probs /= probs_sum
 
         next_id = np.random.choice(len(probs), p=probs)
         token_ids.append(next_id)
 
-        if next_id == eos_id: break
+        if next_id == eos_id:
+            break
 
     return decode_ids(token_ids)
 
@@ -861,7 +864,7 @@ def main():
 
     print("\n" + "="*60)
     print("  CWRRTES : Cross-Window Recurrent Transformer + Multi-Head Engram + SGRM")
-    print("  Feature : SGRM (Multi-Head & Safe) + RoPE + Write Budget")
+    print("  Feature : Global RoPE Cache + Absolute Pos Slice + Scan Wrapper")
     print(f"  Steps: {args.steps} | Batch: {args.batch} | SeqLen: {args.seq_len}")
     print(f"  Engram Size: {engram_vocab_size} | SGRM Heads: {sgrm_num_heads}")
     print("="*60 + "\n")
@@ -869,7 +872,6 @@ def main():
     rng = jax.random.PRNGKey(seed)
     rng, init_rng = jax.random.split(rng)
 
-    # Моделийн параметрүүдийг үүсгэх
     dummy_in  = jnp.zeros((1, args.seq_len), dtype=jnp.int32)
     variables = model.init(init_rng, dummy_in, deterministic=True)
     params    = variables["params"]
@@ -877,7 +879,6 @@ def main():
     param_count = sum(x.size for x in jax.tree_util.tree_leaves(params))
     print(f"Моделийн нийт параметр: {param_count/1e6:.2f}M")
 
-    # Optimizer тохиргоо
     optimizer = optax.chain(
         optax.clip_by_global_norm(max_grad_norm),
         optax.adamw(
@@ -896,7 +897,6 @@ def main():
 
     start_time = time.time()
 
-    # Машин сургалтын процесс
     for step in range(1, args.steps + 1):
         starts    = np.random.randint(0, len(corpus_ids) - args.seq_len - 1, args.batch)
         batch_np  = np.stack([corpus_ids[s : s + args.seq_len + 1] for s in starts])
@@ -907,7 +907,6 @@ def main():
         if step % args.loss_freq == 0:
             dt = time.time() - start_time
 
-            # Engram gate статистик
             engram_subtree, engram_path = _find_engram_subtree(state.params)
             gate_info = ""
             if engram_subtree is not None:
