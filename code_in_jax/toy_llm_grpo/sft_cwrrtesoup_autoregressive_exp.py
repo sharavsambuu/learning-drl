@@ -943,9 +943,9 @@ def _sigmoid_gate_stats(subtree):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--steps", type=int, default=sft_total_steps)
+    parser.add_argument("--steps"  , type=int, default=sft_total_steps )
     parser.add_argument("--seq-len", type=int, default=sft_long_seq_len)
-    parser.add_argument("--batch", type=int, default=sft_batch_size)
+    parser.add_argument("--batch"  , type=int, default=sft_batch_size  )
     args = parser.parse_args()
 
     print("\n" + "="*70)
