@@ -981,7 +981,7 @@ def main():
         if step % sft_sample_freq == 0:
             print("\n" + "-"*40)
             sample_text = generate(state.params, sample_prompt_text, gen_len=sample_gen_len, temp=sample_temp)
-            print(f"ГАРСАН ҮР ДҮН: {sample_text}")
+            print(f"Үүсгэсэн текст: {sample_text}")
             speak_async(sample_text, voice=tts_voice, speed=tts_speed, amp=tts_amp, enabled=tts_enabled)
             print("-"*40 + "\n")
 

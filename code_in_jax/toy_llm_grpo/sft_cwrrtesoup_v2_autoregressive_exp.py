@@ -178,7 +178,7 @@ np.random.seed(seed)
 random.seed(seed)
 
 
-# ESPEAK NON-BLOCKING TTS
+# ESPEAK NON-BLOCKING TTS 
 
 _ESPEAK_BIN = shutil.which("espeak-ng") or shutil.which("espeak")
 
@@ -191,22 +191,17 @@ def _tts_clean(s, max_chars=400):
 def speak_async(text, voice="en", speed=165, amp=120, enabled=True):
     if (not enabled) or (not _ESPEAK_BIN):
         return
-
     t = _tts_clean(text, max_chars=tts_max_chars)
     if not t: return
-
     try:
         p = subprocess.Popen(
             [_ESPEAK_BIN, "-v", voice, "-s", str(speed), "-a", str(amp), "--stdin"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
         p.stdin.write((t + "\n").encode("utf-8", errors="ignore"))
-        p.stdin.close()  
-    except Exception:
-        pass
+        p.stdin.close()
+    except Exception: pass
 
 
 # ӨГӨГДӨЛ БЭЛТГЭХ (DATA LOADING)
@@ -875,9 +870,11 @@ def main():
             print(f"Step {s:5d} | Loss: {loss:.4f} | Time: {time.time()-t0:.1f}s {gate_info}")
 
         if s % sft_sample_freq == 0:
-            text = generate(state.params, sample_prompt_text, sample_gen_len, sample_temp)
-            print(f"---\n{text}\n---")
-            speak_async(text, voice=tts_voice, speed=tts_speed, amp=tts_amp, enabled=tts_enabled)
+            print("\n" + "-"*40)
+            sample_text = generate(state.params, sample_prompt_text, sample_gen_len, sample_temp)
+            print(f"Үүсгэсэн текст: {sample_text}")
+            speak_async(sample_text, voice=tts_voice, speed=tts_speed, amp=tts_amp, enabled=tts_enabled)
+            print("\n" + "-"*40)
 
     print("Сургалт амжилттай дууслаа!")
 
