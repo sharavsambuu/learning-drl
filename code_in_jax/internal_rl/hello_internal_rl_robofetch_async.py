@@ -801,8 +801,8 @@ def main():
         print(f"[SFT] Steps: {len(obs_all)} | Batch: {SFT_BATCH_SIZE}")
         sft_train(trainer, obs_all, act_all)
 
-        with open(SFT_FLAG, "w") as f:
-            f.write("done")
+        #with open(SFT_FLAG, "w") as f:
+        #    f.write("done")
 
     trainer.set_lr(LR_RL)
 

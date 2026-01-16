@@ -1316,8 +1316,8 @@ def main():
         print(f"[SFT] Нийт алхам: {len(obs_all)} | Batch: {SFT_BATCH_SIZE}")
         sft_train(trainer, obs_all, act_all)
 
-        with open(SFT_FLAG, "w") as f:
-            f.write("done")
+        #with open(SFT_FLAG, "w") as f:
+        #    f.write("done")
 
     vec_env = create_vec_env(GROUP_SIZE, render_mode=None)
     kl_beta = float(KL_BETA)
